@@ -16,8 +16,21 @@ cargo run --bin lg -- chat "hello"
 # littleguy (offline): you said 'hello'
 ```
 
-Milestone 0 ships the offline echo model only, so it needs no key and no
-network. The owner is `$USER` unless a config file names one.
+The default model is an offline echo, so it needs no key and no network.
+The owner is `$USER` unless a config file names one.
+
+To talk to Claude, set the key and pick the model:
+
+```sh
+export ANTHROPIC_API_KEY=sk-ant-...
+cargo run --bin lg -- serve --model claude
+```
+
+The default is `claude-opus-5-5`. `--claude-model` (or `LG_CLAUDE_MODEL`)
+picks another one. The key comes from the environment only, so it never
+shows in a process list. Claude returns thinking blocks that the API wants
+back unchanged. The daemon keeps them in `claude-turns/` next to the
+database, so a restart replays them.
 
 ## Config
 
@@ -50,7 +63,7 @@ it.
 | Path | What it holds |
 |---|---|
 | `crates/littleguy-core` | Ids, config and the routing kernel. No I/O. |
-| `crates/littleguy-models` | `AgentModel` implementations. The offline model today. |
+| `crates/littleguy-models` | `AgentModel` implementations: the offline model and Claude. |
 | `crates/littleguy` | The `lg` binary: `serve` and `chat`. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |

@@ -2,6 +2,9 @@
 //!
 //! - `lg serve` runs the daemon. It owns the database and the assistant.
 //! - `lg chat <text>` sends one message to the daemon and prints the answer.
+//!
+//! `lg serve --model claude` talks to Claude. It reads the key from
+//! `ANTHROPIC_API_KEY` only, so the key never shows in a process list.
 
 mod client;
 mod daemon;
@@ -13,9 +16,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use autumn_harvest_agent::AgentModel;
 use clap::{Parser, Subcommand, ValueEnum};
 use littleguy_core::{Config, OwnerName};
-use littleguy_models::OfflineModel;
+use littleguy_models::{ClaudeModel, OfflineModel};
 
 use crate::paths::Env;
 use crate::protocol::Request;
@@ -44,7 +48,15 @@ enum Command {
 enum ModelChoice {
     /// The offline echo model. It needs no key and no network.
     Offline,
+    /// Claude over the Messages API. It needs `ANTHROPIC_API_KEY`.
+    Claude,
 }
+
+/// The variable that holds the Claude API key.
+const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// The directory of the raw Claude turns, next to the database.
+const TURN_DIR: &str = "claude-turns";
 
 #[derive(Debug, clap::Args)]
 struct ServeArgs {
@@ -57,6 +69,12 @@ struct ServeArgs {
     /// The model of the assistant.
     #[arg(long, value_enum, default_value = "offline")]
     model: ModelChoice,
+    /// The Claude model. Defaults to `claude-opus-5-5`.
+    #[arg(long, env = "LG_CLAUDE_MODEL")]
+    claude_model: Option<String>,
+    /// The Messages API endpoint. For tests.
+    #[arg(long, env = "LG_CLAUDE_ENDPOINT", hide = true)]
+    claude_endpoint: Option<String>,
     /// Append one line per offline model call to this file. For tests.
     #[arg(long, env = "LG_OFFLINE_CALL_LOG", hide = true)]
     offline_call_log: Option<PathBuf>,
@@ -85,18 +103,44 @@ fn load_config(explicit: Option<&Path>, env: &Env) -> Result<Config> {
     Ok(Config::for_owner(OwnerName::new(user)?))
 }
 
+/// The model that `args` names. `api_key` is the value of
+/// [`API_KEY_VAR`]. The raw Claude turns live next to `db`, so a restart
+/// replays each thinking block.
+fn build_model(
+    args: &ServeArgs,
+    db: &Path,
+    api_key: Option<String>,
+) -> Result<Arc<dyn AgentModel>> {
+    Ok(match args.model {
+        ModelChoice::Offline => Arc::new(
+            args.offline_call_log
+                .clone()
+                .map_or_else(OfflineModel::new, OfflineModel::with_call_log),
+        ),
+        ModelChoice::Claude => {
+            let key = api_key
+                .filter(|key| !key.trim().is_empty())
+                .with_context(|| format!("set {API_KEY_VAR} to run --model claude"))?;
+            let turns = db.parent().unwrap_or_else(|| Path::new(".")).join(TURN_DIR);
+            let mut model = ClaudeModel::new(key).turn_dir(turns);
+            if let Some(name) = &args.claude_model {
+                model = model.model(name);
+            }
+            if let Some(endpoint) = &args.claude_endpoint {
+                model = model.endpoint(endpoint);
+            }
+            Arc::new(model)
+        }
+    })
+}
+
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let config = load_config(args.config.as_deref(), env)?;
-    let db = match args.db {
+    let db = match args.db.clone() {
         Some(db) => db,
         None => env.db()?,
     };
-    let model = match args.model {
-        ModelChoice::Offline => Arc::new(
-            args.offline_call_log
-                .map_or_else(OfflineModel::new, OfflineModel::with_call_log),
-        ),
-    };
+    let model = build_model(&args, &db, std::env::var(API_KEY_VAR).ok())?;
     let uid = rustix::process::getuid().as_raw();
     let daemon = daemon::Daemon::open(&db, &config, model, uid)?;
     let listener = daemon::bind(&socket).await?;
@@ -158,6 +202,52 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn serve_args(words: &[&str]) -> ServeArgs {
+        let cli = Cli::try_parse_from(words).unwrap();
+        match cli.command {
+            Command::Serve(args) => args,
+            Command::Chat(_) => panic!("not serve"),
+        }
+    }
+
+    #[test]
+    fn the_claude_model_needs_a_key() {
+        let args = serve_args(&["lg", "serve", "--model", "claude"]);
+        let db = Path::new("/d/lg.db");
+        let error = build_model(&args, db, None).err().unwrap();
+        assert!(error.to_string().contains(API_KEY_VAR));
+        assert!(build_model(&args, db, Some(String::from("  "))).is_err());
+    }
+
+    #[test]
+    fn the_claude_model_takes_its_name_and_endpoint() {
+        let args = serve_args(&[
+            "lg",
+            "serve",
+            "--model",
+            "claude",
+            "--claude-model",
+            "claude-sonnet-5-5",
+            "--claude-endpoint",
+            "http://127.0.0.1:1/v1/messages",
+        ]);
+        let model = build_model(&args, Path::new("/d/lg.db"), Some(String::from("k"))).unwrap();
+        assert_eq!(model.model_id(), Some("claude-sonnet-5-5"));
+        let args = serve_args(&["lg", "serve", "--model", "claude"]);
+        let model = build_model(&args, Path::new("lg.db"), Some(String::from("k"))).unwrap();
+        assert_eq!(
+            model.model_id(),
+            Some("claude-opus-5-5+effort=high+fallbacks=default")
+        );
+    }
+
+    #[test]
+    fn the_offline_model_is_the_default() {
+        let args = serve_args(&["lg", "serve"]);
+        let model = build_model(&args, Path::new("/d/lg.db"), None).unwrap();
+        assert_eq!(model.model_id(), Some("littleguy-offline-1"));
+    }
 
     #[test]
     fn an_explicit_config_wins() {

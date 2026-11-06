@@ -1,0 +1,116 @@
+//! `lg chat`: send one message to the daemon and print the answer.
+
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, bail};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
+
+use crate::protocol::{Request, Response};
+
+/// A fresh message id: the clock in nanoseconds and the process id.
+#[must_use]
+pub fn fresh_message_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!("cli-{nanos}-{}", std::process::id())
+}
+
+/// Sends `request` to the daemon on `socket` and returns its answer.
+///
+/// # Errors
+///
+/// Returns an error when no daemon answers, or the answer is not valid.
+pub async fn send(socket: &Path, request: &Request) -> Result<Response> {
+    let stream = UnixStream::connect(socket).await.with_context(|| {
+        format!(
+            "no daemon answers on {}. Start one with `lg serve`",
+            socket.display()
+        )
+    })?;
+    let (read, mut write) = stream.into_split();
+    let mut line = serde_json::to_vec(request)?;
+    line.push(b'\n');
+    write
+        .write_all(&line)
+        .await
+        .context("sending the message")?;
+    let mut answer = String::new();
+    BufReader::new(read)
+        .read_line(&mut answer)
+        .await
+        .context("reading the answer")?;
+    if answer.is_empty() {
+        bail!("the daemon closed the connection without an answer");
+    }
+    serde_json::from_str(&answer).context("the answer is not valid")
+}
+
+/// The text that `lg chat` prints, and whether the command succeeded.
+#[must_use]
+pub fn render(response: &Response) -> (String, bool) {
+    match response {
+        Response::Reply { text } => (text.clone(), true),
+        Response::Duplicate { last_answer } => (
+            format!(
+                "(already delivered) {}",
+                last_answer.as_deref().unwrap_or("no answer yet")
+            ),
+            true,
+        ),
+        Response::NoAnswer { reason } => (format!("no answer: {reason}"), false),
+        Response::Pairing => (String::from("this sender is not paired"), false),
+        Response::Dropped => (String::from("the daemon dropped the message"), false),
+        Response::Error { message } => (format!("error: {message}"), false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_ids_differ_and_are_valid() {
+        let a = fresh_message_id();
+        let b = fresh_message_id();
+        assert_ne!(a, b);
+        assert!(littleguy_core::MessageId::new(a).is_ok());
+    }
+
+    #[test]
+    fn only_an_answer_or_a_duplicate_succeeds() {
+        let reply = Response::Reply {
+            text: String::from("hi"),
+        };
+        assert_eq!(render(&reply), (String::from("hi"), true));
+        assert!(render(&Response::Duplicate { last_answer: None }).1);
+        assert!(!render(&Response::Dropped).1);
+        assert!(!render(&Response::Pairing).1);
+        assert!(
+            !render(&Response::NoAnswer {
+                reason: String::from("x")
+            })
+            .1
+        );
+        assert!(
+            !render(&Response::Error {
+                message: String::from("x")
+            })
+            .1
+        );
+    }
+
+    #[tokio::test]
+    async fn no_daemon_names_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("none.sock");
+        let request = Request {
+            message_id: String::from("m"),
+            text: String::from("t"),
+        };
+        let error = send(&socket, &request).await.unwrap_err().to_string();
+        assert!(error.contains("none.sock"), "{error}");
+    }
+}

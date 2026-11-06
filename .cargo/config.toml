@@ -1,0 +1,4 @@
+[alias]
+# Repository automation. Every CI gate runs through it, for example
+# `cargo xtask ci`. See `docs/xtask.md`.
+xtask = ["run", "--quiet", "--package", "xtask", "--"]

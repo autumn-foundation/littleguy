@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/littleguy",
+    "crates/littleguy-channels",
     "crates/littleguy-core",
     "crates/littleguy-models",
     "xtask",
@@ -15,6 +16,7 @@ license = "Apache-2.0"
 repository = "https://github.com/autumn-foundation/littleguy"
 
 [workspace.dependencies]
+littleguy-channels = { version = "0.1.0", path = "crates/littleguy-channels" }
 littleguy-core = { version = "0.1.0", path = "crates/littleguy-core" }
 littleguy-models = { version = "0.1.0", path = "crates/littleguy-models" }
 autumn-harvest-agent = { version = "0.10.0", features = ["sqlite"] }

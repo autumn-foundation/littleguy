@@ -5,10 +5,12 @@
 
 pub mod config;
 pub mod ids;
+pub mod pairing;
 pub mod route;
 
-pub use config::{Config, ConfigError};
+pub use config::{Config, ConfigError, DiscordConfig, discord_sender};
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
+pub use pairing::{PairingCode, Pending, PendingPairings};
 pub use route::{ChannelRule, Decision, Inbound, Route, Routing, decide, route};
 
 /// The agent kind of the assistant that the owner talks to.

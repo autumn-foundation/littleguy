@@ -1,0 +1,4 @@
+msrv = "1.97.0"
+# `expect_used` and `unwrap_used` gate non-test code only.
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true

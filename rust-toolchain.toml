@@ -1,0 +1,6 @@
+# The pinned Rust toolchain. It matches autumn-harvest, so both repos lint
+# with the same release. A new stable release moves CI only when this file
+# changes.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

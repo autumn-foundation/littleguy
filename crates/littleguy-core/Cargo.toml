@@ -1,0 +1,20 @@
+[package]
+name = "littleguy-core"
+description = "Configuration, ids and the routing kernel of littleguy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+autumn-harvest-agent = { version = "0.10.0", default-features = false }
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

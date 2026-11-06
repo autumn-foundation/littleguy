@@ -2,6 +2,11 @@
 //!
 //! - `lg serve` runs the daemon. It owns the database and the assistant.
 //! - `lg chat <text>` sends one message to the daemon and prints the answer.
+//! - `lg pair <code>`, `lg pairs` and `lg unpair <sender>` manage who may
+//!   talk to the assistant on Discord.
+//!
+//! With `DISCORD_BOT_TOKEN` set, `lg serve` also answers Discord direct
+//! messages. The token comes from the environment only.
 //!
 //! `lg serve --model claude`, `openai` or `openrouter` talks to a hosted
 //! model. Each reads its key from the environment only, so the key never
@@ -9,6 +14,7 @@
 
 mod client;
 mod daemon;
+mod pairs;
 mod paths;
 mod protocol;
 
@@ -19,6 +25,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use autumn_harvest_agent::AgentModel;
 use clap::{Parser, Subcommand, ValueEnum};
+use littleguy_channels::{DiscordRest, discord};
 use littleguy_core::{Config, OwnerName};
 use littleguy_models::{ClaudeModel, OfflineModel, OpenAiModel, Provider};
 
@@ -42,6 +49,18 @@ enum Command {
     Serve(ServeArgs),
     /// Send one message and print the answer.
     Chat(ChatArgs),
+    /// Let the stranger who got `code` talk to the assistant.
+    Pair {
+        /// The code from the pairing message, such as `ABCD-1234`.
+        code: String,
+    },
+    /// List the senders that may talk to the assistant.
+    Pairs,
+    /// Take a paired sender off its channel.
+    Unpair {
+        /// The sender id, such as `discord:123456789012345678`.
+        sender: String,
+    },
 }
 
 /// The models that `lg serve` can run.
@@ -62,6 +81,9 @@ enum ModelChoice {
 
 /// The variable that holds the Claude API key.
 const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// The variable that holds the Discord bot token.
+const DISCORD_TOKEN_VAR: &str = "DISCORD_BOT_TOKEN";
 
 /// The directory of the raw Claude turns, next to the database.
 const TURN_DIR: &str = "claude-turns";
@@ -89,6 +111,12 @@ struct ServeArgs {
     /// The Messages API endpoint. For tests.
     #[arg(long, env = "LG_CLAUDE_ENDPOINT", hide = true)]
     claude_endpoint: Option<String>,
+    /// The Discord REST base URL. For tests.
+    #[arg(long, env = "LG_DISCORD_API", hide = true)]
+    discord_api: Option<String>,
+    /// The Discord gateway URL. For tests.
+    #[arg(long, env = "LG_DISCORD_GATEWAY", hide = true)]
+    discord_gateway: Option<String>,
     /// Append one line per offline model call to this file. For tests.
     #[arg(long, env = "LG_OFFLINE_CALL_LOG", hide = true)]
     offline_call_log: Option<PathBuf>,
@@ -167,6 +195,26 @@ fn build_model(
     })
 }
 
+/// The Discord link, when `key` holds a bot token.
+fn discord_link(
+    args: &ServeArgs,
+    key: impl Fn(&str) -> Option<String>,
+) -> Option<daemon::DiscordLink> {
+    let token = key(DISCORD_TOKEN_VAR).filter(|token| !token.trim().is_empty())?;
+    let base = args
+        .discord_api
+        .clone()
+        .unwrap_or_else(|| String::from(discord::API_BASE));
+    Some(daemon::DiscordLink {
+        rest: DiscordRest::new(base, token.clone()),
+        token,
+        gateway_url: args
+            .discord_gateway
+            .clone()
+            .unwrap_or_else(|| String::from(discord::GATEWAY)),
+    })
+}
+
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let config = load_config(args.config.as_deref(), env)?;
     let db = match args.db.clone() {
@@ -174,8 +222,9 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         None => env.db()?,
     };
     let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
+    let link = discord_link(&args, |var| std::env::var(var).ok());
     let uid = rustix::process::getuid().as_raw();
-    let daemon = daemon::Daemon::open(&db, &config, model, uid)?;
+    let daemon = daemon::Daemon::open(&db, &config, model, uid, link.is_some())?;
     let listener = daemon::bind(&socket).await?;
     let stop = async {
         // A failed signal handler leaves only a kill to stop the daemon.
@@ -183,19 +232,16 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
             std::future::pending::<()>().await;
         }
     };
-    daemon::run(daemon, listener, stop).await?;
+    daemon::run(daemon, listener, link, stop).await?;
     // The socket file goes with the daemon. A crash leaves it, and the next
     // start replaces it.
     let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 
-async fn chat(socket: &Path, args: ChatArgs) -> Result<bool> {
-    let request = Request {
-        message_id: args.message_id.unwrap_or_else(client::fresh_message_id),
-        text: args.text,
-    };
-    let response = client::send(socket, &request).await?;
+/// Sends one request and prints the answer.
+async fn ask(socket: &Path, request: &Request) -> Result<bool> {
+    let response = client::send(socket, request).await?;
     let (text, ok) = client::render(&response);
     println!("{text}");
     Ok(ok)
@@ -209,7 +255,16 @@ async fn run(cli: Cli) -> Result<bool> {
     };
     match cli.command {
         Command::Serve(args) => serve(socket, args, &env).await.map(|()| true),
-        Command::Chat(args) => chat(&socket, args).await,
+        Command::Chat(args) => {
+            let request = Request::Chat {
+                message_id: args.message_id.unwrap_or_else(client::fresh_message_id),
+                text: args.text,
+            };
+            ask(&socket, &request).await
+        }
+        Command::Pair { code } => ask(&socket, &Request::Pair { code }).await,
+        Command::Pairs => ask(&socket, &Request::Pairs).await,
+        Command::Unpair { sender } => ask(&socket, &Request::Unpair { sender }).await,
     }
 }
 
@@ -240,7 +295,7 @@ mod tests {
         let cli = Cli::try_parse_from(words).unwrap();
         match cli.command {
             Command::Serve(args) => args,
-            Command::Chat(_) => panic!("not serve"),
+            _ => panic!("not serve"),
         }
     }
 
@@ -312,6 +367,39 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("--model-name"));
+    }
+
+    #[test]
+    fn discord_runs_only_with_a_token() {
+        let args = serve_args(&["lg", "serve"]);
+        assert!(discord_link(&args, |_| None).is_none());
+        assert!(discord_link(&args, |_| Some(String::from(" "))).is_none());
+        let link = discord_link(&args, |var| {
+            (var == DISCORD_TOKEN_VAR).then(|| String::from("secret-token"))
+        })
+        .unwrap();
+        assert_eq!(link.gateway_url, discord::GATEWAY);
+        assert!(!format!("{link:?}").contains("secret-token"));
+        let args = serve_args(&[
+            "lg",
+            "serve",
+            "--discord-api",
+            "http://127.0.0.1:1/api",
+            "--discord-gateway",
+            "ws://127.0.0.1:1",
+        ]);
+        let link = discord_link(&args, |_| Some(String::from("t"))).unwrap();
+        assert_eq!(link.gateway_url, "ws://127.0.0.1:1");
+    }
+
+    #[test]
+    fn the_cli_parses_the_pairing_commands() {
+        let cli = Cli::try_parse_from(["lg", "pair", "ABCD-1234"]).unwrap();
+        assert!(matches!(cli.command, Command::Pair { ref code } if code == "ABCD-1234"));
+        let cli = Cli::try_parse_from(["lg", "pairs"]).unwrap();
+        assert!(matches!(cli.command, Command::Pairs));
+        let cli = Cli::try_parse_from(["lg", "unpair", "discord:1"]).unwrap();
+        assert!(matches!(cli.command, Command::Unpair { ref sender } if sender == "discord:1"));
     }
 
     #[test]

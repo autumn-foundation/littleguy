@@ -98,7 +98,7 @@ macro_rules! id_type {
 }
 
 id_type!(
-    /// A channel, for example `cli` or `telegram`.
+    /// A channel, for example `cli` or `discord`.
     ChannelId,
     "channel id"
 );

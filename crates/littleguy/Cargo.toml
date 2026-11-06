@@ -16,6 +16,8 @@ anyhow = { workspace = true }
 autumn-harvest-agent = { workspace = true }
 autumn-harvest-sqlite = { workspace = true }
 clap = { workspace = true }
+getrandom = "0.4"
+littleguy-channels = { workspace = true }
 littleguy-core = { workspace = true }
 littleguy-models = { workspace = true }
 rustix = { workspace = true }
@@ -27,6 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+littleguy-channels = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 
 [lints]

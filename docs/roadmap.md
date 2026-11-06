@@ -7,7 +7,8 @@ use.
 | Milestone | Delivers | Status |
 |---|---|---|
 | M0 | `lg serve` and `lg chat` on SQLite, the offline model, the routing kernel and its proof, CI | Done (#1) |
-| M0.5 | A Claude model, ported from `examples/autoresearch/src/claude.rs` in autumn-harvest, with thinking-block replay | This PR |
+| M0.5 | A Claude model, ported from `examples/autoresearch/src/claude.rs` in autumn-harvest, with thinking-block replay | Done (#2) |
+| M0.6 | OpenAI and OpenRouter over one Chat Completions adapter | This PR |
 | M1 | Telegram over long polling, pairing codes, approve and deny buttons | Planned |
 | M2 | Durable memory, nightly consolidation, a weekday morning brief | Planned |
 | M3 | Tools: web fetch and search, workspace files, sandboxed shell, MCP client, flow rules | Planned |

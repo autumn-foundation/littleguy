@@ -27,7 +27,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use autumn_harvest_agent::{
     AgentError, AgentModel, BoxFuture, ChatRequest, ChatResponse, ChatRole, ContentPart, ErrorKind,
@@ -48,10 +47,7 @@ pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 pub const DEFAULT_MAX_TOKENS: u32 = 16_000;
 /// The effort of the default model.
 pub const EFFORT: &str = "high";
-/// How long one request may take, thinking included.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
-/// The most bytes of one response body that the model reads.
-pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+pub use crate::http::{MAX_BODY_BYTES, REQUEST_TIMEOUT, error_kind};
 
 /// A Claude model over the Messages API.
 #[derive(Clone)]
@@ -81,15 +77,7 @@ impl ClaudeModel {
     /// memory only.
     #[must_use]
     pub fn new(api_key: impl Into<String>) -> Self {
-        let client = {
-            // Reqwest panics without a provider. An `Err` means that one is installed.
-            let _ = rustls::crypto::ring::default_provider().install_default();
-            reqwest::Client::builder()
-        }
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+        let client = crate::http::client();
         Self {
             api_key: api_key.into(),
             endpoint: ENDPOINT.into(),
@@ -123,26 +111,6 @@ impl ClaudeModel {
         self.turns.dir = Some(dir.into());
         self
     }
-
-    /// Read at most [`MAX_BODY_BYTES`] of `response`.
-    async fn body(response: reqwest::Response) -> Result<String, AgentError> {
-        let mut response = response;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| AgentError::new(ErrorKind::Transport, format!("response lost: {e}")))?
-        {
-            if bytes.len() + chunk.len() > MAX_BODY_BYTES {
-                return Err(AgentError::new(
-                    ErrorKind::Decode,
-                    format!("the response is over {MAX_BODY_BYTES} bytes"),
-                ));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
-    }
 }
 
 /// The id of `model` with its settings. A response cache keys on it.
@@ -174,7 +142,7 @@ impl ClaudeModel {
             return Ok(response);
         }
         // The body names the error. It holds no secret: the key is a header.
-        let text = Self::body(response).await?;
+        let text = crate::http::read_body(response).await?;
         let detail: String = text.chars().take(500).collect();
         Err(AgentError::new(
             error_kind(status),
@@ -201,7 +169,7 @@ impl AgentModel for ClaudeModel {
             let body = request_body(request, &self.model, |before, visible| {
                 self.turns.get(before, visible)
             });
-            let text = Self::body(self.send(&body).await?).await?;
+            let text = crate::http::read_body(self.send(&body).await?).await?;
             let body: Value = serde_json::from_str(&text)
                 .map_err(|e| AgentError::new(ErrorKind::Decode, format!("not JSON: {e}")))?;
             self.finish(request, &body)
@@ -789,18 +757,6 @@ pub fn parse_response(body: &Value) -> Result<ChatResponse, AgentError> {
         stop_reason,
         usage,
     })
-}
-
-/// The error kind of an HTTP status. A timeout, a conflict, a rate limit and
-/// a server fault retry, as the SDKs retry them.
-#[must_use]
-pub const fn error_kind(status: u16) -> ErrorKind {
-    match status {
-        429 => ErrorKind::RateLimited,
-        401 | 403 => ErrorKind::Authentication,
-        408 | 409 | 500..=599 => ErrorKind::Unavailable,
-        _ => ErrorKind::Provider,
-    }
 }
 
 #[cfg(test)]

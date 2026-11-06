@@ -3,8 +3,9 @@
 //! - `lg serve` runs the daemon. It owns the database and the assistant.
 //! - `lg chat <text>` sends one message to the daemon and prints the answer.
 //!
-//! `lg serve --model claude` talks to Claude. It reads the key from
-//! `ANTHROPIC_API_KEY` only, so the key never shows in a process list.
+//! `lg serve --model claude`, `openai` or `openrouter` talks to a hosted
+//! model. Each reads its key from the environment only, so the key never
+//! shows in a process list.
 
 mod client;
 mod daemon;
@@ -19,7 +20,7 @@ use anyhow::{Context, Result};
 use autumn_harvest_agent::AgentModel;
 use clap::{Parser, Subcommand, ValueEnum};
 use littleguy_core::{Config, OwnerName};
-use littleguy_models::{ClaudeModel, OfflineModel};
+use littleguy_models::{ClaudeModel, OfflineModel, OpenAiModel, Provider};
 
 use crate::paths::Env;
 use crate::protocol::Request;
@@ -50,6 +51,13 @@ enum ModelChoice {
     Offline,
     /// Claude over the Messages API. It needs `ANTHROPIC_API_KEY`.
     Claude,
+    /// OpenAI, or any server that speaks its API. It needs `OPENAI_API_KEY`
+    /// and `--model-name`.
+    #[value(name = "openai")]
+    OpenAi,
+    /// OpenRouter. It needs `OPENROUTER_API_KEY` and `--model-name`.
+    #[value(name = "openrouter")]
+    OpenRouter,
 }
 
 /// The variable that holds the Claude API key.
@@ -69,9 +77,15 @@ struct ServeArgs {
     /// The model of the assistant.
     #[arg(long, value_enum, default_value = "offline")]
     model: ModelChoice,
-    /// The Claude model. Defaults to `claude-opus-5-5`.
-    #[arg(long, env = "LG_CLAUDE_MODEL")]
-    claude_model: Option<String>,
+    /// The model to ask. Claude defaults to `claude-opus-5-5`. OpenAI and
+    /// OpenRouter have no default. OpenRouter names take a vendor prefix,
+    /// such as `<vendor>/<model>`.
+    #[arg(long, env = "LG_MODEL_NAME", alias = "claude-model")]
+    model_name: Option<String>,
+    /// The base URL of an OpenAI-compatible server, such as a local one.
+    /// Defaults to the provider's own.
+    #[arg(long, env = "LG_BASE_URL")]
+    base_url: Option<String>,
     /// The Messages API endpoint. For tests.
     #[arg(long, env = "LG_CLAUDE_ENDPOINT", hide = true)]
     claude_endpoint: Option<String>,
@@ -103,14 +117,19 @@ fn load_config(explicit: Option<&Path>, env: &Env) -> Result<Config> {
     Ok(Config::for_owner(OwnerName::new(user)?))
 }
 
-/// The model that `args` names. `api_key` is the value of
-/// [`API_KEY_VAR`]. The raw Claude turns live next to `db`, so a restart
-/// replays each thinking block.
+/// The model that `args` names. `key` reads one environment variable.
+/// The raw Claude turns live next to `db`, so a restart replays each
+/// thinking block.
 fn build_model(
     args: &ServeArgs,
     db: &Path,
-    api_key: Option<String>,
+    key: impl Fn(&str) -> Option<String>,
 ) -> Result<Arc<dyn AgentModel>> {
+    let key_of = |var: &str, model: &str| {
+        key(var)
+            .filter(|key| !key.trim().is_empty())
+            .with_context(|| format!("set {var} to run --model {model}"))
+    };
     Ok(match args.model {
         ModelChoice::Offline => Arc::new(
             args.offline_call_log
@@ -118,16 +137,30 @@ fn build_model(
                 .map_or_else(OfflineModel::new, OfflineModel::with_call_log),
         ),
         ModelChoice::Claude => {
-            let key = api_key
-                .filter(|key| !key.trim().is_empty())
-                .with_context(|| format!("set {API_KEY_VAR} to run --model claude"))?;
             let turns = db.parent().unwrap_or_else(|| Path::new(".")).join(TURN_DIR);
-            let mut model = ClaudeModel::new(key).turn_dir(turns);
-            if let Some(name) = &args.claude_model {
+            let mut model = ClaudeModel::new(key_of(API_KEY_VAR, "claude")?).turn_dir(turns);
+            if let Some(name) = &args.model_name {
                 model = model.model(name);
             }
             if let Some(endpoint) = &args.claude_endpoint {
                 model = model.endpoint(endpoint);
+            }
+            Arc::new(model)
+        }
+        ModelChoice::OpenAi | ModelChoice::OpenRouter => {
+            let (provider, flag) = if args.model == ModelChoice::OpenAi {
+                (Provider::OpenAi, "openai")
+            } else {
+                (Provider::OpenRouter, "openrouter")
+            };
+            let api_key = key_of(provider.key_var(), flag)?;
+            let name = args
+                .model_name
+                .as_deref()
+                .with_context(|| format!("--model {flag} needs --model-name"))?;
+            let mut model = OpenAiModel::new(provider, api_key, name);
+            if let Some(base_url) = &args.base_url {
+                model = model.base_url(base_url);
             }
             Arc::new(model)
         }
@@ -140,7 +173,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         Some(db) => db,
         None => env.db()?,
     };
-    let model = build_model(&args, &db, std::env::var(API_KEY_VAR).ok())?;
+    let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
     let uid = rustix::process::getuid().as_raw();
     let daemon = daemon::Daemon::open(&db, &config, model, uid)?;
     let listener = daemon::bind(&socket).await?;
@@ -215,9 +248,9 @@ mod tests {
     fn the_claude_model_needs_a_key() {
         let args = serve_args(&["lg", "serve", "--model", "claude"]);
         let db = Path::new("/d/lg.db");
-        let error = build_model(&args, db, None).err().unwrap();
+        let error = build_model(&args, db, |_| None).err().unwrap();
         assert!(error.to_string().contains(API_KEY_VAR));
-        assert!(build_model(&args, db, Some(String::from("  "))).is_err());
+        assert!(build_model(&args, db, |_| Some(String::from("  "))).is_err());
     }
 
     #[test]
@@ -227,15 +260,15 @@ mod tests {
             "serve",
             "--model",
             "claude",
-            "--claude-model",
+            "--model-name",
             "claude-sonnet-5-5",
             "--claude-endpoint",
             "http://127.0.0.1:1/v1/messages",
         ]);
-        let model = build_model(&args, Path::new("/d/lg.db"), Some(String::from("k"))).unwrap();
+        let model = build_model(&args, Path::new("/d/lg.db"), |_| Some(String::from("k"))).unwrap();
         assert_eq!(model.model_id(), Some("claude-sonnet-5-5"));
         let args = serve_args(&["lg", "serve", "--model", "claude"]);
-        let model = build_model(&args, Path::new("lg.db"), Some(String::from("k"))).unwrap();
+        let model = build_model(&args, Path::new("lg.db"), |_| Some(String::from("k"))).unwrap();
         assert_eq!(
             model.model_id(),
             Some("claude-opus-5-5+effort=high+fallbacks=default")
@@ -243,9 +276,48 @@ mod tests {
     }
 
     #[test]
+    fn the_old_claude_model_flag_still_works() {
+        let args = serve_args(&["lg", "serve", "--claude-model", "x"]);
+        assert_eq!(args.model_name.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn openai_and_openrouter_read_their_own_key_and_need_a_name() {
+        let only =
+            |wanted: &'static str| move |var: &str| (var == wanted).then(|| String::from("k"));
+        let db = Path::new("/d/lg.db");
+        let args = serve_args(&["lg", "serve", "--model", "openai", "--model-name", "gpt-x"]);
+        let model = build_model(&args, db, only("OPENAI_API_KEY")).unwrap();
+        assert_eq!(model.model_id(), Some("openai:gpt-x"));
+        let error = build_model(&args, db, only("OPENROUTER_API_KEY"))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("OPENAI_API_KEY"));
+
+        let args = serve_args(&[
+            "lg",
+            "serve",
+            "--model",
+            "openrouter",
+            "--model-name",
+            "a/b",
+            "--base-url",
+            "http://127.0.0.1:1/v1",
+        ]);
+        let model = build_model(&args, db, only("OPENROUTER_API_KEY")).unwrap();
+        assert_eq!(model.model_id(), Some("openrouter:a/b"));
+
+        let nameless = serve_args(&["lg", "serve", "--model", "openrouter"]);
+        let error = build_model(&nameless, db, only("OPENROUTER_API_KEY"))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("--model-name"));
+    }
+
+    #[test]
     fn the_offline_model_is_the_default() {
         let args = serve_args(&["lg", "serve"]);
-        let model = build_model(&args, Path::new("/d/lg.db"), None).unwrap();
+        let model = build_model(&args, Path::new("/d/lg.db"), |_| None).unwrap();
         assert_eq!(model.model_id(), Some("littleguy-offline-1"));
     }
 

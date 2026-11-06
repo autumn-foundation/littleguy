@@ -26,11 +26,25 @@ export ANTHROPIC_API_KEY=sk-ant-...
 cargo run --bin lg -- serve --model claude
 ```
 
-The default is `claude-opus-5-5`. `--claude-model` (or `LG_CLAUDE_MODEL`)
+The default is `claude-opus-5-5`. `--model-name` (or `LG_MODEL_NAME`)
 picks another one. The key comes from the environment only, so it never
 shows in a process list. Claude returns thinking blocks that the API wants
 back unchanged. The daemon keeps them in `claude-turns/` next to the
 database, so a restart replays them.
+
+OpenAI and OpenRouter share one adapter over the Chat Completions API.
+Each needs its key and a model name:
+
+```sh
+export OPENAI_API_KEY=sk-...
+cargo run --bin lg -- serve --model openai --model-name <an OpenAI model>
+
+export OPENROUTER_API_KEY=sk-or-...
+cargo run --bin lg -- serve --model openrouter --model-name <vendor>/<model>
+```
+
+`--base-url` (or `LG_BASE_URL`) points `--model openai` at any other server
+that speaks the same API, such as a local one.
 
 ## Config
 
@@ -63,7 +77,7 @@ it.
 | Path | What it holds |
 |---|---|
 | `crates/littleguy-core` | Ids, config and the routing kernel. No I/O. |
-| `crates/littleguy-models` | `AgentModel` implementations: the offline model and Claude. |
+| `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
 | `crates/littleguy` | The `lg` binary: `serve` and `chat`. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |

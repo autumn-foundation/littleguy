@@ -1,4 +1,4 @@
-//! `ClaudeModel` against a local HTTP server that plays the Messages API.
+//! The remote models against a local HTTP server that plays their API.
 //!
 //! The server answers each connection with the next canned response and
 //! records the request. So the tests check the wire, with no key and no
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use autumn_harvest_agent::{
     AgentModel, ChatMessage, ChatRequest, ChatRole, ContentPart, ErrorKind, StopReason,
 };
-use littleguy_models::ClaudeModel;
+use littleguy_models::{ClaudeModel, OpenAiModel, Provider};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -296,4 +296,87 @@ fn the_model_id_names_the_settings() {
     );
     let other = ClaudeModel::new("sk-test").model("claude-sonnet-5-5");
     assert_eq!(other.model_id(), Some("claude-sonnet-5-5"));
+}
+
+fn completion(text: &str) -> Value {
+    json!({
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}],
+        "usage": {"prompt_tokens": 9, "completion_tokens": 2},
+    })
+}
+
+#[tokio::test]
+async fn openai_sends_a_bearer_key_and_reads_the_reply() -> TestResult {
+    let (endpoint, log) = serve(vec![Canned::json(200, &completion("hello"))]).await?;
+    let base = endpoint.trim_end_matches("/messages").to_owned();
+    let model = OpenAiModel::new(Provider::OpenAi, "sk-openai", "gpt-test").base_url(base);
+    let reply = model.chat(&ask("hi")).await?;
+    assert_eq!(reply.content, vec![ContentPart::Text("hello".into())]);
+    assert_eq!(reply.usage.input_tokens, 9);
+    let requests = seen(&log)?;
+    let head = &requests[0];
+    assert!(
+        head.head.starts_with("POST /v1/chat/completions "),
+        "{}",
+        head.head
+    );
+    assert_eq!(
+        head.header("authorization").as_deref(),
+        Some("Bearer sk-openai")
+    );
+    assert_eq!(head.header("x-title"), None);
+    assert_eq!(head.body["model"], "gpt-test");
+    assert_eq!(head.body["messages"][0]["role"], "system");
+    Ok(())
+}
+
+#[tokio::test]
+async fn openrouter_names_the_app_and_maps_an_upstream_error() -> TestResult {
+    let upstream = json!({"error": {"code": 503, "message": "no provider"}});
+    let (endpoint, log) = serve(vec![
+        Canned::json(200, &upstream),
+        Canned::json(402, &json!({"error": {"message": "no credits"}})),
+    ])
+    .await?;
+    let base = endpoint.trim_end_matches("/messages").to_owned();
+    let model = OpenAiModel::new(Provider::OpenRouter, "sk-or", "a/b").base_url(base);
+    let Err(failure) = model.chat(&ask("hi")).await else {
+        return Err("an error body gave a reply".into());
+    };
+    assert_eq!(failure.kind(), ErrorKind::Unavailable);
+    let Err(failure) = model.chat(&ask("hi")).await else {
+        return Err("an error status gave a reply".into());
+    };
+    assert_eq!(failure.kind(), ErrorKind::Provider);
+    assert!(failure.message().contains("no credits"));
+    assert_eq!(
+        seen(&log)?[0].header("x-title").as_deref(),
+        Some("littleguy")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn openai_with_no_server_or_a_bad_body_fails() -> TestResult {
+    let (endpoint, _) = serve(vec![Canned {
+        status: 200,
+        content_type: "text/plain",
+        body: "not json".into(),
+    }])
+    .await?;
+    let base = endpoint.trim_end_matches("/messages").to_owned();
+    let model = OpenAiModel::new(Provider::OpenAi, "k", "m").base_url(base);
+    let Err(failure) = model.chat(&ask("hi")).await else {
+        return Err("text gave a reply".into());
+    };
+    assert_eq!(failure.kind(), ErrorKind::Decode);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let dead = format!("http://{}/v1", listener.local_addr()?);
+    drop(listener);
+    let model = OpenAiModel::new(Provider::OpenAi, "k", "m").base_url(dead);
+    let Err(failure) = model.chat(&ask("hi")).await else {
+        return Err("no server gave a reply".into());
+    };
+    assert_eq!(failure.kind(), ErrorKind::Transport);
+    Ok(())
 }

@@ -4,29 +4,45 @@
 //! lock file next to the database, so a second daemon fails to open it. The
 //! kernel drops the lock when the holder dies, so a crash strands nothing.
 //!
-//! One task owns the runtime. The accept loop hands each request to it over
-//! a channel, so ops run one at a time, in arrival order. A tick drives the
-//! assistant once a second, so a durable timer fires without a message.
+//! One task owns the runtime. The socket and the Discord channel hand each
+//! message to it over a channel, so ops run one at a time, in arrival order.
+//! A tick drives the assistant once a second, so a durable timer fires
+//! without a message.
+//!
+//! A Discord reply goes out once. The message id is the idempotency key of
+//! its op, so a message that arrives twice runs once. The pairing store
+//! keeps the last message whose reply went out. After a reconnect, the
+//! daemon reads the history after that cursor, so a message sent while it
+//! was down still gets its answer.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use autumn_harvest_agent::{AgentHarness, AgentId, AgentModel, AgentOp, AgentProfile, sqlite};
 use autumn_harvest_sqlite::SqliteRuntime;
+use littleguy_channels::discord::{DiscordRest, DmMessage, GatewayEvent, run_gateway};
 use littleguy_core::{
-    ASSISTANT_KIND, ChannelId, ChannelRule, Config, Inbound, MessageId, Route, Routing, SenderId,
-    route,
+    ASSISTANT_KIND, ChannelId, ChannelRule, Config, Inbound, MessageId, PairingCode, Pending,
+    PendingPairings, Route, Routing, SenderId, discord_sender, pairing::PAIRING_TTL_SECS, route,
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::protocol::{MAX_REQUEST_BYTES, Request, Response};
+use crate::pairs::{Entry, PairStore};
+use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response};
 
 /// The channel id of the local socket.
 pub const CLI_CHANNEL: &str = "cli";
+
+/// The channel id of Discord.
+pub const DISCORD_CHANNEL: &str = "discord";
+
+/// The prefix of the message id of a Discord message.
+const DISCORD_MESSAGE_PREFIX: &str = "discord:";
 
 /// How often the daemon drives the assistant without a message.
 pub const TICK: Duration = Duration::from_secs(1);
@@ -42,21 +58,47 @@ pub fn cli_sender(uid: u32) -> Result<SenderId> {
 
 /// The routing table of a daemon run by `owner_uid`.
 ///
-/// Only the local socket is a channel in milestone 0. The user who runs the
-/// daemon is the one allowed sender. The socket offers no pairing.
+/// The user who runs the daemon is the one allowed sender on the local
+/// socket, which offers no pairing. With `discord`, the Discord channel
+/// allows the senders of the config file and of the pairing store.
 ///
 /// # Errors
 ///
 /// Returns an error when the owner name is not a valid agent name.
-pub fn routing(config: &Config, owner_uid: u32) -> Result<Routing> {
-    let rule = ChannelRule {
+pub fn routing(
+    config: &Config,
+    owner_uid: u32,
+    store: &PairStore,
+    discord: bool,
+) -> Result<Routing> {
+    let cli = ChannelRule {
         enabled: true,
         pairing: false,
         allowed: std::iter::once(cli_sender(owner_uid)?).collect(),
     };
-    let table = Routing::new(&config.owner)
-        .with_context(|| format!("`{}` is not a valid agent name", config.owner))?;
-    Ok(table.channel(ChannelId::new(CLI_CHANNEL)?, rule))
+    let mut table = Routing::new(&config.owner)
+        .with_context(|| format!("`{}` is not a valid agent name", config.owner))?
+        .channel(ChannelId::new(CLI_CHANNEL)?, cli);
+    if discord {
+        let channel = ChannelId::new(DISCORD_CHANNEL)?;
+        let paired = store
+            .entries()
+            .filter(|e| e.paired && e.channel == channel)
+            .map(|e| e.sender.clone());
+        let rule = ChannelRule {
+            enabled: true,
+            pairing: config.discord.pairing,
+            allowed: config
+                .discord
+                .allowed
+                .iter()
+                .cloned()
+                .chain(paired)
+                .collect(),
+        };
+        table = table.channel(channel, rule);
+    }
+    Ok(table)
 }
 
 /// The harness of the assistant.
@@ -69,10 +111,72 @@ pub fn harness(config: &Config, model: Arc<dyn AgentModel>) -> AgentHarness {
     )
 }
 
-/// The daemon state: the runtime and the routing table.
+/// The seconds since the Unix epoch.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// A fresh pairing code from the operating system's randomness.
+fn fresh_code() -> PairingCode {
+    let mut bytes = [0_u8; 5];
+    if getrandom::fill(&mut bytes).is_err() {
+        // No randomness: mix the clock in, so codes still differ. The owner
+        // still approves each one, so a weak code admits no one alone.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        bytes.copy_from_slice(&nanos.to_le_bytes()[..5]);
+    }
+    PairingCode::from_random(bytes)
+}
+
+/// The text that a stranger gets for `code`.
+#[must_use]
+pub fn pairing_text(code: Option<&str>) -> String {
+    let minutes = PAIRING_TTL_SECS / 60;
+    code.map_or_else(
+        || String::from("littleguy cannot pair anyone right now. Try again in a few minutes."),
+        |code| {
+            format!(
+                "Hi! littleguy does not know you yet. Ask its owner to run `lg pair {code}` \
+                 in the next {minutes} minutes."
+            )
+        },
+    )
+}
+
+/// One reply for the Discord channel to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    /// The DM channel.
+    pub channel_id: String,
+    /// The text.
+    pub text: String,
+    /// The sender, when the reply moves its delivery cursor.
+    pub track: Option<SenderId>,
+    /// The message that this reply answers.
+    pub message_id: String,
+}
+
+/// One cursor to read the missed history from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cursor {
+    /// The DM channel.
+    pub channel_id: String,
+    /// The last message whose reply went out.
+    pub after: String,
+}
+
+/// The daemon state: the runtime, the routing table and the pairings.
 pub struct Daemon {
     rt: SqliteRuntime,
     routing: Routing,
+    owner_uid: u32,
+    config_allowed: BTreeSet<SenderId>,
+    pending: PendingPairings,
+    store: PairStore,
 }
 
 impl std::fmt::Debug for Daemon {
@@ -84,17 +188,20 @@ impl std::fmt::Debug for Daemon {
 }
 
 impl Daemon {
-    /// Opens the database at `db` and registers the assistant.
+    /// Opens the database at `db` and registers the assistant. With
+    /// `discord`, the Discord channel takes messages.
     ///
     /// # Errors
     ///
     /// Returns an error when another daemon holds the database, the database
-    /// does not open, or the owner name is not a valid agent name.
+    /// or the pairing store does not open, or the owner name is not a valid
+    /// agent name.
     pub fn open(
         db: &Path,
         config: &Config,
         model: Arc<dyn AgentModel>,
         owner_uid: u32,
+        discord: bool,
     ) -> Result<Self> {
         if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
@@ -103,9 +210,15 @@ impl Daemon {
         let mut rt =
             SqliteRuntime::open(db).with_context(|| format!("opening {}", db.display()))?;
         sqlite::register(&mut rt, Arc::new(harness(config, model)));
+        // The runtime lock is held now, so this daemon is the store's one writer.
+        let store = PairStore::open(crate::pairs::path_for(db))?;
         Ok(Self {
+            routing: routing(config, owner_uid, &store, discord)?,
             rt,
-            routing: routing(config, owner_uid)?,
+            owner_uid,
+            config_allowed: config.discord.allowed.iter().cloned().collect(),
+            pending: PendingPairings::default(),
+            store,
         })
     }
 
@@ -132,34 +245,52 @@ impl Daemon {
 
     /// Handles one request from the local socket, sent by `uid`.
     pub async fn handle_request(&mut self, uid: u32, request: Request) -> Response {
-        let inbound = match inbound(uid, request) {
-            Ok(inbound) => inbound,
-            Err(error) => {
-                return Response::Error {
-                    message: format!("{error:#}"),
-                };
+        let result = match request {
+            Request::Chat { message_id, text } => match cli_inbound(uid, message_id, text) {
+                Ok(inbound) => self.handle(&inbound, "").await,
+                Err(error) => Err(error),
+            },
+            owner_only if uid != self.owner_uid => {
+                tracing::warn!(uid, request = ?owner_only, "refused an owner request");
+                Ok(Response::Error {
+                    message: String::from("only the owner of the daemon may change pairings"),
+                })
             }
+            Request::Pair { code } => self.pair(&code),
+            Request::Pairs => Ok(self.pairs()),
+            Request::Unpair { sender } => self.unpair(&sender),
         };
-        match self.handle(&inbound).await {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::error!(error = %format!("{error:#}"), "an op failed");
-                Response::Error {
-                    message: format!("{error:#}"),
-                }
+        result.unwrap_or_else(|error| {
+            tracing::error!(error = %format!("{error:#}"), "a request failed");
+            Response::Error {
+                message: format!("{error:#}"),
             }
-        }
+        })
     }
 
-    /// Routes one message, runs it, and returns the answer.
+    /// Routes one message, runs it, and returns the answer. `reply_to` is
+    /// where a pairing prompt would go.
     ///
     /// # Errors
     ///
     /// Returns an error when the runtime cannot record, run or read the op.
-    pub async fn handle(&mut self, inbound: &Inbound) -> Result<Response> {
+    pub async fn handle(&mut self, inbound: &Inbound, reply_to: &str) -> Result<Response> {
         let id = match route(&self.routing, inbound) {
             Route::Agent(id) => id,
-            Route::Pairing => return Ok(Response::Pairing),
+            Route::Pairing => {
+                let pending = Pending {
+                    channel: inbound.channel.clone(),
+                    sender: inbound.sender.clone(),
+                    reply_to: reply_to.to_owned(),
+                    message_id: inbound.message_id.clone(),
+                    issued_at: now_secs(),
+                };
+                let code = self.pending.issue(pending, fresh_code);
+                tracing::info!(sender = %inbound.sender, issued = code.is_some(), "a stranger asked to pair");
+                return Ok(Response::Pairing {
+                    code: code.map(|code| code.to_string()),
+                });
+            }
             Route::Drop => {
                 tracing::info!(channel = %inbound.channel, sender = %inbound.sender, "dropped a message");
                 return Ok(Response::Dropped);
@@ -196,6 +327,146 @@ impl Daemon {
         ))
     }
 
+    /// Handles one Discord direct message. Returns the reply to send, if
+    /// any. A message whose reply went out already gets none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the author id is not a snowflake, or the
+    /// runtime fails.
+    pub async fn discord(&mut self, message: &DmMessage) -> Result<Option<Outgoing>> {
+        let channel = ChannelId::new(DISCORD_CHANNEL)?;
+        let sender = discord_sender(&message.author_id)?;
+        if self.store.is_delivered(&channel, &sender, &message.id) {
+            return Ok(None);
+        }
+        let inbound = Inbound {
+            channel,
+            sender: sender.clone(),
+            message_id: MessageId::new(format!("{DISCORD_MESSAGE_PREFIX}{}", message.id))?,
+            text: message.content.clone(),
+        };
+        let response = self.handle(&inbound, &message.channel_id).await?;
+        let (text, track) = match response {
+            Response::Reply { text } => (text, true),
+            // The op ran before, but its reply did not go out.
+            Response::Duplicate { last_answer } => (
+                last_answer.unwrap_or_else(|| String::from("(no answer yet)")),
+                true,
+            ),
+            Response::NoAnswer { reason } => (format!("Sorry, I could not answer: {reason}"), true),
+            Response::Pairing { code } => (pairing_text(code.as_deref()), false),
+            _ => return Ok(None),
+        };
+        Ok(Some(Outgoing {
+            channel_id: message.channel_id.clone(),
+            text,
+            track: track.then_some(sender),
+            message_id: message.id.clone(),
+        }))
+    }
+
+    /// Records that the reply to `message_id` went out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the pairing store does not save.
+    pub fn delivered(&mut self, sender: &SenderId, reply_to: &str, message_id: &str) -> Result<()> {
+        let channel = ChannelId::new(DISCORD_CHANNEL)?;
+        self.store.delivered(&channel, sender, reply_to, message_id)
+    }
+
+    /// The cursor of each allowed Discord sender with a known DM channel.
+    #[must_use]
+    pub fn cursors(&self) -> Vec<Cursor> {
+        let Ok(channel) = ChannelId::new(DISCORD_CHANNEL) else {
+            return Vec::new();
+        };
+        let allowed: BTreeSet<&SenderId> = self.routing.allowed(&channel).collect();
+        self.store
+            .entries()
+            .filter(|e| e.channel == channel && allowed.contains(&e.sender))
+            .filter(|e| !e.reply_to.is_empty() && !e.delivered.is_empty())
+            .map(|e| Cursor {
+                channel_id: e.reply_to.clone(),
+                after: e.delivered.clone(),
+            })
+            .collect()
+    }
+
+    /// Redeems a pairing code.
+    fn pair(&mut self, code: &str) -> Result<Response> {
+        let Some(code) = PairingCode::parse(code) else {
+            return Ok(Response::Error {
+                message: String::from("that is not a pairing code"),
+            });
+        };
+        let Some(pending) = self.pending.redeem(&code, now_secs()) else {
+            return Ok(Response::Error {
+                message: String::from("no live pairing has that code. Codes last 10 minutes"),
+            });
+        };
+        if !self.routing.allow(&pending.channel, pending.sender.clone()) {
+            bail!("the channel {} takes no senders", pending.channel);
+        }
+        let delivered = pending
+            .message_id
+            .as_str()
+            .strip_prefix(DISCORD_MESSAGE_PREFIX)
+            .unwrap_or_default()
+            .to_owned();
+        self.store.put(Entry {
+            channel: pending.channel,
+            sender: pending.sender.clone(),
+            reply_to: pending.reply_to,
+            delivered,
+            paired: true,
+        })?;
+        tracing::info!(sender = %pending.sender, "paired a sender");
+        Ok(Response::Paired {
+            sender: pending.sender.to_string(),
+        })
+    }
+
+    /// The allowed senders of every channel.
+    fn pairs(&self) -> Response {
+        let mut entries = Vec::new();
+        for channel in [CLI_CHANNEL, DISCORD_CHANNEL] {
+            let Ok(id) = ChannelId::new(channel) else {
+                continue;
+            };
+            for sender in self.routing.allowed(&id) {
+                let source = if channel == CLI_CHANNEL {
+                    "owner"
+                } else if self.config_allowed.contains(sender) {
+                    "config"
+                } else {
+                    "paired"
+                };
+                entries.push(PairEntry {
+                    channel: channel.to_owned(),
+                    sender: sender.to_string(),
+                    source: source.to_owned(),
+                });
+            }
+        }
+        Response::Pairs { entries }
+    }
+
+    /// Takes a paired Discord sender off the channel. A sender that the
+    /// config file allows stays allowed.
+    fn unpair(&mut self, sender: &str) -> Result<Response> {
+        let Ok(sender) = SenderId::new(sender) else {
+            return Ok(Response::Unpaired { removed: false });
+        };
+        let channel = ChannelId::new(DISCORD_CHANNEL)?;
+        let removed = self.store.unpair(&channel, &sender)?;
+        if removed && !self.config_allowed.contains(&sender) {
+            self.routing.revoke(&channel, &sender);
+        }
+        Ok(Response::Unpaired { removed })
+    }
+
     /// Drives the assistant until it blocks, so a due timer fires.
     ///
     /// # Errors
@@ -207,13 +478,13 @@ impl Daemon {
     }
 }
 
-/// Builds the inbound message of one socket request.
-fn inbound(uid: u32, request: Request) -> Result<Inbound> {
+/// Builds the inbound message of one socket chat request.
+fn cli_inbound(uid: u32, message_id: String, text: String) -> Result<Inbound> {
     Ok(Inbound {
         channel: ChannelId::new(CLI_CHANNEL)?,
         sender: cli_sender(uid)?,
-        message_id: MessageId::new(request.message_id).context("bad message id")?,
-        text: request.text,
+        message_id: MessageId::new(message_id).context("bad message id")?,
+        text,
     })
 }
 
@@ -248,11 +519,82 @@ fn set_private(path: &Path) -> Result<()> {
         .with_context(|| format!("setting the mode of {}", path.display()))
 }
 
-/// One request on its way to the runtime task.
-struct Job {
-    uid: u32,
-    request: Request,
-    reply: oneshot::Sender<Response>,
+/// One piece of work for the runtime task.
+enum Job {
+    /// A request from the local socket.
+    Socket {
+        uid: u32,
+        request: Request,
+        reply: oneshot::Sender<Response>,
+    },
+    /// A Discord direct message.
+    Discord {
+        message: DmMessage,
+        reply: oneshot::Sender<Option<Outgoing>>,
+    },
+    /// A Discord reply went out.
+    Delivered {
+        sender: SenderId,
+        reply_to: String,
+        message_id: String,
+    },
+    /// The cursors to read the missed history from.
+    Cursors { reply: oneshot::Sender<Vec<Cursor>> },
+}
+
+/// What the daemon needs to run the Discord channel. Its `Debug` form
+/// leaves the token out.
+#[derive(Clone)]
+pub struct DiscordLink {
+    /// The REST client.
+    pub rest: DiscordRest,
+    /// The bot token, for the gateway.
+    pub token: String,
+    /// The gateway URL.
+    pub gateway_url: String,
+}
+
+impl std::fmt::Debug for DiscordLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordLink")
+            .field("rest", &self.rest)
+            .field("gateway_url", &self.gateway_url)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Runs one job on the runtime.
+async fn run_job(daemon: &mut Daemon, job: Job) {
+    match job {
+        Job::Socket {
+            uid,
+            request,
+            reply,
+        } => {
+            let response = daemon.handle_request(uid, request).await;
+            // A client that hung up gets no answer. The op still ran.
+            let _ = reply.send(response);
+        }
+        Job::Discord { message, reply } => {
+            let outgoing = daemon.discord(&message).await.unwrap_or_else(|error| {
+                tracing::error!(error = %format!("{error:#}"), "a discord message failed");
+                None
+            });
+            let _ = reply.send(outgoing);
+        }
+        Job::Delivered {
+            sender,
+            reply_to,
+            message_id,
+        } => {
+            if let Err(error) = daemon.delivered(&sender, &reply_to, &message_id) {
+                tracing::error!(error = %format!("{error:#}"), "the delivery cursor did not save");
+            }
+        }
+        Job::Cursors { reply } => {
+            let _ = reply.send(daemon.cursors());
+        }
+    }
 }
 
 /// Runs the daemon until `stop` completes or the accept loop ends.
@@ -263,10 +605,21 @@ struct Job {
 pub async fn run(
     mut daemon: Daemon,
     listener: UnixListener,
+    discord: Option<DiscordLink>,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<Job>(64);
-    let accept = tokio::spawn(accept_loop(listener, tx));
+    let mut tasks = vec![tokio::spawn(accept_loop(listener, tx.clone()))];
+    if let Some(link) = discord {
+        let (events_tx, events) = mpsc::unbounded_channel();
+        tasks.push(tokio::spawn(run_gateway(
+            link.token.clone(),
+            link.gateway_url.clone(),
+            events_tx,
+        )));
+        tasks.push(tokio::spawn(discord_loop(link.rest, events, tx.clone())));
+    }
+    drop(tx);
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(stop);
@@ -275,9 +628,7 @@ pub async fn run(
         tokio::select! {
             job = rx.recv() => {
                 let Some(job) = job else { break };
-                let response = daemon.handle_request(job.uid, job.request).await;
-                // A client that hung up gets no answer. The op still ran.
-                let _ = job.reply.send(response);
+                run_job(&mut daemon, job).await;
             }
             _ = ticker.tick() => {
                 if let Err(error) = daemon.tick().await {
@@ -287,8 +638,64 @@ pub async fn run(
             () = &mut stop => break,
         }
     }
-    accept.abort();
+    for task in tasks {
+        task.abort();
+    }
     Ok(())
+}
+
+/// Turns gateway events into jobs, and sends each reply.
+async fn discord_loop(
+    rest: DiscordRest,
+    mut events: mpsc::UnboundedReceiver<GatewayEvent>,
+    jobs: mpsc::Sender<Job>,
+) {
+    while let Some(event) = events.recv().await {
+        match event {
+            GatewayEvent::Message(message) => deliver(&rest, &jobs, message).await,
+            GatewayEvent::Ready => {
+                let (reply, cursors) = oneshot::channel();
+                if jobs.send(Job::Cursors { reply }).await.is_err() {
+                    return;
+                }
+                for cursor in cursors.await.unwrap_or_default() {
+                    match rest.messages_after(&cursor.channel_id, &cursor.after).await {
+                        Ok(missed) => {
+                            for message in missed {
+                                deliver(&rest, &jobs, message).await;
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "reading missed messages failed"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Runs one message and sends its reply. A failed send moves no cursor, so
+/// the history read after the next reconnect tries it again.
+async fn deliver(rest: &DiscordRest, jobs: &mpsc::Sender<Job>, message: DmMessage) {
+    let (reply, answer) = oneshot::channel();
+    if jobs.send(Job::Discord { message, reply }).await.is_err() {
+        return;
+    }
+    let Ok(Some(outgoing)) = answer.await else {
+        return;
+    };
+    if let Err(error) = rest.send(&outgoing.channel_id, &outgoing.text).await {
+        tracing::warn!(%error, "a discord reply did not go out");
+        return;
+    }
+    if let Some(sender) = outgoing.track {
+        let _ = jobs
+            .send(Job::Delivered {
+                sender,
+                reply_to: outgoing.channel_id,
+                message_id: outgoing.message_id,
+            })
+            .await;
+    }
 }
 
 async fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Job>) {
@@ -331,7 +738,7 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
         match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
                 let (reply, answer) = oneshot::channel();
-                tx.send(Job {
+                tx.send(Job::Socket {
                     uid,
                     request,
                     reply,
@@ -370,14 +777,14 @@ mod tests {
     }
 
     fn request(id: &str, text: &str) -> Request {
-        Request {
+        Request::Chat {
             message_id: String::from(id),
             text: String::from(text),
         }
     }
 
     fn open(db: &Path, model: Arc<OfflineModel>) -> Daemon {
-        Daemon::open(db, &config(), model, UID).unwrap()
+        Daemon::open(db, &config(), model, UID, false).unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -484,7 +891,7 @@ mod tests {
         let socket = dir.path().join("lg.sock");
         let uid = rustix::process::getuid().as_raw();
         let model = Arc::new(OfflineModel::new());
-        let daemon = Daemon::open(&dir.path().join("lg.db"), &config(), model, uid).unwrap();
+        let daemon = Daemon::open(&dir.path().join("lg.db"), &config(), model, uid, false).unwrap();
         let listener = bind(&socket).await.unwrap();
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let stop = async {
@@ -500,7 +907,7 @@ mod tests {
             (reply, bad_json, too_long)
         };
         let (served, (reply, bad_json, too_long)) =
-            tokio::join!(run(daemon, listener, stop), client);
+            tokio::join!(run(daemon, listener, None, stop), client);
         served.unwrap();
         assert_eq!(
             reply,
@@ -523,7 +930,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("lg.db");
         let _first = open(&db, Arc::new(OfflineModel::new()));
-        let second = Daemon::open(&db, &config(), Arc::new(OfflineModel::new()), UID);
+        let second = Daemon::open(&db, &config(), Arc::new(OfflineModel::new()), UID, false);
         let error = format!("{:#}", second.unwrap_err());
         assert!(error.contains("lock"), "{error}");
     }
@@ -540,5 +947,383 @@ mod tests {
         assert!(again.is_ok());
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    fn discord_open(db: &Path, config: &Config, model: Arc<OfflineModel>) -> Daemon {
+        Daemon::open(db, config, model, UID, true).unwrap()
+    }
+
+    fn dm(id: &str, author: &str, text: &str) -> DmMessage {
+        DmMessage {
+            id: id.to_owned(),
+            channel_id: format!("dm{author}"),
+            author_id: author.to_owned(),
+            content: text.to_owned(),
+        }
+    }
+
+    /// The code inside a pairing text.
+    fn code_in(text: &str) -> String {
+        let start = text.find("lg pair ").unwrap() + "lg pair ".len();
+        text[start..].split('`').next().unwrap().to_owned()
+    }
+
+    fn echo(text: &str) -> String {
+        format!("littleguy (offline): you said '{text}'")
+    }
+
+    #[test]
+    fn the_pairing_text_names_the_code_or_says_try_later() {
+        let text = pairing_text(Some("ABCD-1234"));
+        assert!(text.contains("`lg pair ABCD-1234`"), "{text}");
+        assert!(text.contains("10 minutes"), "{text}");
+        assert!(pairing_text(None).contains("Try again"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_pair_requests_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = discord_open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(OfflineModel::new()),
+        );
+        let prompt = daemon
+            .discord(&dm("1001", "111", "hello"))
+            .await
+            .unwrap()
+            .unwrap();
+        let code = code_in(&prompt.text);
+        let refused = daemon
+            .handle_request(UID + 1, Request::Pair { code: code.clone() })
+            .await;
+        assert!(matches!(refused, Response::Error { ref message } if message.contains("owner")));
+        let typo = daemon
+            .handle_request(
+                UID,
+                Request::Pair {
+                    code: String::from("nope"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(typo, Response::Error { ref message } if message.contains("not a pairing code"))
+        );
+        let unknown = daemon
+            .handle_request(
+                UID,
+                Request::Pair {
+                    code: String::from("ZZZZ-ZZZZ"),
+                },
+            )
+            .await;
+        assert!(
+            matches!(unknown, Response::Error { ref message } if message.contains("no live pairing"))
+        );
+
+        for request in [
+            Request::Pairs,
+            Request::Unpair {
+                sender: String::from("discord:111"),
+            },
+        ] {
+            let refused = daemon.handle_request(UID + 1, request).await;
+            assert!(matches!(refused, Response::Error { .. }), "{refused:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stranger_pairs_through_the_owner_and_unpairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(OfflineModel::new());
+        let mut daemon = discord_open(&dir.path().join("lg.db"), &config(), Arc::clone(&model));
+
+        let first = daemon
+            .discord(&dm("1001", "111", "hello"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.channel_id, "dm111");
+        assert_eq!(first.track, None, "a pairing prompt moves no cursor");
+        let code = code_in(&first.text);
+        assert_eq!(model.calls(), 0, "a stranger runs nothing");
+        // The stranger asks again and gets the same code.
+        let again = daemon
+            .discord(&dm("1002", "111", "hello?"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(code_in(&again.text), code);
+
+        let paired = daemon
+            .handle_request(
+                UID,
+                Request::Pair {
+                    code: code.to_lowercase(),
+                },
+            )
+            .await;
+        assert_eq!(
+            paired,
+            Response::Paired {
+                sender: String::from("discord:111")
+            }
+        );
+        let used = daemon.handle_request(UID, Request::Pair { code }).await;
+        assert!(matches!(used, Response::Error { .. }), "a code works once");
+
+        let reply = daemon
+            .discord(&dm("1003", "111", "hi"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.text, echo("hi"));
+        assert_eq!(reply.track, Some(discord_sender("111").unwrap()));
+        assert_eq!(model.calls(), 1);
+
+        let pairs = daemon.handle_request(UID, Request::Pairs).await;
+        let Response::Pairs { entries } = pairs else {
+            panic!("{pairs:?}");
+        };
+        let rows: Vec<(&str, &str, &str)> = entries
+            .iter()
+            .map(|e| (e.channel.as_str(), e.sender.as_str(), e.source.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("cli", "uid:1000", "owner"),
+                ("discord", "discord:111", "paired")
+            ]
+        );
+
+        let removed = daemon
+            .handle_request(
+                UID,
+                Request::Unpair {
+                    sender: String::from("discord:111"),
+                },
+            )
+            .await;
+        assert_eq!(removed, Response::Unpaired { removed: true });
+        let gone = daemon
+            .discord(&dm("1004", "111", "still there?"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            gone.track, None,
+            "an unpaired sender gets a pairing prompt again"
+        );
+        let bad = daemon
+            .handle_request(
+                UID,
+                Request::Unpair {
+                    sender: String::new(),
+                },
+            )
+            .await;
+        assert_eq!(bad, Response::Unpaired { removed: false });
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pairing_survives_a_restart_and_gives_a_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        {
+            let mut daemon = discord_open(&db, &config(), Arc::new(OfflineModel::new()));
+            let prompt = daemon
+                .discord(&dm("2001", "222", "hi"))
+                .await
+                .unwrap()
+                .unwrap();
+            let code = code_in(&prompt.text);
+            daemon.handle_request(UID, Request::Pair { code }).await;
+        }
+        let model = Arc::new(OfflineModel::new());
+        let mut daemon = discord_open(&db, &config(), Arc::clone(&model));
+        assert_eq!(
+            daemon.cursors(),
+            vec![Cursor {
+                channel_id: String::from("dm222"),
+                after: String::from("2001")
+            }],
+            "the prompted message counts as answered"
+        );
+        assert_eq!(
+            daemon.discord(&dm("2001", "222", "hi")).await.unwrap(),
+            None
+        );
+        let reply = daemon
+            .discord(&dm("2002", "222", "back"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply.text, echo("back"));
+        assert_eq!(model.calls(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_goes_out_once_and_a_failed_one_is_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.discord.allowed.push(discord_sender("333").unwrap());
+        let model = Arc::new(OfflineModel::new());
+        let mut daemon = discord_open(&dir.path().join("lg.db"), &config, Arc::clone(&model));
+        assert!(daemon.cursors().is_empty(), "no DM channel is known yet");
+
+        let first = daemon
+            .discord(&dm("3001", "333", "one"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.text, echo("one"));
+        // The send failed, so no cursor moved. The same message comes back.
+        let resent = daemon
+            .discord(&dm("3001", "333", "one"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resent.text,
+            echo("one"),
+            "the stored answer goes out, not a new run"
+        );
+        assert_eq!(model.calls(), 1);
+
+        let sender = discord_sender("333").unwrap();
+        daemon.delivered(&sender, "dm333", "3001").unwrap();
+        assert_eq!(
+            daemon.discord(&dm("3001", "333", "one")).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            daemon.cursors(),
+            vec![Cursor {
+                channel_id: String::from("dm333"),
+                after: String::from("3001")
+            }]
+        );
+
+        // A sender from the config file stays allowed after an unpair.
+        let removed = daemon
+            .handle_request(
+                UID,
+                Request::Unpair {
+                    sender: sender.to_string(),
+                },
+            )
+            .await;
+        assert_eq!(removed, Response::Unpaired { removed: false });
+        let Response::Pairs { entries } = daemon.handle_request(UID, Request::Pairs).await else {
+            panic!("not pairs");
+        };
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.sender == "discord:333" && e.source == "config")
+        );
+        let next = daemon
+            .discord(&dm("3002", "333", "two"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.text, echo("two"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bad_author_id_is_an_error_and_the_cli_takes_no_discord() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = discord_open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(OfflineModel::new()),
+        );
+        assert!(daemon.discord(&dm("1", "not-a-number", "x")).await.is_err());
+        let mut plain = open(
+            &dir.path().join("other").join("lg.db"),
+            Arc::new(OfflineModel::new()),
+        );
+        assert_eq!(
+            plain.discord(&dm("1", "444", "x")).await.unwrap(),
+            None,
+            "no discord rule drops it"
+        );
+    }
+
+    /// The whole Discord path: a stranger pairs over the socket, then a
+    /// reconnect reads the missed history and answers each message once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discord_pairs_answers_and_backfills_once() {
+        use littleguy_channels::testing::{FakeDiscord, dm_event};
+
+        let fake = FakeDiscord::start().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lg.sock");
+        let uid = rustix::process::getuid().as_raw();
+        let model = Arc::new(OfflineModel::new());
+        let daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            uid,
+            true,
+        )
+        .unwrap();
+        let listener = bind(&socket).await.unwrap();
+        let link = DiscordLink {
+            rest: DiscordRest::new(fake.api_base.clone(), "token"),
+            token: String::from("token"),
+            gateway_url: fake.gateway_url.clone(),
+        };
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let stop = async {
+            let _ = stop_rx.await;
+        };
+        let script = async {
+            assert!(fake.wait_for(10, |f| !f.identifies().is_empty()).await);
+            fake.push_dm("5001", "dm555", "555", "hello");
+            assert!(fake.wait_for(10, |f| f.sent().len() == 1).await);
+            let code = code_in(&fake.sent()[0].content);
+            let paired = crate::client::send(&socket, &Request::Pair { code })
+                .await
+                .unwrap();
+            assert_eq!(
+                paired,
+                Response::Paired {
+                    sender: String::from("discord:555")
+                }
+            );
+
+            fake.push_dm("5002", "dm555", "555", "hi");
+            assert!(fake.wait_for(10, |f| f.sent().len() == 2).await);
+
+            // The daemon misses two messages while it is away.
+            for (id, text) in [
+                ("5001", "hello"),
+                ("5002", "hi"),
+                ("5003", "missed"),
+                ("5004", "also"),
+            ] {
+                fake.add_history(dm_event(id, "dm555", "555", text));
+            }
+            fake.drop_connection();
+            assert!(fake.wait_for(10, |f| f.sent().len() == 4).await);
+            // A live copy of a backfilled message runs nothing new.
+            fake.push_dm("5004", "dm555", "555", "also");
+            fake.push_dm("5005", "dm555", "555", "last");
+            assert!(fake.wait_for(10, |f| f.sent().len() == 5).await);
+            stop_tx.send(()).unwrap();
+        };
+        let (served, ()) = tokio::join!(run(daemon, listener, Some(link), stop), script);
+        served.unwrap();
+        let sent: Vec<String> = fake.sent().into_iter().map(|s| s.content).collect();
+        assert_eq!(
+            sent[1..],
+            [echo("hi"), echo("missed"), echo("also"), echo("last")]
+        );
+        assert!(fake.sent().iter().all(|s| s.channel_id == "dm555"));
+        assert_eq!(model.calls(), 4);
+        assert!(fake.connects() >= 2);
     }
 }

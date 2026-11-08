@@ -1,4 +1,5 @@
-//! `lg chat`: send one message to the daemon and print the answer.
+//! The client side of the socket: `lg chat`, `lg pair`, `lg pairs` and
+//! `lg unpair` send one request each and print the answer.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::protocol::{Request, Response};
+use crate::protocol::{PairEntry, Request, Response};
 
 /// A fresh message id: the clock in nanoseconds and the process id.
 #[must_use]
@@ -61,10 +62,29 @@ pub fn render(response: &Response) -> (String, bool) {
             true,
         ),
         Response::NoAnswer { reason } => (format!("no answer: {reason}"), false),
-        Response::Pairing => (String::from("this sender is not paired"), false),
+        Response::Pairing { .. } => (String::from("this sender is not paired"), false),
         Response::Dropped => (String::from("the daemon dropped the message"), false),
+        Response::Paired { sender } => (format!("paired {sender}"), true),
+        Response::Pairs { entries } => (render_pairs(entries), true),
+        Response::Unpaired { removed: true } => (String::from("unpaired"), true),
+        Response::Unpaired { removed: false } => (
+            String::from("no paired sender has that id. A sender from the config file stays"),
+            false,
+        ),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// One line per allowed sender: channel, sender and source.
+fn render_pairs(entries: &[PairEntry]) -> String {
+    if entries.is_empty() {
+        return String::from("no allowed senders");
+    }
+    entries
+        .iter()
+        .map(|e| format!("{}\t{}\t{}", e.channel, e.sender, e.source))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -87,7 +107,15 @@ mod tests {
         assert_eq!(render(&reply), (String::from("hi"), true));
         assert!(render(&Response::Duplicate { last_answer: None }).1);
         assert!(!render(&Response::Dropped).1);
-        assert!(!render(&Response::Pairing).1);
+        assert!(!render(&Response::Pairing { code: None }).1);
+        assert_eq!(
+            render(&Response::Paired {
+                sender: String::from("discord:1")
+            }),
+            (String::from("paired discord:1"), true)
+        );
+        assert!(render(&Response::Unpaired { removed: true }).1);
+        assert!(!render(&Response::Unpaired { removed: false }).1);
         assert!(
             !render(&Response::NoAnswer {
                 reason: String::from("x")
@@ -102,11 +130,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pairs_print_one_line_each() {
+        assert_eq!(render_pairs(&[]), "no allowed senders");
+        let entries = vec![
+            PairEntry {
+                channel: String::from("cli"),
+                sender: String::from("uid:1"),
+                source: String::from("owner"),
+            },
+            PairEntry {
+                channel: String::from("discord"),
+                sender: String::from("discord:2"),
+                source: String::from("paired"),
+            },
+        ];
+        assert_eq!(
+            render(&Response::Pairs { entries }).0,
+            "cli\tuid:1\towner\ndiscord\tdiscord:2\tpaired"
+        );
+    }
+
     #[tokio::test]
     async fn no_daemon_names_the_socket() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("none.sock");
-        let request = Request {
+        let request = Request::Chat {
             message_id: String::from("m"),
             text: String::from("t"),
         };

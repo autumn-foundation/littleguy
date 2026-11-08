@@ -46,6 +46,36 @@ cargo run --bin lg -- serve --model openrouter --model-name <vendor>/<model>
 `--base-url` (or `LG_BASE_URL`) points `--model openai` at any other server
 that speaks the same API, such as a local one.
 
+## Discord
+
+Create a bot in the Discord developer portal. Under Privileged Gateway
+Intents it needs nothing: littleguy reads direct messages only. Then set the
+token and start the daemon:
+
+```sh
+export DISCORD_BOT_TOKEN=...
+cargo run --bin lg -- serve
+```
+
+The token comes from the environment only. With no token, the daemon runs
+the local socket alone.
+
+A stranger who sends the bot a direct message gets a pairing code, such as
+`ABCD-1234`. The owner lets them in on the machine that runs the daemon:
+
+```sh
+lg pair ABCD-1234   # paired discord:123456789012345678
+lg pairs            # every allowed sender, with its source
+lg unpair discord:123456789012345678
+```
+
+A code lasts 10 minutes and works once. Only the user who runs the daemon
+may pair. Pairings live in `pairings.json` next to the database.
+
+Each Discord message runs once, and its reply goes out once. After a
+reconnect, the daemon reads the direct messages it missed and answers each
+one. [ADR 0002](docs/adr/0002-pairing-and-delivery.md) explains how.
+
 ## Config
 
 `lg serve` reads `<config home>/littleguy/lg.toml` when it exists:
@@ -54,6 +84,10 @@ that speaks the same API, such as a local one.
 owner = "mark"
 system = "You are littleguy, a small and helpful personal assistant."
 window = 40
+
+[discord]
+pairing = true                        # strangers get a code; false drops them
+allowed = ["123456789012345678"]      # Discord user ids allowed from the start
 ```
 
 | Flag | Variable | Default |
@@ -61,6 +95,7 @@ window = 40
 | `--socket` | `LG_SOCKET` | `<data home>/littleguy/lg.sock` |
 | `--db` | `LG_DB` | `<data home>/littleguy/lg.db` |
 | `--config` | `LG_CONFIG` | `<config home>/littleguy/lg.toml` |
+| none | `DISCORD_BOT_TOKEN` | unset: no Discord |
 
 `<data home>` is `$XDG_DATA_HOME`, or `~/.local/share`. `<config home>` is
 `$XDG_CONFIG_HOME`, or `~/.config`.
@@ -68,17 +103,23 @@ window = 40
 ## Who can talk to it
 
 The socket has mode 0600. The daemon also reads the peer credentials of each
-connection. Only the user who runs the daemon reaches the assistant. The
-routing kernel makes that decision, and `formal/verus/src/route.rs` proves
-it.
+connection. Only the user who runs the daemon reaches the assistant from the
+socket, and only that user may pair, list or unpair.
+
+On Discord, a sender reaches the assistant when the config file allows them
+or a pairing code added them. Anyone else gets a code, or nothing when
+`pairing = false`. The routing kernel makes each decision, and
+`formal/verus/src/route.rs` proves it. `formal/verus/src/pairing.rs` proves
+when a code is live and when a new one is issued.
 
 ## Layout
 
 | Path | What it holds |
 |---|---|
-| `crates/littleguy-core` | Ids, config and the routing kernel. No I/O. |
+| `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
+| `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
-| `crates/littleguy` | The `lg` binary: `serve` and `chat`. |
+| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs` and `unpair`. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |
 

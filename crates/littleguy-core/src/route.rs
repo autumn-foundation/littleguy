@@ -96,6 +96,30 @@ impl Routing {
     pub const fn assistant(&self) -> &AgentId {
         &self.assistant
     }
+
+    /// Allows `sender` on `channel`. A channel with no rule takes no sender,
+    /// so the call returns `false` and changes nothing.
+    pub fn allow(&mut self, channel: &ChannelId, sender: SenderId) -> bool {
+        self.channels.get_mut(channel).is_some_and(|rule| {
+            rule.allowed.insert(sender);
+            true
+        })
+    }
+
+    /// Takes `sender` off `channel`. Returns whether the sender was allowed.
+    pub fn revoke(&mut self, channel: &ChannelId, sender: &SenderId) -> bool {
+        self.channels
+            .get_mut(channel)
+            .is_some_and(|rule| rule.allowed.remove(sender))
+    }
+
+    /// The allowed senders of `channel`, in order.
+    pub fn allowed(&self, channel: &ChannelId) -> impl Iterator<Item = &SenderId> {
+        self.channels
+            .get(channel)
+            .into_iter()
+            .flat_map(|rule| &rule.allowed)
+    }
 }
 
 /// The decision table. `formal/verus/src/route.rs` proves it.
@@ -194,7 +218,7 @@ mod tests {
     #[test]
     fn a_channel_with_no_rule_drops_even_an_allowed_sender() {
         assert_eq!(
-            route(&table(true), &message("telegram", "uid:1000")),
+            route(&table(true), &message("discord", "uid:1000")),
             Route::Drop
         );
     }
@@ -208,6 +232,35 @@ mod tests {
         };
         let routing = Routing::new(&owner()).unwrap().channel(cli(), rule);
         assert_eq!(route(&routing, &message("cli", "uid:1000")), Route::Drop);
+    }
+
+    #[test]
+    fn an_allowed_sender_reaches_the_assistant_until_it_is_revoked() {
+        let mut routing = table(true);
+        let stranger = SenderId::new("uid:7").unwrap();
+        assert_eq!(route(&routing, &message("cli", "uid:7")), Route::Pairing);
+        assert!(routing.allow(&cli(), stranger.clone()));
+        assert!(matches!(
+            route(&routing, &message("cli", "uid:7")),
+            Route::Agent(_)
+        ));
+        let listed: Vec<&str> = routing.allowed(&cli()).map(SenderId::as_str).collect();
+        assert_eq!(listed, ["uid:1000", "uid:7"]);
+        assert!(routing.revoke(&cli(), &stranger));
+        assert!(!routing.revoke(&cli(), &stranger));
+        assert_eq!(route(&routing, &message("cli", "uid:7")), Route::Pairing);
+    }
+
+    #[test]
+    fn a_channel_with_no_rule_takes_no_sender() {
+        let mut routing = table(true);
+        let telegram = ChannelId::new("discord").unwrap();
+        assert!(!routing.allow(&telegram, SenderId::new("discord:1").unwrap()));
+        assert_eq!(routing.allowed(&telegram).count(), 0);
+        assert_eq!(
+            route(&routing, &message("discord", "discord:1")),
+            Route::Drop
+        );
     }
 
     /// The Verus spec of `formal/verus/src/route.rs`, restated in Rust.

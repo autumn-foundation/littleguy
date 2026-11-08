@@ -8,10 +8,18 @@
 //! [discord]
 //! pairing = true
 //! allowed = ["123456789012345678"]
+//!
+//! [[camel.route]]
+//! id = "inbox"
+//! from = "file:/home/mark/lg-inbox?delete=true"
+//! prompt = "A file arrived. Summarize it."
 //! ```
 //!
 //! The `[discord]` section is optional. The bot token never goes in the
 //! file. It comes from `DISCORD_BOT_TOKEN` only.
+//!
+//! Each `[[camel.route]]` is a camel route that feeds the assistant. The
+//! owner writes it, so its messages need no pairing.
 
 use std::path::Path;
 
@@ -49,7 +57,27 @@ pub enum ConfigError {
     /// A Discord user id is not a snowflake.
     #[error("`{0}` is not a Discord user id")]
     DiscordUser(String),
+    /// A camel route id is not 1 to 32 lowercase letters, digits or `-`.
+    #[error("`{0}` is not a camel route id: use 1 to 32 of a-z, 0-9 and -")]
+    CamelRouteId(String),
+    /// Two camel routes have one id.
+    #[error("two camel routes have the id `{0}`")]
+    CamelRouteTwice(String),
+    /// A camel route reads from a component that littleguy does not run.
+    #[error("camel route `{id}` reads from `{from}`: use one of {}", CAMEL_SCHEMES.join(", "))]
+    CamelScheme {
+        /// The route id.
+        id: String,
+        /// The `from` URI.
+        from: String,
+    },
 }
+
+/// The camel components that a route may read from.
+pub const CAMEL_SCHEMES: [&str; 2] = ["file", "timer"];
+
+/// The longest camel route id, in bytes.
+pub const MAX_CAMEL_ROUTE_ID: usize = 32;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +87,78 @@ struct Raw {
     window: Option<u32>,
     #[serde(default)]
     discord: RawDiscord,
+    #[serde(default)]
+    camel: RawCamel,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCamel {
+    #[serde(default)]
+    route: Vec<RawCamelRoute>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCamelRoute {
+    id: String,
+    from: String,
+    prompt: Option<String>,
+}
+
+/// One camel route that feeds the assistant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CamelRoute {
+    /// The route id. The sender of its messages is `camel:<id>`.
+    pub id: String,
+    /// The camel URI that the route reads from, such as `file:/inbox`.
+    pub from: String,
+    /// Text that goes before each message body.
+    pub prompt: Option<String>,
+}
+
+impl CamelRoute {
+    /// The sender id of the messages of this route.
+    ///
+    /// # Errors
+    ///
+    /// Never for a checked route: its id is short and plain.
+    pub fn sender(&self) -> Result<SenderId, IdError> {
+        SenderId::new(format!("camel:{}", self.id))
+    }
+}
+
+/// Checks the camel routes of a config.
+fn camel_routes(raw: Vec<RawCamelRoute>) -> Result<Vec<CamelRoute>, ConfigError> {
+    let mut seen = std::collections::BTreeSet::new();
+    raw.into_iter()
+        .map(|route| {
+            let plain = !route.id.is_empty()
+                && route.id.len() <= MAX_CAMEL_ROUTE_ID
+                && route
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            if !plain {
+                return Err(ConfigError::CamelRouteId(route.id));
+            }
+            if !seen.insert(route.id.clone()) {
+                return Err(ConfigError::CamelRouteTwice(route.id));
+            }
+            let scheme = route.from.split_once(':').map(|(scheme, _)| scheme);
+            if !scheme.is_some_and(|scheme| CAMEL_SCHEMES.contains(&scheme)) {
+                return Err(ConfigError::CamelScheme {
+                    id: route.id,
+                    from: route.from,
+                });
+            }
+            Ok(CamelRoute {
+                id: route.id,
+                from: route.from,
+                prompt: route.prompt.filter(|prompt| !prompt.trim().is_empty()),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -113,6 +213,8 @@ pub struct Config {
     pub window: u32,
     /// The Discord settings.
     pub discord: DiscordConfig,
+    /// The camel routes that feed the assistant.
+    pub camel: Vec<CamelRoute>,
 }
 
 impl Config {
@@ -124,6 +226,7 @@ impl Config {
             system: String::from(DEFAULT_SYSTEM),
             window: DEFAULT_WINDOW,
             discord: DiscordConfig::default(),
+            camel: Vec::new(),
         }
     }
 
@@ -132,8 +235,8 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error when the text is not valid TOML, names an unknown
-    /// key, holds a bad owner name or Discord user id, or sets a zero
-    /// window.
+    /// key, holds a bad owner name or Discord user id, sets a zero window,
+    /// or holds a bad camel route.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: Raw = toml::from_str(text)?;
         let window = raw.window.unwrap_or(DEFAULT_WINDOW);
@@ -154,6 +257,7 @@ impl Config {
                 pairing: raw.discord.pairing.unwrap_or(true),
                 allowed,
             },
+            camel: camel_routes(raw.camel.route)?,
         })
     }
 
@@ -237,6 +341,58 @@ mod tests {
         assert!(discord_sender("").is_err());
         assert!(discord_sender(&"1".repeat(21)).is_err());
         assert_eq!(discord_sender("42").unwrap().as_str(), "discord:42");
+    }
+
+    #[test]
+    fn the_camel_routes_are_read() {
+        let config = Config::parse(
+            "owner = \"m\"\n\
+             [[camel.route]]\nid = \"inbox\"\nfrom = \"file:/in?delete=true\"\nprompt = \"Read it.\"\n\
+             [[camel.route]]\nid = \"tick-1\"\nfrom = \"timer:t?period=60000\"\nprompt = \" \"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.camel,
+            vec![
+                CamelRoute {
+                    id: String::from("inbox"),
+                    from: String::from("file:/in?delete=true"),
+                    prompt: Some(String::from("Read it.")),
+                },
+                CamelRoute {
+                    id: String::from("tick-1"),
+                    from: String::from("timer:t?period=60000"),
+                    prompt: None,
+                },
+            ]
+        );
+        assert_eq!(config.camel[0].sender().unwrap().as_str(), "camel:inbox");
+    }
+
+    #[test]
+    fn a_bad_camel_route_is_refused() {
+        let route = |id: &str, from: &str| {
+            Config::parse(&format!(
+                "owner = \"m\"\n[[camel.route]]\nid = \"{id}\"\nfrom = \"{from}\"\n"
+            ))
+        };
+        for id in ["", "Inbox", "a b", &"x".repeat(33)] {
+            assert!(
+                matches!(route(id, "file:/in"), Err(ConfigError::CamelRouteId(_))),
+                "{id}"
+            );
+        }
+        for from in ["kafka:topic", "file", "/in"] {
+            let error = route("a", from).unwrap_err();
+            assert!(matches!(error, ConfigError::CamelScheme { .. }), "{from}");
+            assert!(error.to_string().contains("file, timer"));
+        }
+        let twice = Config::parse(
+            "owner = \"m\"\n[[camel.route]]\nid = \"a\"\nfrom = \"file:/x\"\n\
+             [[camel.route]]\nid = \"a\"\nfrom = \"file:/y\"\n",
+        );
+        assert!(matches!(twice, Err(ConfigError::CamelRouteTwice(_))));
+        assert!(Config::parse("owner = \"m\"\n[camel]\nother = 1\n").is_err());
     }
 
     #[test]

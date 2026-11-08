@@ -13,8 +13,18 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+autumn-harvest = "0.10"
 autumn-harvest-agent = { workspace = true }
+autumn-harvest-plugin = { version = "0.10", default-features = false, features = ["connectors"] }
 autumn-harvest-sqlite = { workspace = true }
+camel-api = "0.57"
+camel-builder = "0.57"
+camel-component-api = "0.57"
+camel-component-direct = "0.57"
+camel-component-file = "0.57"
+camel-component-timer = "0.57"
+camel-core = "0.57"
+harvest-camel = { version = "0.4", default-features = false, features = ["sqlite"] }
 clap = { workspace = true }
 getrandom = "0.4"
 littleguy-channels = { workspace = true }

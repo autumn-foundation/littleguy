@@ -32,6 +32,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::camel::Camel;
 use crate::pairs::{Entry, PairStore};
 use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response};
 
@@ -60,7 +61,8 @@ pub fn cli_sender(uid: u32) -> Result<SenderId> {
 ///
 /// The user who runs the daemon is the one allowed sender on the local
 /// socket, which offers no pairing. With `discord`, the Discord channel
-/// allows the senders of the config file and of the pairing store.
+/// allows the senders of the config file and of the pairing store. Each
+/// camel route of the config is an allowed sender of the camel channel.
 ///
 /// # Errors
 ///
@@ -97,6 +99,14 @@ pub fn routing(
                 .collect(),
         };
         table = table.channel(channel, rule);
+    }
+    if !config.camel.is_empty() {
+        let rule = ChannelRule {
+            enabled: true,
+            pairing: false,
+            allowed: crate::camel::senders(&config.camel)?.into_iter().collect(),
+        };
+        table = table.channel(ChannelId::new(crate::camel::CAMEL_CHANNEL)?, rule);
     }
     Ok(table)
 }
@@ -226,6 +236,37 @@ impl Daemon {
     #[must_use]
     pub const fn assistant(&self) -> &AgentId {
         self.routing.assistant()
+    }
+
+    /// The mapper of the camel routes of `config`. It checks each message
+    /// against the routing table of this daemon.
+    #[must_use]
+    pub fn camel_mapper(&self, config: &Config) -> crate::camel::Mapper {
+        crate::camel::Mapper {
+            assistant: self.routing.assistant().clone(),
+            routing: self.routing.clone(),
+            routes: config.camel.clone(),
+        }
+    }
+
+    /// Writes one camel batch into the runtime, then drives the assistant,
+    /// so it answers at once.
+    async fn camel(&mut self, apply: crate::camel::Apply) {
+        let applied = apply.batch.apply(&mut self.rt);
+        // The writes are durable now, so the camel task may ack them.
+        let _ = apply.reply.send(applied);
+        if let Err(error) = self.tick().await {
+            tracing::warn!(error = %format!("{error:#}"), "driving after a camel batch failed");
+            return;
+        }
+        match sqlite::state(&self.rt, self.routing.assistant()).await {
+            Ok(Some(state)) => tracing::debug!(
+                answer = state.last_answer.as_deref().unwrap_or_default(),
+                "the assistant answered a camel message"
+            ),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "reading the assistant failed"),
+        }
     }
 
     /// The committed state of the assistant, if it runs.
@@ -606,9 +647,12 @@ pub async fn run(
     mut daemon: Daemon,
     listener: UnixListener,
     discord: Option<DiscordLink>,
+    camel: Option<Camel>,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<Job>(64);
+    // Without camel routes, the sender drops at once and the arm sleeps.
+    let (camel_tx, mut camel_rx) = mpsc::channel::<crate::camel::Apply>(4);
     let mut tasks = vec![tokio::spawn(accept_loop(listener, tx.clone()))];
     if let Some(link) = discord {
         let (events_tx, events) = mpsc::unbounded_channel();
@@ -618,6 +662,11 @@ pub async fn run(
             events_tx,
         )));
         tasks.push(tokio::spawn(discord_loop(link.rest, events, tx.clone())));
+    }
+    if let Some(camel) = &camel {
+        tasks.push(tokio::spawn(crate::camel::pump(camel.inbound(), camel_tx)));
+    } else {
+        drop(camel_tx);
     }
     drop(tx);
     let mut ticker = tokio::time::interval(TICK);
@@ -630,6 +679,7 @@ pub async fn run(
                 let Some(job) = job else { break };
                 run_job(&mut daemon, job).await;
             }
+            Some(apply) = camel_rx.recv() => daemon.camel(apply).await,
             _ = ticker.tick() => {
                 if let Err(error) = daemon.tick().await {
                     tracing::warn!(error = %format!("{error:#}"), "a tick failed");
@@ -640,6 +690,9 @@ pub async fn run(
     }
     for task in tasks {
         task.abort();
+    }
+    if let Some(camel) = camel {
+        camel.stop().await;
     }
     Ok(())
 }
@@ -907,7 +960,7 @@ mod tests {
             (reply, bad_json, too_long)
         };
         let (served, (reply, bad_json, too_long)) =
-            tokio::join!(run(daemon, listener, None, stop), client);
+            tokio::join!(run(daemon, listener, None, None, stop), client);
         served.unwrap();
         assert_eq!(
             reply,
@@ -1315,7 +1368,7 @@ mod tests {
             assert!(fake.wait_for(10, |f| f.sent().len() == 5).await);
             stop_tx.send(()).unwrap();
         };
-        let (served, ()) = tokio::join!(run(daemon, listener, Some(link), stop), script);
+        let (served, ()) = tokio::join!(run(daemon, listener, Some(link), None, stop), script);
         served.unwrap();
         let sent: Vec<String> = fake.sent().into_iter().map(|s| s.content).collect();
         assert_eq!(
@@ -1325,5 +1378,150 @@ mod tests {
         assert!(fake.sent().iter().all(|s| s.channel_id == "dm555"));
         assert_eq!(model.calls(), 4);
         assert!(fake.connects() >= 2);
+    }
+
+    fn camel_config(dir: &Path, noop: bool) -> Config {
+        let mut config = config();
+        let from = format!(
+            "file:{}?initialDelay=0&delay=100&{}",
+            dir.display(),
+            if noop { "noop=true" } else { "delete=true" }
+        );
+        config.camel.push(littleguy_core::CamelRoute {
+            id: String::from("inbox"),
+            from,
+            prompt: Some(String::from("A file arrived.")),
+        });
+        config
+    }
+
+    /// Runs the daemon with the camel routes of `config` until `done`
+    /// holds or 15 seconds pass. Returns whether `done` held.
+    async fn run_camel(
+        db: &Path,
+        config: &Config,
+        model: Arc<OfflineModel>,
+        done: impl Fn(&OfflineModel) -> bool + Sync,
+    ) -> bool {
+        let dir = db.parent().unwrap();
+        let daemon = Daemon::open(
+            db,
+            config,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap();
+        let camel = Camel::start(daemon.camel_mapper(config), db).await.unwrap();
+        let listener = bind(&dir.join("lg.sock")).await.unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let stop = async {
+            let _ = stop_rx.await;
+        };
+        let watch = async {
+            let mut held = false;
+            for _ in 0..150 {
+                if done(&model) {
+                    held = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            stop_tx.send(()).unwrap();
+            held
+        };
+        let (served, held) = tokio::join!(run(daemon, listener, None, Some(camel), stop), watch);
+        served.unwrap();
+        held
+    }
+
+    /// A file in the watched directory becomes one message for the
+    /// assistant, and the route deletes it once the write is durable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_route_feeds_the_assistant() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = dir.path().join("in");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("note.txt"), "buy milk").unwrap();
+        // A body that is not UTF-8 is poison: a dead letter, not a turn.
+        std::fs::write(inbox.join("bad.bin"), [0xff_u8, 0xfe]).unwrap();
+        let db = dir.path().join("lg.db");
+        let config = camel_config(&inbox, false);
+        let model = Arc::new(OfflineModel::new());
+        let held = run_camel(&db, &config, Arc::clone(&model), |m| m.calls() >= 1).await;
+        assert!(held, "the file never reached the assistant");
+        assert_eq!(model.calls(), 1);
+        let daemon = open(&db, Arc::new(OfflineModel::new()));
+        let state = daemon.state().await.unwrap().unwrap();
+        assert_eq!(
+            state.last_answer.as_deref(),
+            Some("littleguy (offline): you said 'A file arrived.\n\nbuy milk'")
+        );
+        drop(daemon);
+        for _ in 0..50 {
+            if std::fs::read_dir(&inbox).unwrap().next().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let left: Vec<_> = std::fs::read_dir(&inbox).unwrap().collect();
+        assert!(
+            left.is_empty(),
+            "both files are settled and deleted: {left:?}"
+        );
+    }
+
+    /// A route with `noop=true` reads every file again after a restart. The
+    /// signal key of each file is the same, so a file runs once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_read_again_after_a_restart_runs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = dir.path().join("in");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(inbox.join("a.txt"), "first").unwrap();
+        let db = dir.path().join("lg.db");
+        let config = camel_config(&inbox, true);
+        let first = Arc::new(OfflineModel::new());
+        assert!(run_camel(&db, &config, Arc::clone(&first), |m| m.calls() >= 1).await);
+        assert_eq!(first.calls(), 1);
+
+        std::fs::write(inbox.join("b.txt"), "second").unwrap();
+        let second = Arc::new(OfflineModel::new());
+        assert!(run_camel(&db, &config, Arc::clone(&second), |m| m.calls() >= 1).await);
+        // The poll that read b.txt read a.txt too. Give it time to misbehave.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(second.calls(), 1, "a.txt ran once, before the restart");
+        let daemon = open(&db, Arc::new(OfflineModel::new()));
+        let state = daemon.state().await.unwrap().unwrap();
+        assert!(
+            state
+                .last_answer
+                .as_deref()
+                .is_some_and(|a| a.contains("second")),
+            "{state:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_camel_channel_allows_only_the_config_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = camel_config(dir.path(), true);
+        let daemon = open_with(&dir.path().join("lg.db"), &config);
+        let channel = ChannelId::new(crate::camel::CAMEL_CHANNEL).unwrap();
+        let allowed: Vec<&str> = daemon
+            .routing
+            .allowed(&channel)
+            .map(SenderId::as_str)
+            .collect();
+        assert_eq!(allowed, vec!["camel:inbox"]);
+        let plain = open(
+            &dir.path().join("other").join("lg.db"),
+            Arc::new(OfflineModel::new()),
+        );
+        assert_eq!(plain.routing.allowed(&channel).count(), 0);
+    }
+
+    fn open_with(db: &Path, config: &Config) -> Daemon {
+        Daemon::open(db, config, Arc::new(OfflineModel::new()), UID, false).unwrap()
     }
 }

@@ -76,6 +76,26 @@ Each Discord message runs once, and its reply goes out once. After a
 reconnect, the daemon reads the direct messages it missed and answers each
 one. [ADR 0002](docs/adr/0002-pairing-and-delivery.md) explains how.
 
+## Camel routes
+
+littleguy runs [harvest-camel](https://github.com/autumn-foundation/harvest-camel)
+routes on its own SQLite file. Each route reads from a camel component and
+hands each message to the assistant. Add one per source in `lg.toml`:
+
+```toml
+[[camel.route]]
+id = "inbox"                                  # the sender is camel:inbox
+from = "file:/home/mark/lg-inbox?delete=true" # file or timer
+prompt = "A file arrived. Summarize it."      # goes before each body
+```
+
+- A file goes to the assistant once. The route deletes it, or with
+  `noop=true` leaves it, only after the message is durable in the database.
+- A body that is not UTF-8 text is a dead letter in
+  `harvest_connector_dead_letters`, in `lg.db`. It never reaches the model.
+- The owner writes the routes, so their messages need no pairing.
+  [ADR 0003](docs/adr/0003-camel-routes.md) explains the design.
+
 ## Config
 
 `lg serve` reads `<config home>/littleguy/lg.toml` when it exists:
@@ -88,6 +108,10 @@ window = 40
 [discord]
 pairing = true                        # strangers get a code; false drops them
 allowed = ["123456789012345678"]      # Discord user ids allowed from the start
+
+[[camel.route]]
+id = "inbox"
+from = "file:/home/mark/lg-inbox?delete=true"
 ```
 
 | Flag | Variable | Default |
@@ -109,7 +133,8 @@ socket, and only that user may pair, list or unpair.
 On Discord, a sender reaches the assistant when the config file allows them
 or a pairing code added them. Anyone else gets a code, or nothing when
 `pairing = false`. The routing kernel makes each decision, and
-`formal/verus/src/route.rs` proves it. `formal/verus/src/pairing.rs` proves
+`formal/verus/src/route.rs` proves it. On the camel channel, only the routes
+of the config file are allowed senders. `formal/verus/src/pairing.rs` proves
 when a code is live and when a new one is issued.
 
 ## Layout
@@ -119,7 +144,7 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
 | `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
-| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs` and `unpair`. |
+| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs` and `unpair`, and the camel routes. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |
 

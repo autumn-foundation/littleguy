@@ -13,6 +13,16 @@
 //! id = "inbox"
 //! from = "file:/home/mark/lg-inbox?delete=true"
 //! prompt = "A file arrived. Summarize it."
+//!
+//! [san_mateo]
+//! bind = "127.0.0.1:3003"
+//!
+//! [[san_mateo.integration]]
+//! key = "google"
+//! provider = "google"
+//! client_id = "1234.apps.googleusercontent.com"
+//! client_secret_env = "LG_GOOGLE_CLIENT_SECRET"
+//! scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
 //! ```
 //!
 //! The `[discord]` section is optional. The bot token never goes in the
@@ -20,6 +30,10 @@
 //!
 //! Each `[[camel.route]]` is a camel route that feeds the assistant. The
 //! owner writes it, so its messages need no pairing.
+//!
+//! The `[san_mateo]` section names the OAuth integrations that San Mateo
+//! keeps tokens for. A client secret never goes in the file: the file names
+//! the variable that holds it.
 
 use std::path::Path;
 
@@ -63,6 +77,9 @@ pub enum ConfigError {
     /// Two camel routes have one id.
     #[error("two camel routes have the id `{0}`")]
     CamelRouteTwice(String),
+    /// The San Mateo section is not valid.
+    #[error(transparent)]
+    SanMateo(#[from] SanMateoError),
     /// A camel route reads from a component that littleguy does not run.
     #[error("camel route `{id}` reads from `{from}`: use one of {}", CAMEL_SCHEMES.join(", "))]
     CamelScheme {
@@ -72,6 +89,29 @@ pub enum ConfigError {
         from: String,
     },
 }
+
+/// A San Mateo setting is not valid.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SanMateoError {
+    /// The bind address is not an IP address and port.
+    #[error("san_mateo.bind `{0}` is not an address such as 127.0.0.1:3003")]
+    Bind(String),
+    /// The bind address is not a loopback address.
+    #[error("san_mateo.bind `{0}` is not a loopback address: OAuth callbacks stay on this machine")]
+    NotLoopback(String),
+    /// An integration key is not 1 to 100 of `A-Z a-z 0-9 _ . -`.
+    #[error("`{0}` is not an integration key: use 1 to 100 of A-Z, a-z, 0-9, _, . and -")]
+    Key(String),
+    /// Two integrations have one key.
+    #[error("two san_mateo integrations have the key `{0}`")]
+    KeyTwice(String),
+    /// A variable name is not an environment variable name.
+    #[error("`{0}` is not an environment variable name")]
+    Variable(String),
+}
+
+/// The default San Mateo address.
+pub const DEFAULT_SAN_MATEO_BIND: &str = "127.0.0.1:3003";
 
 /// The camel components that a route may read from.
 pub const CAMEL_SCHEMES: [&str; 2] = ["file", "timer"];
@@ -89,6 +129,101 @@ struct Raw {
     discord: RawDiscord,
     #[serde(default)]
     camel: RawCamel,
+    san_mateo: Option<RawSanMateo>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSanMateo {
+    bind: Option<String>,
+    #[serde(default)]
+    integration: Vec<RawIntegration>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIntegration {
+    key: String,
+    provider: String,
+    client_id: Option<String>,
+    client_secret_env: Option<String>,
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+/// One OAuth integration that San Mateo keeps tokens for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Integration {
+    /// The integration key, such as `google`.
+    pub key: String,
+    /// The provider name in the San Mateo catalog.
+    pub provider: String,
+    /// The OAuth client id.
+    pub client_id: Option<String>,
+    /// The variable that holds the OAuth client secret.
+    pub client_secret_env: Option<String>,
+    /// The scopes to ask for.
+    pub scopes: Vec<String>,
+}
+
+/// The San Mateo settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SanMateoConfig {
+    /// The loopback address of the connect pages and the OAuth callback.
+    pub bind: std::net::SocketAddr,
+    /// The integrations.
+    pub integrations: Vec<Integration>,
+}
+
+/// Whether `name` is a plain environment variable name.
+fn is_variable(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_uppercase() || b == b'_')
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Checks the San Mateo section of a config.
+fn san_mateo(raw: RawSanMateo) -> Result<SanMateoConfig, SanMateoError> {
+    let text = raw
+        .bind
+        .unwrap_or_else(|| String::from(DEFAULT_SAN_MATEO_BIND));
+    let bind: std::net::SocketAddr = text
+        .parse()
+        .map_err(|_| SanMateoError::Bind(text.clone()))?;
+    if !bind.ip().is_loopback() {
+        return Err(SanMateoError::NotLoopback(text));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let integrations = raw
+        .integration
+        .into_iter()
+        .map(|i| {
+            let plain = !i.key.is_empty()
+                && i.key.len() <= 100
+                && i.key
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'));
+            if !plain {
+                return Err(SanMateoError::Key(i.key));
+            }
+            if !seen.insert(i.key.clone()) {
+                return Err(SanMateoError::KeyTwice(i.key));
+            }
+            if let Some(var) = i.client_secret_env.as_deref().filter(|v| !is_variable(v)) {
+                return Err(SanMateoError::Variable(var.to_owned()));
+            }
+            Ok(Integration {
+                key: i.key,
+                provider: i.provider,
+                client_id: i.client_id.filter(|c| !c.is_empty()),
+                client_secret_env: i.client_secret_env,
+                scopes: i.scopes,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(SanMateoConfig { bind, integrations })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -215,6 +350,8 @@ pub struct Config {
     pub discord: DiscordConfig,
     /// The camel routes that feed the assistant.
     pub camel: Vec<CamelRoute>,
+    /// The San Mateo settings, when the config has the section.
+    pub san_mateo: Option<SanMateoConfig>,
 }
 
 impl Config {
@@ -227,6 +364,7 @@ impl Config {
             window: DEFAULT_WINDOW,
             discord: DiscordConfig::default(),
             camel: Vec::new(),
+            san_mateo: None,
         }
     }
 
@@ -236,7 +374,7 @@ impl Config {
     ///
     /// Returns an error when the text is not valid TOML, names an unknown
     /// key, holds a bad owner name or Discord user id, sets a zero window,
-    /// or holds a bad camel route.
+    /// or holds a bad camel route or San Mateo setting.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: Raw = toml::from_str(text)?;
         let window = raw.window.unwrap_or(DEFAULT_WINDOW);
@@ -258,6 +396,7 @@ impl Config {
                 allowed,
             },
             camel: camel_routes(raw.camel.route)?,
+            san_mateo: raw.san_mateo.map(san_mateo).transpose()?,
         })
     }
 
@@ -393,6 +532,72 @@ mod tests {
         );
         assert!(matches!(twice, Err(ConfigError::CamelRouteTwice(_))));
         assert!(Config::parse("owner = \"m\"\n[camel]\nother = 1\n").is_err());
+    }
+
+    #[test]
+    fn the_san_mateo_section_is_read() {
+        assert_eq!(Config::parse("owner = \"m\"").unwrap().san_mateo, None);
+        let config = Config::parse("owner = \"m\"\n[san_mateo]\n").unwrap();
+        let section = config.san_mateo.unwrap();
+        assert_eq!(section.bind.to_string(), DEFAULT_SAN_MATEO_BIND);
+        assert_eq!(section.integrations, Vec::new());
+        let config = Config::parse(
+            "owner = \"m\"\n[san_mateo]\nbind = \"[::1]:4000\"\n\
+             [[san_mateo.integration]]\nkey = \"google\"\nprovider = \"google\"\n\
+             client_id = \"c\"\nclient_secret_env = \"LG_G_SECRET\"\nscopes = [\"s1\"]\n\
+             [[san_mateo.integration]]\nkey = \"gh.work\"\nprovider = \"github\"\nclient_id = \"\"\n",
+        )
+        .unwrap();
+        let section = config.san_mateo.unwrap();
+        assert_eq!(section.bind.port(), 4000);
+        assert_eq!(
+            section.integrations,
+            vec![
+                Integration {
+                    key: String::from("google"),
+                    provider: String::from("google"),
+                    client_id: Some(String::from("c")),
+                    client_secret_env: Some(String::from("LG_G_SECRET")),
+                    scopes: vec![String::from("s1")],
+                },
+                Integration {
+                    key: String::from("gh.work"),
+                    provider: String::from("github"),
+                    client_id: None,
+                    client_secret_env: None,
+                    scopes: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bad_san_mateo_section_is_refused() {
+        let error = |section: &str| match Config::parse(&format!(
+            "owner = \"m\"\n[san_mateo]\n{section}"
+        )) {
+            Err(ConfigError::SanMateo(error)) => error,
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(error("bind = \"nope\"\n"), SanMateoError::Bind(_)));
+        assert!(matches!(
+            error("bind = \"0.0.0.0:3003\"\n"),
+            SanMateoError::NotLoopback(_)
+        ));
+        let one = |key: &str, extra: &str| {
+            format!("[[san_mateo.integration]]\nkey = \"{key}\"\nprovider = \"p\"\n{extra}")
+        };
+        assert!(matches!(error(&one("a b", "")), SanMateoError::Key(_)));
+        assert!(matches!(error(&one("", "")), SanMateoError::Key(_)));
+        let twice = format!("{}{}", one("a", ""), one("a", ""));
+        assert!(matches!(error(&twice), SanMateoError::KeyTwice(_)));
+        for var in ["lower", "1ABC", "A-B", ""] {
+            let extra = format!("client_secret_env = \"{var}\"\n");
+            assert!(
+                matches!(error(&one("a", &extra)), SanMateoError::Variable(_)),
+                "{var}"
+            );
+        }
     }
 
     #[test]

@@ -33,6 +33,36 @@ pub enum Request {
         /// The sender id, such as `discord:123`.
         sender: String,
     },
+    /// A link that connects one account of an integration. Only the owner
+    /// may.
+    Connect {
+        /// The integration key from the config, such as `google`.
+        integration: String,
+    },
+    /// List the OAuth connections. Only the owner may.
+    Connections,
+    /// Delete one OAuth connection. Only the owner may.
+    Disconnect {
+        /// The integration key.
+        integration: String,
+        /// The connection id.
+        connection: String,
+    },
+}
+
+/// One OAuth connection, with no credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionEntry {
+    /// The integration key.
+    pub integration: String,
+    /// The connection id.
+    pub connection: String,
+    /// The provider name.
+    pub provider: String,
+    /// When the account was connected, in RFC 3339.
+    pub created_at: String,
+    /// The refresh token stopped working, so the owner must connect again.
+    pub refresh_exhausted: bool,
 }
 
 /// One allowed sender.
@@ -88,6 +118,21 @@ pub enum Response {
         /// Whether a paired sender was removed.
         removed: bool,
     },
+    /// The link to open in a browser on this machine.
+    ConnectLink {
+        /// The link. It holds a one-time session token.
+        link: String,
+    },
+    /// The OAuth connections.
+    Connections {
+        /// Each connection.
+        entries: Vec<ConnectionEntry>,
+    },
+    /// The answer to a disconnect request.
+    Disconnected {
+        /// Whether the connection existed.
+        removed: bool,
+    },
     /// The request was not valid, or the daemon failed.
     Error {
         /// What went wrong.
@@ -128,6 +173,14 @@ mod tests {
             Request::Pairs,
             Request::Unpair {
                 sender: String::from("discord:1"),
+            },
+            Request::Connect {
+                integration: String::from("google"),
+            },
+            Request::Connections,
+            Request::Disconnect {
+                integration: String::from("google"),
+                connection: String::from("c-1"),
             },
         ] {
             let line = serde_json::to_string(&request).unwrap();

@@ -17,12 +17,13 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use autumn_harvest_agent::{AgentHarness, AgentId, AgentModel, AgentOp, AgentProfile, sqlite};
 use autumn_harvest_sqlite::SqliteRuntime;
+use chrono::{DateTime, Utc};
 use littleguy_channels::discord::{DiscordRest, DmMessage, GatewayEvent, run_gateway};
 use littleguy_core::{
     ASSISTANT_KIND, ChannelId, ChannelRule, Config, Inbound, MessageId, PairingCode, Pending,
@@ -33,6 +34,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::brief::{BriefDelivery, Calendar};
 use crate::camel::Camel;
 use crate::oauth::Connections;
 use crate::pairs::{Entry, PairStore};
@@ -115,21 +117,28 @@ pub fn routing(
 
 /// The harness of the assistant. With `memory`, the assistant keeps notes
 /// and an episode log in that store. `db` is the database that the
-/// consolidation dispatcher reads.
+/// consolidation dispatcher reads. With `brief`, the delivery sends the
+/// answer of each heartbeat tick to the owner. The daemon arms each tick.
 #[must_use]
 pub fn harness(
     config: &Config,
     model: Arc<dyn AgentModel>,
     memory: Option<(Arc<SqliteStores>, &Path)>,
+    brief: Option<Arc<BriefDelivery>>,
 ) -> AgentHarness {
-    let profile = AgentProfile::new(ASSISTANT_KIND)
+    let mut profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
         .window(config.window);
-    match memory {
-        Some((stores, db)) => crate::memory::harness(AgentHarness::new(model), stores, db)
-            .agent(crate::memory::profile(profile)),
-        None => AgentHarness::new(model).agent(profile),
+    let mut harness = AgentHarness::new(model);
+    if let Some((stores, db)) = memory {
+        harness = crate::memory::harness(harness, stores, db);
+        profile = crate::memory::profile(profile);
     }
+    if let Some(delivery) = brief {
+        harness = harness.delivery(delivery);
+        profile = profile.deliver();
+    }
+    harness.agent(profile)
 }
 
 /// The seconds since the Unix epoch.
@@ -199,7 +208,14 @@ pub struct Daemon {
     pending: PendingPairings,
     store: PairStore,
     connections: Option<Connections>,
+    brief: Option<Calendar>,
+    rest: Arc<OnceLock<DiscordRest>>,
+    clock: Clock,
 }
+
+/// The wall clock of the daemon. Tests set one clock for the daemon and its
+/// runtime.
+type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 impl std::fmt::Debug for Daemon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -231,13 +247,34 @@ impl Daemon {
         }
         let mut rt =
             SqliteRuntime::open(db).with_context(|| format!("opening {}", db.display()))?;
-        let stores = if config.memory.enabled {
+        let brief = config
+            .brief
+            .as_ref()
+            .map(|settings| Calendar::new(settings, Utc::now()))
+            .transpose()?;
+        // The brief keeps its sent reports in the memory store, so it opens
+        // the store even when memory is off.
+        let stores = if config.memory.enabled || config.brief.is_some() {
             Some(crate::memory::open(db)?)
         } else {
             None
         };
-        let memory = stores.map(|stores| (stores, db));
-        sqlite::register(&mut rt, Arc::new(harness(config, model, memory)));
+        let rest = Arc::new(OnceLock::new());
+        let delivery = config
+            .brief
+            .as_ref()
+            .zip(stores.as_ref())
+            .map(|(settings, stores)| {
+                Arc::new(BriefDelivery::new(
+                    settings,
+                    Arc::clone(stores),
+                    Arc::clone(&rest),
+                ))
+            });
+        let memory = stores
+            .filter(|_| config.memory.enabled)
+            .map(|stores| (stores, db));
+        sqlite::register(&mut rt, Arc::new(harness(config, model, memory, delivery)));
         crate::memory::schedule(&mut rt, &config.memory)?;
         // The runtime lock is held now, so this daemon is the store's one writer.
         let store = PairStore::open(crate::pairs::path_for(db))?;
@@ -249,7 +286,26 @@ impl Daemon {
             pending: PendingPairings::default(),
             store,
             connections: None,
+            brief,
+            rest,
+            clock: Arc::new(Utc::now),
         })
+    }
+
+    /// Sets the clock of the daemon and of its runtime. A test seam.
+    #[cfg(test)]
+    fn with_clock(mut self, clock: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) -> Self {
+        let clock: Clock = Arc::new(clock);
+        let runtime = Arc::clone(&clock);
+        self.rt.set_clock(move || runtime());
+        self.clock = clock;
+        self
+    }
+
+    /// Gives the brief its Discord client. The first client stays.
+    pub fn discord_rest(&self, rest: DiscordRest) {
+        // A second call keeps the first client, which is the same bot.
+        let _ = self.rest.set(rest);
     }
 
     /// Keeps OAuth connections with `connections`.
@@ -540,7 +596,38 @@ impl Daemon {
         Ok(Response::Unpaired { removed })
     }
 
-    /// Drives the assistant until it blocks, so a due timer fires.
+    /// Aims the engine timer at the next brief slot, when it needs an arm.
+    /// It returns the op key of the arm that it sent. The key names the
+    /// slot, so a slot is armed once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state does not read or the runtime does
+    /// not take the op.
+    pub async fn arm_brief(&mut self) -> Result<Option<String>> {
+        let now = (self.clock)();
+        let id = self.routing.assistant().clone();
+        let Some(calendar) = self.brief.as_mut() else {
+            return Ok(None);
+        };
+        // The state query replays the run, so it runs only after a slot.
+        let ticks = if calendar.waits_for_tick(now) {
+            sqlite::state(&self.rt, &id)
+                .await?
+                .map_or(0, |state| state.ticks)
+        } else {
+            0
+        };
+        let Some(arm) = calendar.arm(now, ticks) else {
+            return Ok(None);
+        };
+        tracing::info!(slot = %arm.key, "the next morning brief");
+        sqlite::send(&mut self.rt, &id, &arm.op, Some(&arm.key))?;
+        Ok(Some(arm.key))
+    }
+
+    /// Drives the assistant until it blocks, so a due timer fires. Then it
+    /// arms the next brief slot.
     ///
     /// # Errors
     ///
@@ -550,6 +637,11 @@ impl Daemon {
         // and drives every run once.
         self.rt.poll_once().await?;
         sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
+        // The arm comes after the drive, so a due brief tick runs first. A
+        // second drive books the armed tick at once.
+        if self.arm_brief().await?.is_some() {
+            sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
+        }
         Ok(())
     }
 }
@@ -715,6 +807,7 @@ pub async fn run(
     let (camel_tx, mut camel_rx) = mpsc::channel::<crate::camel::Apply>(4);
     let mut tasks = vec![tokio::spawn(accept_loop(listener, tx.clone()))];
     if let Some(link) = discord {
+        daemon.discord_rest(link.rest.clone());
         let (events_tx, events) = mpsc::unbounded_channel();
         tasks.push(tokio::spawn(run_gateway(
             link.token.clone(),
@@ -1645,8 +1738,8 @@ mod tests {
     }
 
     /// A model for the memory tests. `remember <note>` calls the memory
-    /// tool. `recall` answers with the notes in its prompt, and any other text
-    /// gets `ok: <text>`. A
+    /// tool. `recall` answers with the notes in its prompt, `quiet` gets
+    /// `HEARTBEAT_OK`, and any other text gets `ok: <text>`. A
     /// consolidation pass gets one fact per episode that says `tea`.
     #[derive(Debug, Default)]
     struct MemoryModel {
@@ -1707,6 +1800,11 @@ mod tests {
                         "action": "add", "block": "memory", "text": note,
                     }),
                 };
+            }
+            if user == "quiet" {
+                return ContentPart::Text(String::from(
+                    autumn_harvest_agent::delivery::HEARTBEAT_OK,
+                ));
             }
             if user != "recall" {
                 return ContentPart::Text(format!("ok: {user}"));
@@ -1890,5 +1988,194 @@ mod tests {
             format!("{error:#}").contains("memory.consolidate"),
             "{error:#}"
         );
+    }
+
+    fn brief_config(prompt: &str, to: Option<&str>) -> Config {
+        let mut config = config();
+        config.brief = Some(littleguy_core::BriefConfig {
+            schedule: String::from("0 8 * * *"),
+            timezone: String::from("UTC"),
+            prompt: String::from(prompt),
+            to: to.map(|sender| SenderId::new(sender).unwrap()),
+        });
+        config
+    }
+
+    /// Ticks until `done` holds, at most twenty times.
+    async fn tick_until(daemon: &mut Daemon, done: impl Fn() -> bool) {
+        for _ in 0..20 {
+            daemon.tick().await.unwrap();
+            if done() {
+                return;
+            }
+        }
+    }
+
+    /// A clock that a test moves by hand.
+    #[derive(Clone)]
+    struct HandClock(Arc<std::sync::atomic::AtomicI64>);
+
+    impl HandClock {
+        fn at(text: &str) -> Self {
+            let clock = Self(Arc::new(std::sync::atomic::AtomicI64::new(0)));
+            clock.set(text);
+            clock
+        }
+
+        fn set(&self, text: &str) {
+            let millis = DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_millis();
+            self.0.store(millis, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn now(&self) -> DateTime<Utc> {
+            let millis = self.0.load(std::sync::atomic::Ordering::SeqCst);
+            DateTime::from_timestamp_millis(millis).unwrap()
+        }
+    }
+
+    /// A daemon with a brief, a hand clock and a fake Discord.
+    fn brief_daemon(
+        db: &Path,
+        config: &Config,
+        model: &Arc<MemoryModel>,
+        clock: &HandClock,
+        fake: &littleguy_channels::testing::FakeDiscord,
+    ) -> Daemon {
+        let hand = clock.clone();
+        let daemon = Daemon::open(
+            db,
+            config,
+            Arc::clone(model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.discord_rest(DiscordRest::new(fake.api_base.clone(), "token"));
+        daemon
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_brief_reaches_the_owner_once_a_day() {
+        use littleguy_channels::testing::FakeDiscord;
+        use std::sync::atomic::Ordering;
+
+        let fake = FakeDiscord::start().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-09T07:00:00Z");
+        let config = brief_config("Morning.", Some("discord:555"));
+        let mut daemon = brief_daemon(&dir.path().join("lg.db"), &config, &model, &clock, &fake);
+
+        let armed = daemon.arm_brief().await.unwrap();
+        assert_eq!(armed.as_deref(), Some("brief:2026-11-09T08:00:00+00:00"));
+        // Before the slot, ticks send nothing and arm nothing new.
+        for _ in 0..3 {
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(daemon.arm_brief().await.unwrap(), None);
+        assert_eq!(fake.sent().len(), 0);
+        assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+
+        clock.set("2026-11-09T08:00:01Z");
+        tick_until(&mut daemon, || fake.sent().len() == 1).await;
+        let sent = fake.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].channel_id, "dm555");
+        assert_eq!(sent[0].content, "ok: Morning.");
+        let next = daemon.brief.as_ref().and_then(Calendar::slot);
+        assert_eq!(
+            next.map(|slot| slot.to_rfc3339()).as_deref(),
+            Some("2026-11-10T08:00:00+00:00")
+        );
+
+        // More ticks in the same slot run nothing new.
+        for _ in 0..3 {
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(fake.sent().len(), 1);
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+
+        // A chat answer goes to its channel, not to the brief.
+        let answer = daemon.handle_request(UID, request("m-1", "hello")).await;
+        assert_eq!(reply_text(&answer), "ok: hello");
+        assert_eq!(fake.sent().len(), 1);
+
+        clock.set("2026-11-10T08:00:01Z");
+        tick_until(&mut daemon, || fake.sent().len() == 2).await;
+        assert_eq!(fake.sent().len(), 2);
+        assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_brief_sends_nothing() {
+        use littleguy_channels::testing::FakeDiscord;
+        use std::sync::atomic::Ordering;
+
+        let fake = FakeDiscord::start().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-09T07:00:00Z");
+        let mut config = brief_config("quiet", Some("discord:555"));
+        // The brief opens its store even with memory off.
+        config.memory.enabled = false;
+        let mut daemon = brief_daemon(&dir.path().join("lg.db"), &config, &model, &clock, &fake);
+        daemon.tick().await.unwrap();
+        clock.set("2026-11-09T08:00:01Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) == 1).await;
+        for _ in 0..3 {
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.sent().len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_arms_the_same_slot_once() {
+        use littleguy_channels::testing::FakeDiscord;
+        use std::sync::atomic::Ordering;
+
+        let fake = FakeDiscord::start().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-09T07:00:00Z");
+        let config = brief_config("Morning.", Some("discord:555"));
+        {
+            let mut daemon = brief_daemon(&db, &config, &model, &clock, &fake);
+            daemon.tick().await.unwrap();
+        }
+        clock.set("2026-11-09T07:30:00Z");
+        let mut daemon = brief_daemon(&db, &config, &model, &clock, &fake);
+        // The new daemon arms the same slot. The engine takes it once.
+        assert!(daemon.arm_brief().await.unwrap().is_some());
+        clock.set("2026-11-09T08:00:01Z");
+        tick_until(&mut daemon, || fake.sent().len() == 1).await;
+        for _ in 0..3 {
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(fake.sent().len(), 1);
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_bad_brief_schedule_is_refused_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = brief_config("Morning.", None);
+        if let Some(brief) = bad.brief.as_mut() {
+            brief.timezone = String::from("Mars/Olympus");
+        }
+        let Err(error) = Daemon::open(
+            &dir.path().join("lg.db"),
+            &bad,
+            Arc::new(OfflineModel::new()),
+            UID,
+            false,
+        ) else {
+            panic!("a bad brief schedule opened");
+        };
+        assert!(format!("{error:#}").contains("brief.schedule"));
     }
 }

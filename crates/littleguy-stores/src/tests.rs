@@ -214,6 +214,32 @@ fn an_episode_clear_answers_a_retry_with_its_first_counts() {
 }
 
 #[test]
+fn a_sent_report_is_remembered_across_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let store = SqliteStores::open(&path).unwrap();
+    assert!(!store.was_sent("run:0").unwrap());
+    store.mark_sent("run:0").unwrap();
+    store.mark_sent("run:0").unwrap();
+    drop(store);
+    let store = SqliteStores::open(&path).unwrap();
+    assert!(store.was_sent("run:0").unwrap());
+    assert!(!store.was_sent("run:1").unwrap());
+}
+
+#[test]
+fn a_file_of_the_first_schema_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+    let store = SqliteStores::open(&path).unwrap();
+    store.mark_sent("k").unwrap();
+    assert!(store.was_sent("k").unwrap());
+}
+
+#[test]
 fn a_newer_schema_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");

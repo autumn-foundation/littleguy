@@ -15,6 +15,7 @@
 //! model. Each reads its key from the environment only, so the key never
 //! shows in a process list.
 
+mod brief;
 mod camel;
 mod client;
 mod daemon;
@@ -332,7 +333,7 @@ async fn main() -> ExitCode {
         )
         .with_writer(std::io::stderr)
         .init();
-    match run(Cli::parse()).await {
+    match Box::pin(run(Cli::parse())).await {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(error) => {

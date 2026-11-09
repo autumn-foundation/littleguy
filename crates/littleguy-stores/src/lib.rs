@@ -13,6 +13,10 @@
 //! Each edit carries a key, and a key applies once. A memory edit keeps its
 //! failure with its key, as the trait asks. A retried tool call then gets the
 //! same answer, even when another run changed the scope in between.
+//!
+//! The file also keeps the key of each report that a delivery sent. The
+//! engine delivers a report at least once, so a delivery that checks the
+//! key sends it once.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -27,7 +31,7 @@ use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 /// The schema version that [`SqliteStores::open`] writes.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// The most edit keys that one memory scope keeps. A retry comes soon after
 /// its first attempt, so the oldest key is safe to forget. The engine keeps
@@ -49,6 +53,9 @@ CREATE TABLE IF NOT EXISTS memory_edits (
 CREATE TABLE IF NOT EXISTS episode_logs (
     scope TEXT PRIMARY KEY,
     log   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sent_reports (
+    key TEXT PRIMARY KEY
 );
 CREATE TABLE IF NOT EXISTS episode_clears (
     scope   TEXT PRIMARY KEY,
@@ -140,6 +147,39 @@ impl SqliteStores {
     fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Failure>) -> Result<T, AgentError> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         f(&conn).map_err(Failure::into_agent)
+    }
+
+    /// Whether a delivery sent the report with `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot read.
+    pub fn was_sent(&self, key: &str) -> Result<bool, AgentError> {
+        self.read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT 1 FROM sent_reports WHERE key = ?1",
+                    params![key],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
+        })
+    }
+
+    /// Records that a delivery sent the report with `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot write.
+    pub fn mark_sent(&self, key: &str) -> Result<(), AgentError> {
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO sent_reports (key) VALUES (?1) ON CONFLICT (key) DO NOTHING",
+                params![key],
+            )?;
+            Ok(())
+        })
     }
 
     /// Applies one memory edit once for its key.

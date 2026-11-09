@@ -18,6 +18,11 @@
 //! consolidate = "0 3 * * *"
 //! timezone = "Europe/London"
 //!
+//! [brief]
+//! schedule = "30 7 * * 1-5"
+//! timezone = "Europe/London"
+//! to = "123456789012345678"
+//!
 //! [san_mateo]
 //! bind = "127.0.0.1:3003"
 //!
@@ -39,6 +44,11 @@
 //! runs by default. Each night a consolidation pass turns its recent answers
 //! into facts in those notes. `consolidate` is a cron expression in
 //! `timezone`. Set `enabled = false` to keep no notes.
+//!
+//! The `[brief]` section turns on a morning brief. At each `schedule` slot,
+//! in `timezone`, the assistant writes a short brief. It sends the brief as
+//! a Discord DM to the user `to`, and stays silent when nothing needs the
+//! owner. The time zone defaults to the memory time zone.
 //!
 //! The `[san_mateo]` section names the OAuth integrations that San Mateo
 //! keeps tokens for. A client secret never goes in the file: the file names
@@ -90,8 +100,14 @@ pub enum ConfigError {
     #[error("memory.consolidate `{0}` is not a cron expression such as \"0 3 * * *\"")]
     Consolidate(String),
     /// The time zone is empty or holds a space.
-    #[error("memory.timezone `{0}` is not a time zone name such as \"Europe/London\"")]
+    #[error("the time zone `{0}` is not a time zone name such as \"Europe/London\"")]
     Timezone(String),
+    /// The brief schedule is not a five-field cron expression.
+    #[error("brief.schedule `{0}` is not a cron expression such as \"30 7 * * 1-5\"")]
+    BriefSchedule(String),
+    /// The brief prompt is empty.
+    #[error("brief.prompt must not be empty")]
+    BriefPrompt,
     /// The San Mateo section is not valid.
     #[error(transparent)]
     SanMateo(#[from] SanMateoError),
@@ -180,6 +196,65 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
     })
 }
 
+/// The default schedule of the morning brief: 07:30 on weekdays.
+pub const DEFAULT_BRIEF_SCHEDULE: &str = "30 7 * * 1-5";
+
+/// The default instruction of the morning brief. It names the silent
+/// answer, so a morning with nothing to say sends nothing.
+pub const DEFAULT_BRIEF_PROMPT: &str = "It is time for the morning brief. From your notes \
+     and the recent conversation, list in a few short lines what needs the owner today: \
+     open questions, promises, reminders and anything that changed. Do not invent \
+     items. If nothing needs the owner, reply with exactly HEARTBEAT_OK.";
+
+/// The settings of the morning brief.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefConfig {
+    /// The cron expression of the brief, five fields.
+    pub schedule: String,
+    /// The IANA time zone of `schedule`.
+    pub timezone: String,
+    /// The instruction that starts each brief.
+    pub prompt: String,
+    /// The Discord user that gets the brief. `None` writes it to the log
+    /// only.
+    pub to: Option<SenderId>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBrief {
+    schedule: Option<String>,
+    timezone: Option<String>,
+    prompt: Option<String>,
+    to: Option<String>,
+}
+
+/// Checks the brief section. Its time zone defaults to `memory_timezone`.
+fn brief(raw: RawBrief, memory_timezone: &str) -> Result<BriefConfig, ConfigError> {
+    let schedule = raw
+        .schedule
+        .unwrap_or_else(|| String::from(DEFAULT_BRIEF_SCHEDULE));
+    if schedule.split_whitespace().count() != 5 {
+        return Err(ConfigError::BriefSchedule(schedule));
+    }
+    let timezone = raw.timezone.unwrap_or_else(|| memory_timezone.to_owned());
+    if timezone.trim().is_empty() || timezone.chars().any(char::is_whitespace) {
+        return Err(ConfigError::Timezone(timezone));
+    }
+    let prompt = raw
+        .prompt
+        .unwrap_or_else(|| String::from(DEFAULT_BRIEF_PROMPT));
+    if prompt.trim().is_empty() {
+        return Err(ConfigError::BriefPrompt);
+    }
+    Ok(BriefConfig {
+        schedule,
+        timezone,
+        prompt,
+        to: raw.to.as_deref().map(discord_sender).transpose()?,
+    })
+}
+
 /// The default San Mateo address.
 pub const DEFAULT_SAN_MATEO_BIND: &str = "127.0.0.1:3003";
 
@@ -202,6 +277,7 @@ struct Raw {
     san_mateo: Option<RawSanMateo>,
     #[serde(default)]
     memory: RawMemory,
+    brief: Option<RawBrief>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -426,6 +502,8 @@ pub struct Config {
     pub san_mateo: Option<SanMateoConfig>,
     /// The memory settings.
     pub memory: MemoryConfig,
+    /// The morning brief, when the config has the section.
+    pub brief: Option<BriefConfig>,
 }
 
 impl Config {
@@ -440,6 +518,7 @@ impl Config {
             camel: Vec::new(),
             san_mateo: None,
             memory: MemoryConfig::default(),
+            brief: None,
         }
     }
 
@@ -462,6 +541,11 @@ impl Config {
             .iter()
             .map(|id| discord_sender(id))
             .collect::<Result<_, _>>()?;
+        let memory = memory(raw.memory)?;
+        let brief = raw
+            .brief
+            .map(|raw| brief(raw, &memory.timezone))
+            .transpose()?;
         Ok(Self {
             owner: OwnerName::new(raw.owner)?,
             system: raw.system.unwrap_or_else(|| String::from(DEFAULT_SYSTEM)),
@@ -472,7 +556,8 @@ impl Config {
             },
             camel: camel_routes(raw.camel.route)?,
             san_mateo: raw.san_mateo.map(san_mateo).transpose()?,
-            memory: memory(raw.memory)?,
+            memory,
+            brief,
         })
     }
 
@@ -527,6 +612,50 @@ mod tests {
         assert!(matches!(
             parse("timezone = \"\""),
             Err(ConfigError::Timezone(_))
+        ));
+        assert!(matches!(parse("other = 1"), Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn the_brief_section_is_read_with_its_defaults() {
+        let config = Config::parse(
+            "owner = \"mark\"\n[memory]\ntimezone = \"Europe/London\"\n[brief]\nto = \"123\"",
+        )
+        .unwrap();
+        assert_eq!(
+            config.brief,
+            Some(BriefConfig {
+                schedule: String::from(DEFAULT_BRIEF_SCHEDULE),
+                timezone: String::from("Europe/London"),
+                prompt: String::from(DEFAULT_BRIEF_PROMPT),
+                to: Some(discord_sender("123").unwrap()),
+            })
+        );
+        assert!(DEFAULT_BRIEF_PROMPT.contains("HEARTBEAT_OK"));
+        let bare = Config::parse("owner = \"mark\"\n[brief]\nschedule = \"0 8 * * *\"").unwrap();
+        let brief = bare.brief.unwrap();
+        assert_eq!(brief.timezone, DEFAULT_TIMEZONE);
+        assert_eq!(brief.to, None);
+    }
+
+    #[test]
+    fn a_bad_brief_section_is_refused() {
+        let parse = |section: &str| Config::parse(&format!("owner = \"mark\"\n[brief]\n{section}"));
+        assert!(matches!(
+            parse("schedule = \"at seven\""),
+            Err(ConfigError::BriefSchedule(_))
+        ));
+        assert!(matches!(
+            parse("timezone = \" \""),
+            Err(ConfigError::Timezone(_))
+        ));
+        assert!(matches!(
+            parse("prompt = \"  \""),
+            Err(ConfigError::BriefPrompt)
+        ));
+        assert!(matches!(
+            parse("to = \"mark\""),
+            Err(ConfigError::DiscordUser(_))
         ));
         assert!(matches!(parse("other = 1"), Err(ConfigError::Parse(_))));
     }

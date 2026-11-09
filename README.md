@@ -120,6 +120,27 @@ only while `lg serve` runs. After a night off it runs once, at the next
 start. [ADR 0005](docs/adr/0005-memory-and-consolidation.md) explains the
 design.
 
+## Morning brief
+
+A `[brief]` section turns on a short brief on weekday mornings. At each
+slot the assistant reads its notes and the recent conversation, and lists
+what needs you today. It sends the list as a Discord DM. When nothing needs
+you, it answers `HEARTBEAT_OK`, and you get no message.
+
+```toml
+[brief]
+schedule = "30 7 * * 1-5"       # cron; the default is 07:30, Monday to Friday
+timezone = "Europe/London"      # IANA name; the default is the memory time zone
+to = "123456789012345678"       # your Discord user id; without it, the log only
+# prompt = "..."                # the instruction of each brief
+```
+
+The brief is read-only: it calls no tool that acts, and it writes no note.
+Each slot sends at most one DM, also across a restart. A slot that passes
+while `lg serve` is down runs once, at the next start. The brief needs the
+Discord channel to reach you. [ADR 0006](docs/adr/0006-morning-brief.md)
+explains the design.
+
 ## OAuth connections
 
 littleguy embeds [San Mateo](https://github.com/autumn-foundation/san-mateo)

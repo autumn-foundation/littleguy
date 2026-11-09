@@ -13,8 +13,8 @@ use.
 | M1.6 | Camel routes (file and timer) that feed the assistant through harvest-camel on SQLite | Done (#5) |
 | M1.7 | OAuth connections kept by an embedded San Mateo on SQLite: `lg connect`, `lg connections`, `lg disconnect` | Done (#6) |
 | M1.5 | Slack over Socket Mode, when autumn-plugin-slack 0.4 is on crates.io | Planned |
-| M2 | Durable memory and an episode log in `memory.db`, and a nightly consolidation pass on a cron schedule | This PR |
-| M2.1 | A weekday morning brief that stays silent when there is nothing to say | Planned |
+| M2 | Durable memory and an episode log in `memory.db`, and a nightly consolidation pass on a cron schedule | Done (#7) |
+| M2.1 | A weekday morning brief that stays silent when there is nothing to say | This PR |
 | M3 | Tools: web fetch and search, workspace files, sandboxed shell, MCP client, flow rules, approve and deny buttons | Planned |
 | M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Planned |
 | M5 | A web UI over the management API, Postgres mode, camel request and reply, the refine loop | Planned |

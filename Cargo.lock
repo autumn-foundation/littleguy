@@ -3298,6 +3298,7 @@ dependencies = [
  "camel-component-file",
  "camel-component-timer",
  "camel-core",
+ "chrono",
  "clap",
  "getrandom 0.4.3",
  "harvest-camel",

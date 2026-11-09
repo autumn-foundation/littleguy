@@ -1124,7 +1124,7 @@ mod tests {
             },
         ] {
             let refused = daemon.handle_request(UID + 1, request).await;
-            assert!(matches!(refused, Response::Error { .. }), "{refused:?}");
+            assert!(matches!(refused, Response::Error { .. }));
         }
     }
 
@@ -1178,8 +1178,9 @@ mod tests {
         assert_eq!(model.calls(), 1);
 
         let pairs = daemon.handle_request(UID, Request::Pairs).await;
+        // An answer can hold a connect link, so the failure does not print it.
         let Response::Pairs { entries } = pairs else {
-            panic!("{pairs:?}");
+            panic!("`lg pairs` gave another answer");
         };
         let rows: Vec<(&str, &str, &str)> = entries
             .iter()

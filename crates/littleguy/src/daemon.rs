@@ -1592,9 +1592,9 @@ mod tests {
                 },
             )
             .await;
+        // The link holds a session token, so the assertion does not print it.
         assert!(
-            matches!(&link, Response::ConnectLink { link } if link.contains("connect_session_token=")),
-            "{link:?}"
+            matches!(&link, Response::ConnectLink { link } if link.contains("connect_session_token="))
         );
         let unknown = daemon
             .handle_request(

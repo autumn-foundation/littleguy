@@ -383,7 +383,7 @@ github:
         assert_eq!(connections.list().await.unwrap(), Vec::new());
 
         let link = connections.connect("acme").await.unwrap();
-        assert!(link.starts_with(connections.server_url()), "{link}");
+        assert!(link.starts_with(connections.server_url()));
         let browser = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -459,7 +459,7 @@ github:
     #[test]
     fn the_secret_key_is_fresh() {
         let a = fresh_secret_key().unwrap();
-        assert!(a.starts_with("sk_lg_") && a.len() == 54, "{a}");
+        assert!(a.starts_with("sk_lg_") && a.len() == 54);
         assert_ne!(a, fresh_secret_key().unwrap());
     }
 }

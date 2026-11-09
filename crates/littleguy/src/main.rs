@@ -6,12 +6,14 @@
 //!   talk to the assistant on Discord.
 //!
 //! With `DISCORD_BOT_TOKEN` set, `lg serve` also answers Discord direct
-//! messages. The token comes from the environment only.
+//! messages. The token comes from the environment only. Each
+//! `[[camel.route]]` of the config feeds the assistant too.
 //!
 //! `lg serve --model claude`, `openai` or `openrouter` talks to a hosted
 //! model. Each reads its key from the environment only, so the key never
 //! shows in a process list.
 
+mod camel;
 mod client;
 mod daemon;
 mod pairs;
@@ -232,7 +234,12 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
             std::future::pending::<()>().await;
         }
     };
-    daemon::run(daemon, listener, link, stop).await?;
+    let camel = if config.camel.is_empty() {
+        None
+    } else {
+        Some(camel::Camel::start(daemon.camel_mapper(&config), &db).await?)
+    };
+    daemon::run(daemon, listener, link, camel, stop).await?;
     // The socket file goes with the daemon. A crash leaves it, and the next
     // start replaces it.
     let _ = std::fs::remove_file(&socket);

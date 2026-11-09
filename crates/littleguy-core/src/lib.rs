@@ -8,7 +8,7 @@ pub mod ids;
 pub mod pairing;
 pub mod route;
 
-pub use config::{Config, ConfigError, DiscordConfig, discord_sender};
+pub use config::{CamelRoute, Config, ConfigError, DiscordConfig, discord_sender};
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
 pub use pairing::{PairingCode, Pending, PendingPairings};
 pub use route::{ChannelRule, Decision, Inbound, Route, Routing, decide, route};

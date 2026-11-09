@@ -10,9 +10,9 @@ pub mod pairing;
 pub mod route;
 
 pub use config::{
-    BriefConfig, CamelRoute, Config, ConfigError, DiscordConfig, FirecrackerConfig, Integration,
-    MemoryConfig, SanMateoConfig, SanMateoError, SandboxBackend, SandboxConfig, ToolsConfig,
-    discord_sender,
+    ApprovalsConfig, BriefConfig, CamelRoute, Config, ConfigError, DiscordConfig,
+    FirecrackerConfig, FlowConfig, FlowRecheck, Integration, McpServer, McpTransport, MemoryConfig,
+    SanMateoConfig, SanMateoError, SandboxBackend, SandboxConfig, ToolsConfig, discord_sender,
 };
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
 pub use pairing::{PairingCode, Pending, PendingPairings};

@@ -29,10 +29,32 @@
 //! files = true
 //! fetch_max_chars = 20000
 //!
+//! [approvals]
+//! approver = "123456789012345678"
+//! timeout_secs = 3600
+//!
+//! [flow]
+//! rule_of_two = true
+//! recheck = "each_call"
+//!
+//! [[mcp.server]]
+//! id = "github"
+//! command = "github-mcp-server"
+//! args = ["stdio"]
+//! env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+//! labels = ["untrusted_input", "private_data"]
+//! effect = "external"
+//!
+//! [[mcp.server]]
+//! id = "notes"
+//! url = "http://127.0.0.1:8808/mcp"
+//! bearer_env = "LG_NOTES_TOKEN"
+//! labels = ["private_data"]
+//! effect = "write"
+//! tools = ["search", "append"]
+//!
 //! [sandbox]
 //! backend = "firecracker"
-//! approver = "123456789012345678"
-//! approval_timeout_secs = 3600
 //!
 //! [sandbox.firecracker]
 //! firecracker = "/usr/local/bin/firecracker"
@@ -74,12 +96,29 @@
 //! public web page, search the web when `LG_BRAVE_API_KEY` is set, and keep
 //! files in its own workspace. Set a key to `false` to take a tool away.
 //!
+//! The `[approvals]` section names who decides a call that waits for a
+//! person. `approver` names the Discord user who gets approve and deny
+//! buttons. The owner can always decide with `lg approve` and `lg deny`. A
+//! call with no decision after `timeout_secs` is denied.
+//!
+//! The `[flow]` section sets the flow rules. By default the Rule of Two is
+//! on: a call waits for a person when the conversation would then hold
+//! untrusted input, private data, and a write or an outside effect. Under
+//! `recheck = "each_call"` each such call waits. Under `"until_approved"`
+//! one approval releases the rule for the rest of that op.
+//!
+//! Each `[[mcp.server]]` adds the tools of one MCP server. A server runs as
+//! a child process (`command`) or answers at a URL (`url`). A child gets
+//! only `PATH`, `HOME` and the variables that `env` names. `bearer_env`
+//! names the variable that holds the bearer token of a URL. A URL that is
+//! not on this machine must use https. `labels` and `effect` feed the flow
+//! rules, and the effect defaults to `external`. `tools` keeps only the
+//! named tools. The model sees each tool as `<id>__<tool>`.
+//!
 //! The `[sandbox]` section gives the assistant a `run_code` tool. Each call
-//! waits until a person approves it. `approver` names the Discord user who
-//! gets approve and deny buttons. The owner can always decide with
-//! `lg approve` and `lg deny`. The `firecracker` backend runs each call in
-//! a new microVM. The `process` backend runs code as a host process. It
-//! shares the host kernel, so it is for development only.
+//! waits until a person approves it. The `firecracker` backend runs each
+//! call in a new microVM. The `process` backend runs code as a host
+//! process. It shares the host kernel, so it is for development only.
 //!
 //! The `[san_mateo]` section names the OAuth integrations that San Mateo
 //! keeps tokens for. A client secret never goes in the file: the file names
@@ -87,6 +126,8 @@
 
 use std::path::{Path, PathBuf};
 
+use autumn_harvest_agent::ToolEffect;
+use autumn_harvest_agent::flow::{FlowRules, Recheck};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -145,6 +186,17 @@ pub enum ConfigError {
     /// The sandbox section is not valid.
     #[error("the sandbox section is not valid: {0}")]
     Sandbox(String),
+    /// The approvals section is not valid.
+    #[error("the approvals section is not valid: {0}")]
+    Approvals(String),
+    /// An MCP server is not valid.
+    #[error("mcp server `{id}` is not valid: {why}")]
+    Mcp {
+        /// The server id as written.
+        id: String,
+        /// What is wrong.
+        why: String,
+    },
     /// The San Mateo section is not valid.
     #[error(transparent)]
     SanMateo(#[from] SanMateoError),
@@ -380,21 +432,13 @@ pub struct FirecrackerConfig {
     pub netns: Option<PathBuf>,
 }
 
-/// The approval wait of a code call when the config names none: one hour.
-pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3_600;
-
-/// The `run_code` tool and its approvals.
+/// The `run_code` tool. Each call waits for a person.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxConfig {
     /// Where the code runs.
     pub backend: SandboxBackend,
     /// Whether the code may use the network of the backend.
     pub network: bool,
-    /// The Discord user who gets the approve and deny buttons.
-    pub approver: Option<SenderId>,
-    /// How long a call waits for a decision. A call with no decision is
-    /// denied.
-    pub approval_timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,8 +446,6 @@ pub struct SandboxConfig {
 struct RawSandbox {
     backend: String,
     network: Option<bool>,
-    approver: Option<String>,
-    approval_timeout_secs: Option<u64>,
     firecracker: Option<RawFirecracker>,
 }
 
@@ -448,20 +490,295 @@ fn sandbox(raw: RawSandbox) -> Result<SandboxConfig, ConfigError> {
             )));
         }
     };
-    let approval_timeout_secs = raw
-        .approval_timeout_secs
-        .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS);
-    if approval_timeout_secs == 0 {
-        return Err(ConfigError::Sandbox(String::from(
-            "approval_timeout_secs must be at least 1",
-        )));
-    }
     Ok(SandboxConfig {
         backend,
         network: raw.network.unwrap_or(false),
-        approver: raw.approver.as_deref().map(discord_sender).transpose()?,
-        approval_timeout_secs,
     })
+}
+
+/// The approval wait of a call when the config names none: one hour.
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3_600;
+
+/// Who decides a call that waits, and how long it waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalsConfig {
+    /// The Discord user who gets the approve and deny buttons.
+    pub approver: Option<SenderId>,
+    /// How long a call waits for a decision. A call with no decision is
+    /// denied.
+    pub timeout_secs: u64,
+}
+
+impl Default for ApprovalsConfig {
+    fn default() -> Self {
+        Self {
+            approver: None,
+            timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApprovals {
+    approver: Option<String>,
+    timeout_secs: Option<u64>,
+}
+
+/// Checks the approvals section.
+fn approvals(raw: &RawApprovals) -> Result<ApprovalsConfig, ConfigError> {
+    let timeout_secs = raw.timeout_secs.unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS);
+    if timeout_secs == 0 {
+        return Err(ConfigError::Approvals(String::from(
+            "timeout_secs must be at least 1",
+        )));
+    }
+    Ok(ApprovalsConfig {
+        approver: raw.approver.as_deref().map(discord_sender).transpose()?,
+        timeout_secs,
+    })
+}
+
+/// When a flow rule asks again after a person approved a call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowRecheck {
+    /// Each call that trips a rule waits for a person.
+    #[default]
+    EachCall,
+    /// One approval releases the rule for the rest of the op.
+    UntilApproved,
+}
+
+/// The flow rules of the assistant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowConfig {
+    /// Whether the Rule of Two holds.
+    pub rule_of_two: bool,
+    /// When a rule asks again.
+    pub recheck: FlowRecheck,
+}
+
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            rule_of_two: true,
+            recheck: FlowRecheck::EachCall,
+        }
+    }
+}
+
+impl FlowConfig {
+    /// The engine rules of this config. They are empty when the Rule of Two
+    /// is off.
+    #[must_use]
+    pub fn rules(&self) -> FlowRules {
+        if !self.rule_of_two {
+            return FlowRules::new();
+        }
+        let recheck = match self.recheck {
+            FlowRecheck::EachCall => Recheck::EachCall,
+            FlowRecheck::UntilApproved => Recheck::UntilApproved,
+        };
+        FlowRules::rule_of_two().with_recheck(recheck)
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFlow {
+    rule_of_two: Option<bool>,
+    recheck: Option<FlowRecheck>,
+}
+
+/// How long one MCP call may take when the config names no bound.
+pub const DEFAULT_MCP_TIMEOUT_SECS: u64 = 60;
+
+/// The longest MCP server id, in bytes.
+pub const MAX_MCP_SERVER_ID: usize = 16;
+
+/// The longest flow label, in bytes.
+pub const MAX_LABEL: usize = 64;
+
+/// How littleguy reaches an MCP server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransport {
+    /// A child process that speaks MCP on its stdin and stdout.
+    Stdio {
+        /// The program.
+        command: String,
+        /// Its arguments.
+        args: Vec<String>,
+        /// The variables of the daemon that the child also gets.
+        env: Vec<String>,
+    },
+    /// A server that answers streamable HTTP at a URL.
+    Http {
+        /// The URL of the MCP endpoint.
+        url: String,
+        /// The variable that holds the bearer token.
+        bearer_env: Option<String>,
+    },
+}
+
+/// One MCP server whose tools the assistant may call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    /// The server id. Each tool name starts with `<id>__`.
+    pub id: String,
+    /// How littleguy reaches the server.
+    pub transport: McpTransport,
+    /// The flow labels of each tool of the server.
+    pub labels: Vec<String>,
+    /// What each tool of the server can change.
+    pub effect: ToolEffect,
+    /// The tools to keep, by their MCP names. `None` keeps every tool.
+    pub tools: Option<Vec<String>>,
+    /// How long one call may take, in seconds.
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcp {
+    #[serde(default)]
+    server: Vec<RawMcpServer>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpServer {
+    id: String,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: Vec<String>,
+    url: Option<String>,
+    bearer_env: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    effect: Option<ToolEffect>,
+    tools: Option<Vec<String>>,
+    timeout_secs: Option<u64>,
+}
+
+/// Whether `url` may carry a bearer token: https, or http to this machine.
+fn safe_mcp_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => parsed.host().is_some(),
+        "http" => match parsed.host() {
+            Some(url::Host::Domain(name)) => name == "localhost",
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Checks one MCP server.
+fn mcp_server(raw: RawMcpServer) -> Result<McpServer, ConfigError> {
+    let fail = |why: &str| ConfigError::Mcp {
+        id: raw.id.clone(),
+        why: why.to_owned(),
+    };
+    let plain = !raw.id.is_empty()
+        && raw.id.len() <= MAX_MCP_SERVER_ID
+        && raw
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !plain {
+        return Err(fail("the id needs 1 to 16 of a-z, 0-9 and -"));
+    }
+    if let Some(var) = raw
+        .env
+        .iter()
+        .chain(&raw.bearer_env)
+        .find(|v| !is_variable(v))
+    {
+        return Err(fail(&format!(
+            "`{var}` is not an environment variable name"
+        )));
+    }
+    let label_ok = |label: &String| {
+        !label.is_empty()
+            && label.len() <= MAX_LABEL
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_:.-".contains(&b))
+    };
+    if let Some(label) = raw.labels.iter().find(|l| !label_ok(l)) {
+        return Err(fail(&format!(
+            "`{label}` is not a label: use 1 to 64 of a-z, 0-9, _, :, . and -"
+        )));
+    }
+    if raw.tools.as_ref().is_some_and(Vec::is_empty) {
+        return Err(fail("an empty tools list keeps no tool: leave it out"));
+    }
+    let timeout_secs = raw.timeout_secs.unwrap_or(DEFAULT_MCP_TIMEOUT_SECS);
+    if timeout_secs == 0 {
+        return Err(fail("timeout_secs must be at least 1"));
+    }
+    let transport = match (raw.command, raw.url) {
+        (Some(command), None) => {
+            if raw.bearer_env.is_some() {
+                return Err(fail("bearer_env needs a url"));
+            }
+            if command.trim().is_empty() {
+                return Err(fail("the command is empty"));
+            }
+            McpTransport::Stdio {
+                command,
+                args: raw.args,
+                env: raw.env,
+            }
+        }
+        (None, Some(url)) => {
+            if !raw.args.is_empty() || !raw.env.is_empty() {
+                return Err(fail("args and env need a command"));
+            }
+            if !safe_mcp_url(&url) {
+                return Err(fail(
+                    "the url must use https, or http to localhost or a loopback address",
+                ));
+            }
+            McpTransport::Http {
+                url,
+                bearer_env: raw.bearer_env,
+            }
+        }
+        _ => return Err(fail("set exactly one of command and url")),
+    };
+    Ok(McpServer {
+        id: raw.id,
+        transport,
+        labels: raw.labels,
+        effect: raw.effect.unwrap_or(ToolEffect::External),
+        tools: raw.tools,
+        timeout_secs,
+    })
+}
+
+/// Checks the MCP servers of a config.
+fn mcp_servers(raw: Vec<RawMcpServer>) -> Result<Vec<McpServer>, ConfigError> {
+    let mut seen = std::collections::BTreeSet::new();
+    raw.into_iter()
+        .map(|raw| {
+            let server = mcp_server(raw)?;
+            if !seen.insert(server.id.clone()) {
+                return Err(ConfigError::Mcp {
+                    id: server.id,
+                    why: String::from("two servers have this id"),
+                });
+            }
+            Ok(server)
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,6 +798,12 @@ struct Raw {
     #[serde(default)]
     tools: RawTools,
     sandbox: Option<RawSandbox>,
+    #[serde(default)]
+    approvals: RawApprovals,
+    #[serde(default)]
+    flow: RawFlow,
+    #[serde(default)]
+    mcp: RawMcp,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -711,6 +1034,12 @@ pub struct Config {
     pub tools: ToolsConfig,
     /// The `run_code` tool, when the config has the section.
     pub sandbox: Option<SandboxConfig>,
+    /// Who decides a call that waits.
+    pub approvals: ApprovalsConfig,
+    /// The flow rules.
+    pub flow: FlowConfig,
+    /// The MCP servers.
+    pub mcp: Vec<McpServer>,
 }
 
 impl Config {
@@ -728,6 +1057,9 @@ impl Config {
             brief: None,
             tools: ToolsConfig::default(),
             sandbox: None,
+            approvals: ApprovalsConfig::default(),
+            flow: FlowConfig::default(),
+            mcp: Vec::new(),
         }
     }
 
@@ -769,6 +1101,12 @@ impl Config {
             brief,
             tools: tools(&raw.tools)?,
             sandbox: raw.sandbox.map(sandbox).transpose()?,
+            approvals: approvals(&raw.approvals)?,
+            flow: FlowConfig {
+                rule_of_two: raw.flow.rule_of_two.unwrap_or(true),
+                recheck: raw.flow.recheck.unwrap_or_default(),
+            },
+            mcp: mcp_servers(raw.mcp.server)?,
         })
     }
 
@@ -827,29 +1165,23 @@ mod tests {
     fn the_sandbox_section_is_read() {
         let plain = Config::parse("owner = \"mark\"").unwrap();
         assert_eq!(plain.sandbox, None);
-        let process =
-            Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprover = \"42\"")
-                .unwrap();
+        let process = Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"").unwrap();
         assert_eq!(
             process.sandbox,
             Some(SandboxConfig {
                 backend: SandboxBackend::Process,
                 network: false,
-                approver: Some(SenderId::new("discord:42").unwrap()),
-                approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
             })
         );
         let vm = Config::parse(
             "owner = \"mark\"\n[sandbox]\nbackend = \"firecracker\"\nnetwork = true\n\
-             approval_timeout_secs = 60\n[sandbox.firecracker]\nfirecracker = \"/fc\"\n\
+             [sandbox.firecracker]\nfirecracker = \"/fc\"\n\
              jailer = \"/j\"\nkernel = \"/k\"\nrootfs = \"/r\"\nuid = 9\ngid = 8",
         )
         .unwrap()
         .sandbox
         .unwrap();
         assert!(vm.network);
-        assert_eq!(vm.approval_timeout_secs, 60);
-        assert_eq!(vm.approver, None);
         assert_eq!(
             vm.backend,
             SandboxBackend::Firecracker(FirecrackerConfig {
@@ -875,15 +1207,145 @@ mod tests {
         };
         assert!(bad("backend = \"docker\"").contains("docker"));
         assert!(bad("backend = \"firecracker\"").contains("[sandbox.firecracker]"));
-        assert!(bad("backend = \"process\"\napproval_timeout_secs = 0").contains("at least 1"));
         let fc = "[sandbox.firecracker]\nfirecracker = \"/fc\"\njailer = \"/j\"\n\
                   kernel = \"/k\"\nrootfs = \"/r\"\nuid = 1\ngid = 1";
         assert!(bad(&format!("backend = \"process\"\n{fc}")).contains("no [sandbox"));
-        let user =
-            Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprover = \"x\"");
-        assert!(matches!(user, Err(ConfigError::DiscordUser(_))));
         let missing = Config::parse("owner = \"mark\"\n[sandbox]\nnetwork = true");
         assert!(missing.is_err());
+        // The approver moved to [approvals]. The old key fails loudly.
+        let moved =
+            Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprover = \"42\"");
+        assert!(moved.is_err());
+    }
+
+    #[test]
+    fn the_approvals_section_is_read() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.approvals, ApprovalsConfig::default());
+        assert_eq!(plain.approvals.timeout_secs, DEFAULT_APPROVAL_TIMEOUT_SECS);
+        let set =
+            Config::parse("owner = \"mark\"\n[approvals]\napprover = \"42\"\ntimeout_secs = 60")
+                .unwrap();
+        assert_eq!(
+            set.approvals,
+            ApprovalsConfig {
+                approver: Some(SenderId::new("discord:42").unwrap()),
+                timeout_secs: 60,
+            }
+        );
+        let zero = Config::parse("owner = \"mark\"\n[approvals]\ntimeout_secs = 0");
+        assert!(matches!(zero, Err(ConfigError::Approvals(why)) if why.contains("at least 1")));
+        let user = Config::parse("owner = \"mark\"\n[approvals]\napprover = \"x\"");
+        assert!(matches!(user, Err(ConfigError::DiscordUser(_))));
+    }
+
+    #[test]
+    fn the_rule_of_two_is_on_by_default() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.flow, FlowConfig::default());
+        assert_eq!(plain.flow.rules(), FlowRules::rule_of_two());
+        let until =
+            Config::parse("owner = \"mark\"\n[flow]\nrecheck = \"until_approved\"").unwrap();
+        assert_eq!(until.flow.recheck, FlowRecheck::UntilApproved);
+        assert!(until.flow.rules().can_release());
+        assert!(!plain.flow.rules().can_release());
+        let off = Config::parse("owner = \"mark\"\n[flow]\nrule_of_two = false").unwrap();
+        assert!(off.flow.rules().is_empty());
+        let bad = Config::parse("owner = \"mark\"\n[flow]\nrecheck = \"never\"");
+        assert!(bad.is_err());
+    }
+
+    #[test]
+    fn mcp_servers_are_read() {
+        let config = Config::parse(
+            "owner = \"mark\"\n\
+             [[mcp.server]]\nid = \"gh\"\ncommand = \"gh-mcp\"\nargs = [\"stdio\"]\n\
+             env = [\"GH_TOKEN\"]\nlabels = [\"untrusted_input\", \"private_data\"]\n\
+             [[mcp.server]]\nid = \"notes\"\nurl = \"http://127.0.0.1:8808/mcp\"\n\
+             bearer_env = \"LG_NOTES\"\neffect = \"read_only\"\ntools = [\"search\"]\n\
+             timeout_secs = 5",
+        )
+        .unwrap();
+        assert_eq!(
+            config.mcp,
+            vec![
+                McpServer {
+                    id: String::from("gh"),
+                    transport: McpTransport::Stdio {
+                        command: String::from("gh-mcp"),
+                        args: vec![String::from("stdio")],
+                        env: vec![String::from("GH_TOKEN")],
+                    },
+                    labels: vec![
+                        String::from("untrusted_input"),
+                        String::from("private_data")
+                    ],
+                    effect: ToolEffect::External,
+                    tools: None,
+                    timeout_secs: DEFAULT_MCP_TIMEOUT_SECS,
+                },
+                McpServer {
+                    id: String::from("notes"),
+                    transport: McpTransport::Http {
+                        url: String::from("http://127.0.0.1:8808/mcp"),
+                        bearer_env: Some(String::from("LG_NOTES")),
+                    },
+                    labels: Vec::new(),
+                    effect: ToolEffect::ReadOnly,
+                    tools: Some(vec![String::from("search")]),
+                    timeout_secs: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bad_mcp_server_is_refused() {
+        let bad = |body: &str| {
+            let text = format!("owner = \"mark\"\n[[mcp.server]]\n{body}");
+            match Config::parse(&text) {
+                Err(ConfigError::Mcp { why, .. }) => why,
+                other => panic!("{body}: {other:?}"),
+            }
+        };
+        assert!(bad("id = \"Bad\"\ncommand = \"x\"").contains("a-z"));
+        assert!(bad("id = \"a-very-long-server-id\"\ncommand = \"x\"").contains("1 to 16"));
+        assert!(bad("id = \"a\"").contains("exactly one"));
+        assert!(
+            bad("id = \"a\"\ncommand = \"x\"\nurl = \"https://h/mcp\"").contains("exactly one")
+        );
+        assert!(bad("id = \"a\"\ncommand = \" \"").contains("empty"));
+        assert!(bad("id = \"a\"\ncommand = \"x\"\nenv = [\"lower\"]").contains("`lower`"));
+        assert!(bad("id = \"a\"\ncommand = \"x\"\nbearer_env = \"T\"").contains("needs a url"));
+        assert!(
+            bad("id = \"a\"\nurl = \"https://h/mcp\"\nargs = [\"x\"]").contains("need a command")
+        );
+        assert!(bad("id = \"a\"\nurl = \"http://example.com/mcp\"").contains("https"));
+        assert!(bad("id = \"a\"\nurl = \"ftp://127.0.0.1/mcp\"").contains("https"));
+        assert!(bad("id = \"a\"\nurl = \"not a url\"").contains("https"));
+        assert!(bad("id = \"a\"\ncommand = \"x\"\nlabels = [\"Has Space\"]").contains("label"));
+        assert!(bad("id = \"a\"\ncommand = \"x\"\ntools = []").contains("empty tools"));
+        assert!(bad("id = \"a\"\ncommand = \"x\"\ntimeout_secs = 0").contains("at least 1"));
+        let twice = Config::parse(
+            "owner = \"mark\"\n[[mcp.server]]\nid = \"a\"\ncommand = \"x\"\n\
+             [[mcp.server]]\nid = \"a\"\ncommand = \"y\"",
+        );
+        assert!(matches!(twice, Err(ConfigError::Mcp { why, .. }) if why.contains("two servers")));
+        let effect = Config::parse(
+            "owner = \"mark\"\n[[mcp.server]]\nid = \"a\"\ncommand = \"x\"\neffect = \"loud\"",
+        );
+        assert!(effect.is_err());
+    }
+
+    #[test]
+    fn an_http_mcp_url_is_safe_only_on_this_machine() {
+        assert!(safe_mcp_url("https://mcp.example.com/mcp"));
+        assert!(safe_mcp_url("http://localhost:8808/mcp"));
+        assert!(safe_mcp_url("http://127.0.0.1/mcp"));
+        assert!(safe_mcp_url("http://[::1]:9/mcp"));
+        assert!(!safe_mcp_url("http://10.0.0.2/mcp"));
+        assert!(!safe_mcp_url("http://localhost.example.com/mcp"));
+        assert!(!safe_mcp_url("file:///etc/passwd"));
     }
 
     #[test]
@@ -959,6 +1421,44 @@ mod tests {
             Err(ConfigError::DiscordUser(_))
         ));
         assert!(matches!(parse("other = 1"), Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn the_documented_example_parses() {
+        let source = include_str!("config.rs");
+        let example: String = source
+            .lines()
+            .skip_while(|line| *line != "//! ```toml")
+            .skip(1)
+            .take_while(|line| *line != "//! ```")
+            .fold(String::new(), |mut text, line| {
+                text.push_str(line.trim_start_matches("//!").trim_start());
+                text.push('\n');
+                text
+            });
+        let config = Config::parse(&example).unwrap();
+        assert_eq!(config.mcp.len(), 2);
+        assert!(config.approvals.approver.is_some());
+        assert!(config.sandbox.is_some());
+    }
+
+    #[test]
+    fn each_readme_config_block_parses() {
+        let readme = include_str!("../../../README.md");
+        let mut blocks = 0;
+        for block in readme.split("```toml\n").skip(1) {
+            let body = block.split("```").next().unwrap_or_default();
+            let text = if body.contains("owner =") {
+                body.to_owned()
+            } else {
+                format!("owner = \"m\"\n{body}")
+            };
+            if let Err(error) = Config::parse(&text) {
+                panic!("a README block does not parse: {error}\n{body}");
+            }
+            blocks += 1;
+        }
+        assert!(blocks >= 5, "the README lost its config blocks");
     }
 
     #[test]

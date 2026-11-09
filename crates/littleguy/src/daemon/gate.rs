@@ -106,11 +106,14 @@ async fn notify(
 
 impl Daemon {
     /// The store of the calls that wait, or the error text for a daemon
-    /// with no sandbox.
+    /// where no call can wait.
     fn approval_store(&self) -> Result<Arc<SqliteStores>, String> {
-        self.approvals
-            .clone()
-            .ok_or_else(|| String::from("this daemon has no sandbox. Add a [sandbox] section"))
+        self.approvals.clone().ok_or_else(|| {
+            String::from(
+                "no call waits for approval in this daemon: it has no [sandbox] section, \
+                 and its tools cannot complete a flow rule",
+            )
+        })
     }
 
     /// Matches the open records to the wait of `run`.

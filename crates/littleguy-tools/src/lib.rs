@@ -6,6 +6,8 @@
 //! - [`SearchTool`] asks the Brave Search API for web results.
 //! - [`file_tools`] read and write the files of the persistent workspace of
 //!   the agent.
+//! - [`mcp::connect`] turns the tools of each MCP server in the config into
+//!   tools of the agent.
 //!
 //! The web tools read only, and label their results as untrusted input,
 //! so flow rules can fence what follows them. The file tools change only
@@ -14,7 +16,10 @@
 mod fetch;
 mod files;
 pub mod html;
+pub mod mcp;
 mod search;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(test)]
 mod tests;
 

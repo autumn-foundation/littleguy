@@ -125,7 +125,8 @@ pub fn routing(
 /// consolidation dispatcher reads. With `brief`, the delivery sends the
 /// answer of each heartbeat tick to the owner. The daemon arms each tick.
 /// `tools` gives the assistant its tools, and a workspace when the file
-/// tools are on. `sandbox` adds the `run_code` tool and its approval gate.
+/// tools are on. `guard` adds the `run_code` tool, the flow rules and the
+/// approval gate.
 #[must_use]
 pub fn harness(
     config: &Config,
@@ -133,14 +134,14 @@ pub fn harness(
     memory: Option<(Arc<SqliteStores>, &Path)>,
     brief: Option<Arc<BriefDelivery>>,
     tools: crate::tools::Tools,
-    sandbox: Option<crate::sandbox::Sandbox>,
+    guard: Option<crate::guard::Guard>,
 ) -> AgentHarness {
     let profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
         .window(config.window);
     let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
-    if let Some(sandbox) = sandbox {
-        (harness, profile) = sandbox.apply(harness, profile);
+    if let Some(guard) = guard {
+        (harness, profile) = guard.apply(harness, profile);
     }
     if let Some((stores, db)) = memory {
         harness = crate::memory::harness(harness, stores, db);
@@ -211,6 +212,16 @@ pub struct Cursor {
     pub after: String,
 }
 
+/// What [`Daemon::open_with`] adds to a config: the parts that need async
+/// work or a test seam.
+#[derive(Debug, Default)]
+pub struct Extras {
+    /// The runtime of the `run_code` tool.
+    pub sandbox: Option<Arc<autumn_harvest::sandbox::SandboxRuntime>>,
+    /// The tools of the MCP servers.
+    pub mcp: Vec<Arc<dyn autumn_harvest_agent::Tool>>,
+}
+
 /// The daemon state: the runtime, the routing table and the pairings.
 pub struct Daemon {
     rt: SqliteRuntime,
@@ -223,7 +234,7 @@ pub struct Daemon {
     brief: Option<Calendar>,
     rest: Arc<OnceLock<DiscordRest>>,
     clock: Clock,
-    /// The store of the calls that wait, when the sandbox is on.
+    /// The store of the calls that wait, when a call can wait.
     approvals: Option<Arc<SqliteStores>>,
     /// The Discord user id of the approver.
     approver: Option<String>,
@@ -247,13 +258,15 @@ impl std::fmt::Debug for Daemon {
 
 impl Daemon {
     /// Opens the database at `db` and registers the assistant. With
-    /// `discord`, the Discord channel takes messages.
+    /// `discord`, the Discord channel takes messages. It starts no MCP
+    /// server. A test seam: `lg serve` calls [`Self::open_with`].
     ///
     /// # Errors
     ///
     /// Returns an error when another daemon holds the database, the database
     /// or the pairing store does not open, or the owner name is not a valid
     /// agent name.
+    #[cfg(test)]
     pub fn open(
         db: &Path,
         config: &Config,
@@ -266,22 +279,26 @@ impl Daemon {
             .as_ref()
             .map(crate::sandbox::runtime)
             .transpose()?;
-        Self::open_sandboxed(db, config, model, owner_uid, discord, sandbox)
+        let extras = Extras {
+            sandbox,
+            mcp: Vec::new(),
+        };
+        Self::open_with(db, config, model, owner_uid, discord, extras)
     }
 
-    /// [`Self::open`] with the sandbox runtime `sandbox`. It needs a
-    /// `[sandbox]` section, which sets the approver and the wait.
+    /// [`Self::open`] with `extras`: the sandbox runtime and the MCP tools.
+    /// The sandbox runtime counts only with a `[sandbox]` section.
     ///
     /// # Errors
     ///
     /// As [`Self::open`].
-    pub fn open_sandboxed(
+    pub fn open_with(
         db: &Path,
         config: &Config,
         model: Arc<dyn AgentModel>,
         owner_uid: u32,
         discord: bool,
-        sandbox: Option<Arc<autumn_harvest::sandbox::SandboxRuntime>>,
+        extras: Extras,
     ) -> Result<Self> {
         if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
@@ -295,10 +312,16 @@ impl Daemon {
             .map(|settings| Calendar::new(settings, Utc::now()))
             .transpose()?;
         // The brief keeps its sent reports in the memory store, and the
-        // sandbox keeps its calls that wait. So each opens the store even
+        // guard keeps its calls that wait. So each opens the store even
         // when memory is off.
-        let settings = config.sandbox.as_ref().zip(sandbox);
-        let stores = if config.memory.enabled || config.brief.is_some() || settings.is_some() {
+        let runtime = extras.sandbox.filter(|_| config.sandbox.is_some());
+        let tools =
+            crate::tools::Tools::new(&config.tools, db, crate::tools::search_key_from_env())
+                .with(extras.mcp);
+        tracing::info!(tools = ?tools.names(), "the assistant tools");
+        let flow = config.flow.rules();
+        let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some());
+        let stores = if config.memory.enabled || config.brief.is_some() || asks {
             Some(crate::memory::open(db)?)
         } else {
             None
@@ -315,32 +338,30 @@ impl Daemon {
                     Arc::clone(&rest),
                 ))
             });
-        let approvals = stores.clone().filter(|_| settings.is_some());
-        let sandbox = settings
-            .zip(approvals.clone())
-            .map(|((settings, runtime), stores)| crate::sandbox::Sandbox {
-                runtime,
-                stores,
-                timeout: Duration::from_secs(settings.approval_timeout_secs),
-            });
+        let approvals = stores.clone().filter(|_| asks);
+        let guard = approvals.clone().map(|stores| crate::guard::Guard {
+            stores,
+            timeout: Duration::from_secs(config.approvals.timeout_secs),
+            flow,
+            sandbox: runtime,
+        });
         let approver = config
-            .sandbox
+            .approvals
+            .approver
             .as_ref()
-            .and_then(|settings| settings.approver.as_ref())
             .and_then(|sender| sender.as_str().strip_prefix("discord:"))
             .map(str::to_owned);
         if approver.is_some() && !discord {
-            tracing::warn!("sandbox.approver is set, but Discord is off: decide with `lg approve`");
+            tracing::warn!(
+                "approvals.approver is set, but Discord is off: decide with `lg approve`"
+            );
         }
         let memory = stores
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db));
-        let tools =
-            crate::tools::Tools::new(&config.tools, db, crate::tools::search_key_from_env());
-        tracing::info!(tools = ?tools.names(), "the assistant tools");
         sqlite::register(
             &mut rt,
-            Arc::new(harness(config, model, memory, delivery, tools, sandbox)),
+            Arc::new(harness(config, model, memory, delivery, tools, guard)),
         );
         crate::memory::schedule(&mut rt, &config.memory)?;
         // The runtime lock is held now, so this daemon is the store's one writer.
@@ -1890,6 +1911,8 @@ mod tests {
     /// A model for the memory tests. `remember <note>` calls the memory
     /// tool. `save <path> <text>` and `show <path>` call the file tools.
     /// `run <code>` calls `run_code`, and answers `ran: <stdout>`.
+    /// `use <tool> <json>` calls any tool, and answers `got: <text>` for a
+    /// text result.
     /// `recall` answers with the notes in its prompt, `quiet` gets
     /// `HEARTBEAT_OK`, and any other text gets `ok: <text>`. A
     /// consolidation pass gets one fact per episode that says `tea`.
@@ -1956,7 +1979,8 @@ mod tests {
                         let ran = result["stdout"]
                             .as_str()
                             .map(|out| format!("ran: {}", out.trim()));
-                        result["text"].as_str().map(str::to_owned).or(ran)
+                        let said = result.as_str().map(|text| format!("got: {text}"));
+                        result["text"].as_str().map(str::to_owned).or(ran).or(said)
                     });
                 return ContentPart::Text(read.unwrap_or_else(|| String::from("noted")));
             }
@@ -1977,6 +2001,11 @@ mod tests {
                     crate::sandbox::TOOL,
                     serde_json::json!({"runtime": "sh", "code": code}),
                 );
+            }
+            if let Some(rest) = user.strip_prefix("use ") {
+                let (tool, input) = rest.split_once(' ').unwrap_or((rest, "{}"));
+                let input = serde_json::from_str(input).unwrap_or_default();
+                return file_call(tool, input);
             }
             if let Some(path) = user.strip_prefix("show ") {
                 return file_call("read_file", serde_json::json!({"path": path}));
@@ -2409,5 +2438,6 @@ mod tests {
         assert!(!crate::tools::workspace_for(&db).exists());
     }
 
+    mod flow;
     mod sandboxed;
 }

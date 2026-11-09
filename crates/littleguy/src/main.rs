@@ -20,6 +20,7 @@ mod brief;
 mod camel;
 mod client;
 mod daemon;
+mod guard;
 mod memory;
 mod oauth;
 mod pairs;
@@ -263,7 +264,10 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
     let link = discord_link(&args, |var| std::env::var(var).ok());
     let uid = rustix::process::getuid().as_raw();
-    let mut daemon = daemon::Daemon::open(&db, &config, model, uid, link.is_some())?;
+    let sandbox = config.sandbox.as_ref().map(sandbox::runtime).transpose()?;
+    let mcp = tools::mcp_tools(&config.mcp).await;
+    let extras = daemon::Extras { sandbox, mcp };
+    let mut daemon = daemon::Daemon::open_with(&db, &config, model, uid, link.is_some(), extras)?;
     if let Some(section) = &config.san_mateo {
         let key = std::env::var(oauth::KEY_VAR).with_context(|| {
             format!(

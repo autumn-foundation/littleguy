@@ -22,11 +22,25 @@ pub struct Sent {
     pub channel_id: String,
     /// Its text.
     pub content: String,
+    /// The custom id of each button under it.
+    pub buttons: Vec<String>,
+}
+
+/// One answer of the bot to a button press.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Callback {
+    /// The interaction it answers.
+    pub interaction_id: String,
+    /// The callback type: 7 updates the message, 4 answers privately.
+    pub kind: u64,
+    /// Its text.
+    pub content: String,
 }
 
 #[derive(Debug, Default)]
 struct State {
     sent: Vec<Sent>,
+    callbacks: Vec<Callback>,
     history: BTreeMap<String, Vec<Value>>,
     identifies: Vec<Value>,
     connects: usize,
@@ -107,6 +121,28 @@ impl FakeDiscord {
     /// Sends any dispatch on the gateway.
     pub fn push_event(&self, name: &str, data: Value) {
         let _ = self.push.send(Push::Event(name.to_owned(), data));
+    }
+
+    /// Sends an `INTERACTION_CREATE` of a button press by `user_id` on the
+    /// gateway. The interaction id is `interaction_id`.
+    pub fn push_press(&self, interaction_id: &str, user_id: &str, custom_id: &str) {
+        let event = json!({
+            "id": interaction_id,
+            "token": format!("token-{interaction_id}"),
+            "type": 3,
+            "channel_id": format!("dm{user_id}"),
+            "user": {"id": user_id},
+            "data": {"custom_id": custom_id, "component_type": 2},
+        });
+        let _ = self
+            .push
+            .send(Push::Event(String::from("INTERACTION_CREATE"), event));
+    }
+
+    /// Every answer to a button press, in order.
+    #[must_use]
+    pub fn callbacks(&self) -> Vec<Callback> {
+        lock(&self.state).callbacks.clone()
     }
 
     /// Drops the gateway connection, as a network fault would.
@@ -215,7 +251,15 @@ async fn answer(mut socket: TcpStream, fake: &FakeDiscord) -> std::io::Result<()
     let authorized = head
         .lines()
         .any(|l| l.to_ascii_lowercase().starts_with("authorization: bot "));
-    let (status, reply) = if authorized {
+    let interaction = target.contains("/interactions/");
+    let (status, reply) = if interaction {
+        // The press token authorizes a callback, so it carries no bot token.
+        if authorized {
+            (400, json!({"message": "a callback takes no bot token"}))
+        } else {
+            record_callback(&fake.state, target, &body)
+        }
+    } else if authorized {
         route(fake, method, target, &body)
     } else {
         (401, json!({"message": "401: Unauthorized"}))
@@ -261,11 +305,41 @@ fn record_send(state: &Mutex<State>, channel: &str, body: &Value) -> (u16, Value
         state.failing_sends -= 1;
         return (500, json!({"message": "boom"}));
     }
+    let buttons = body["components"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|row| row["components"].as_array().into_iter().flatten())
+        .filter_map(|button| button["custom_id"].as_str().map(str::to_owned))
+        .collect();
     state.sent.push(Sent {
         channel_id: channel.to_owned(),
         content: body["content"].as_str().unwrap_or_default().to_owned(),
+        buttons,
     });
     (200, json!({"id": state.sent.len().to_string()}))
+}
+
+/// Records one interaction callback. A token that does not match its
+/// interaction is refused, as Discord refuses it.
+fn record_callback(state: &Mutex<State>, target: &str, body: &Value) -> (u16, Value) {
+    let path = target.strip_prefix("/api/v10").unwrap_or(target);
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let ["interactions", id, token, "callback"] = segments.as_slice() else {
+        return (404, json!({"message": "404: Not Found"}));
+    };
+    if *token != format!("token-{id}") {
+        return (401, json!({"message": "Invalid interaction token"}));
+    }
+    lock(state).callbacks.push(Callback {
+        interaction_id: (*id).to_owned(),
+        kind: body["type"].as_u64().unwrap_or_default(),
+        content: body["data"]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    });
+    (204, Value::Null)
 }
 
 /// The history of `channel` after `after`, newest first, as Discord sends it.

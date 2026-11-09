@@ -29,6 +29,20 @@
 //! files = true
 //! fetch_max_chars = 20000
 //!
+//! [sandbox]
+//! backend = "firecracker"
+//! approver = "123456789012345678"
+//! approval_timeout_secs = 3600
+//!
+//! [sandbox.firecracker]
+//! firecracker = "/usr/local/bin/firecracker"
+//! jailer = "/usr/local/bin/jailer"
+//! kernel = "/var/lib/littleguy/vmlinux"
+//! rootfs = "/var/lib/littleguy/rootfs.ext4"
+//! uid = 990
+//! gid = 990
+//! netns = "/run/netns/littleguy"
+//!
 //! [san_mateo]
 //! bind = "127.0.0.1:3003"
 //!
@@ -60,11 +74,18 @@
 //! public web page, search the web when `LG_BRAVE_API_KEY` is set, and keep
 //! files in its own workspace. Set a key to `false` to take a tool away.
 //!
+//! The `[sandbox]` section gives the assistant a `run_code` tool. Each call
+//! waits until a person approves it. `approver` names the Discord user who
+//! gets approve and deny buttons. The owner can always decide with
+//! `lg approve` and `lg deny`. The `firecracker` backend runs each call in
+//! a new microVM. The `process` backend runs code as a host process. It
+//! shares the host kernel, so it is for development only.
+//!
 //! The `[san_mateo]` section names the OAuth integrations that San Mateo
 //! keeps tokens for. A client secret never goes in the file: the file names
 //! the variable that holds it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -121,6 +142,9 @@ pub enum ConfigError {
     /// The page size of the fetch tool is zero.
     #[error("tools.fetch_max_chars must be at least 1")]
     FetchMaxChars,
+    /// The sandbox section is not valid.
+    #[error("the sandbox section is not valid: {0}")]
+    Sandbox(String),
     /// The San Mateo section is not valid.
     #[error(transparent)]
     SanMateo(#[from] SanMateoError),
@@ -327,6 +351,119 @@ pub const CAMEL_SCHEMES: [&str; 2] = ["file", "timer"];
 /// The longest camel route id, in bytes.
 pub const MAX_CAMEL_ROUTE_ID: usize = 32;
 
+/// Where the `run_code` tool runs code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxBackend {
+    /// A new Firecracker microVM for each call, behind the jailer.
+    Firecracker(FirecrackerConfig),
+    /// A host process with limits. It shares the host kernel, so it does not
+    /// contain hostile code. Use it for development only.
+    Process,
+}
+
+/// The Firecracker files and the jail of the `firecracker` backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirecrackerConfig {
+    /// The Firecracker binary.
+    pub firecracker: PathBuf,
+    /// The jailer binary.
+    pub jailer: PathBuf,
+    /// The uncompressed guest kernel.
+    pub kernel: PathBuf,
+    /// The ext4 root file system of the guest, with the guest agent.
+    pub rootfs: PathBuf,
+    /// The uid of the jailed VMM.
+    pub uid: u32,
+    /// The gid of the jailed VMM.
+    pub gid: u32,
+    /// An empty network namespace for the VMM, under `/run/netns`.
+    pub netns: Option<PathBuf>,
+}
+
+/// The approval wait of a code call when the config names none: one hour.
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3_600;
+
+/// The `run_code` tool and its approvals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxConfig {
+    /// Where the code runs.
+    pub backend: SandboxBackend,
+    /// Whether the code may use the network of the backend.
+    pub network: bool,
+    /// The Discord user who gets the approve and deny buttons.
+    pub approver: Option<SenderId>,
+    /// How long a call waits for a decision. A call with no decision is
+    /// denied.
+    pub approval_timeout_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSandbox {
+    backend: String,
+    network: Option<bool>,
+    approver: Option<String>,
+    approval_timeout_secs: Option<u64>,
+    firecracker: Option<RawFirecracker>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFirecracker {
+    firecracker: PathBuf,
+    jailer: PathBuf,
+    kernel: PathBuf,
+    rootfs: PathBuf,
+    uid: u32,
+    gid: u32,
+    netns: Option<PathBuf>,
+}
+
+/// Checks the sandbox section.
+fn sandbox(raw: RawSandbox) -> Result<SandboxConfig, ConfigError> {
+    let backend = match (raw.backend.as_str(), raw.firecracker) {
+        ("firecracker", Some(fc)) => SandboxBackend::Firecracker(FirecrackerConfig {
+            firecracker: fc.firecracker,
+            jailer: fc.jailer,
+            kernel: fc.kernel,
+            rootfs: fc.rootfs,
+            uid: fc.uid,
+            gid: fc.gid,
+            netns: fc.netns,
+        }),
+        ("firecracker", None) => {
+            return Err(ConfigError::Sandbox(String::from(
+                "the firecracker backend needs a [sandbox.firecracker] section",
+            )));
+        }
+        ("process", None) => SandboxBackend::Process,
+        ("process", Some(_)) => {
+            return Err(ConfigError::Sandbox(String::from(
+                "the process backend takes no [sandbox.firecracker] section",
+            )));
+        }
+        (other, _) => {
+            return Err(ConfigError::Sandbox(format!(
+                "backend `{other}` is not one of firecracker, process"
+            )));
+        }
+    };
+    let approval_timeout_secs = raw
+        .approval_timeout_secs
+        .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECS);
+    if approval_timeout_secs == 0 {
+        return Err(ConfigError::Sandbox(String::from(
+            "approval_timeout_secs must be at least 1",
+        )));
+    }
+    Ok(SandboxConfig {
+        backend,
+        network: raw.network.unwrap_or(false),
+        approver: raw.approver.as_deref().map(discord_sender).transpose()?,
+        approval_timeout_secs,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
@@ -343,6 +480,7 @@ struct Raw {
     brief: Option<RawBrief>,
     #[serde(default)]
     tools: RawTools,
+    sandbox: Option<RawSandbox>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -571,6 +709,8 @@ pub struct Config {
     pub brief: Option<BriefConfig>,
     /// The tools of the assistant.
     pub tools: ToolsConfig,
+    /// The `run_code` tool, when the config has the section.
+    pub sandbox: Option<SandboxConfig>,
 }
 
 impl Config {
@@ -587,6 +727,7 @@ impl Config {
             memory: MemoryConfig::default(),
             brief: None,
             tools: ToolsConfig::default(),
+            sandbox: None,
         }
     }
 
@@ -627,6 +768,7 @@ impl Config {
             memory,
             brief,
             tools: tools(&raw.tools)?,
+            sandbox: raw.sandbox.map(sandbox).transpose()?,
         })
     }
 
@@ -679,6 +821,69 @@ mod tests {
         assert!(matches!(zero, Err(ConfigError::FetchMaxChars)));
         let unknown = Config::parse("owner = \"mark\"\n[tools]\nshell = true");
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn the_sandbox_section_is_read() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.sandbox, None);
+        let process =
+            Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprover = \"42\"")
+                .unwrap();
+        assert_eq!(
+            process.sandbox,
+            Some(SandboxConfig {
+                backend: SandboxBackend::Process,
+                network: false,
+                approver: Some(SenderId::new("discord:42").unwrap()),
+                approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
+            })
+        );
+        let vm = Config::parse(
+            "owner = \"mark\"\n[sandbox]\nbackend = \"firecracker\"\nnetwork = true\n\
+             approval_timeout_secs = 60\n[sandbox.firecracker]\nfirecracker = \"/fc\"\n\
+             jailer = \"/j\"\nkernel = \"/k\"\nrootfs = \"/r\"\nuid = 9\ngid = 8",
+        )
+        .unwrap()
+        .sandbox
+        .unwrap();
+        assert!(vm.network);
+        assert_eq!(vm.approval_timeout_secs, 60);
+        assert_eq!(vm.approver, None);
+        assert_eq!(
+            vm.backend,
+            SandboxBackend::Firecracker(FirecrackerConfig {
+                firecracker: PathBuf::from("/fc"),
+                jailer: PathBuf::from("/j"),
+                kernel: PathBuf::from("/k"),
+                rootfs: PathBuf::from("/r"),
+                uid: 9,
+                gid: 8,
+                netns: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_bad_sandbox_section_is_refused() {
+        let bad = |section: &str| {
+            let text = format!("owner = \"mark\"\n[sandbox]\n{section}");
+            match Config::parse(&text) {
+                Err(ConfigError::Sandbox(why)) => why,
+                other => panic!("{section}: {other:?}"),
+            }
+        };
+        assert!(bad("backend = \"docker\"").contains("docker"));
+        assert!(bad("backend = \"firecracker\"").contains("[sandbox.firecracker]"));
+        assert!(bad("backend = \"process\"\napproval_timeout_secs = 0").contains("at least 1"));
+        let fc = "[sandbox.firecracker]\nfirecracker = \"/fc\"\njailer = \"/j\"\n\
+                  kernel = \"/k\"\nrootfs = \"/r\"\nuid = 1\ngid = 1";
+        assert!(bad(&format!("backend = \"process\"\n{fc}")).contains("no [sandbox"));
+        let user =
+            Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprover = \"x\"");
+        assert!(matches!(user, Err(ConfigError::DiscordUser(_))));
+        let missing = Config::parse("owner = \"mark\"\n[sandbox]\nnetwork = true");
+        assert!(missing.is_err());
     }
 
     #[test]

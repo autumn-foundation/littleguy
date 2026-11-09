@@ -48,6 +48,20 @@ pub enum Request {
         /// The connection id.
         connection: String,
     },
+    /// List the calls that wait for an approval. Only the owner may.
+    Approvals,
+    /// Run the call that waits as request `id`. Only the owner may.
+    Approve {
+        /// The request number.
+        id: i64,
+    },
+    /// Refuse the call that waits as request `id`. Only the owner may.
+    Deny {
+        /// The request number.
+        id: i64,
+        /// Why, for the assistant.
+        reason: Option<String>,
+    },
 }
 
 /// One OAuth connection, with no credentials.
@@ -63,6 +77,17 @@ pub struct ConnectionEntry {
     pub created_at: String,
     /// The refresh token stopped working, so the owner must connect again.
     pub refresh_exhausted: bool,
+}
+
+/// One call that waits for an approval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalEntry {
+    /// The request number.
+    pub id: i64,
+    /// The tool.
+    pub tool: String,
+    /// What the call does, as the approver sees it.
+    pub text: String,
 }
 
 /// One allowed sender.
@@ -133,6 +158,26 @@ pub enum Response {
         /// Whether the connection existed.
         removed: bool,
     },
+    /// The op waits until a person approves a call.
+    Waiting {
+        /// The request number.
+        approval: i64,
+    },
+    /// A call waits for an approval, so the daemon took no new message.
+    Busy {
+        /// The request number of the call that waits.
+        approval: i64,
+    },
+    /// The calls that wait for an approval.
+    Approvals {
+        /// Each call, oldest first.
+        entries: Vec<ApprovalEntry>,
+    },
+    /// A decision went to the assistant. Its answer went to the requester.
+    Decided {
+        /// The request number.
+        approval: i64,
+    },
     /// The request was not valid, or the daemon failed.
     Error {
         /// What went wrong.
@@ -181,6 +226,12 @@ mod tests {
             Request::Disconnect {
                 integration: String::from("google"),
                 connection: String::from("c-1"),
+            },
+            Request::Approvals,
+            Request::Approve { id: 3 },
+            Request::Deny {
+                id: 3,
+                reason: Some(String::from("no")),
             },
         ] {
             let line = serde_json::to_string(&request).unwrap();

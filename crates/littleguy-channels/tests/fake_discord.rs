@@ -3,9 +3,9 @@
 use std::error::Error;
 
 use littleguy_channels::discord::{
-    DIRECT_MESSAGES, DiscordRest, GatewayEvent, MAX_MESSAGE_CHARS, run_gateway,
+    Button, ButtonStyle, DIRECT_MESSAGES, DiscordRest, GatewayEvent, MAX_MESSAGE_CHARS, run_gateway,
 };
-use littleguy_channels::testing::{FakeDiscord, Sent, dm_event};
+use littleguy_channels::testing::{Callback, FakeDiscord, Sent, dm_event};
 use tokio::sync::mpsc;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -23,7 +23,8 @@ async fn the_rest_client_sends_opens_a_dm_and_reads_history() -> TestResult {
         sent[0],
         Sent {
             channel_id: "900".into(),
-            content: "hello".into()
+            content: "hello".into(),
+            buttons: Vec::new(),
         }
     );
     assert_eq!(sent[2].content, "xxxxx");
@@ -93,5 +94,72 @@ async fn the_gateway_identifies_forwards_messages_and_reconnects() -> TestResult
     drop(rx);
     fake.push_dm("21", "900", "42", "after close");
     tokio::time::timeout(std::time::Duration::from_secs(10), gateway).await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn buttons_go_out_and_a_press_comes_back_and_gets_its_answer() -> TestResult {
+    let fake = FakeDiscord::start().await?;
+    let rest = DiscordRest::new(&fake.api_base, "token");
+    let buttons = [
+        Button {
+            custom_id: String::from("lg:approve:1"),
+            label: String::from("Approve"),
+            style: ButtonStyle::Success,
+        },
+        Button {
+            custom_id: String::from("lg:deny:1"),
+            label: String::from("Deny"),
+            style: ButtonStyle::Danger,
+        },
+    ];
+    let long = format!("{}\nend", "y".repeat(MAX_MESSAGE_CHARS));
+    rest.send_with_buttons("900", &long, &buttons).await?;
+    let sent = fake.sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].buttons.len(), 0);
+    assert_eq!(sent[1].buttons, ["lg:approve:1", "lg:deny:1"]);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let gateway = tokio::spawn(run_gateway(
+        String::from("token"),
+        fake.gateway_url.clone(),
+        tx,
+    ));
+    assert_eq!(rx.recv().await, Some(GatewayEvent::Ready));
+    fake.push_press("55", "42", "lg:approve:1");
+    let Some(GatewayEvent::Press(press)) = rx.recv().await else {
+        return Err("no press".into());
+    };
+    assert_eq!(press.custom_id, "lg:approve:1");
+    rest.update_pressed(&press, "Approved.").await?;
+    rest.answer_privately(&press, "Only for you.").await?;
+    assert_eq!(
+        fake.callbacks(),
+        [
+            Callback {
+                interaction_id: String::from("55"),
+                kind: 7,
+                content: String::from("Approved."),
+            },
+            Callback {
+                interaction_id: String::from("55"),
+                kind: 4,
+                content: String::from("Only for you."),
+            },
+        ]
+    );
+    // A forged token is refused.
+    let forged = littleguy_channels::discord::ButtonPress {
+        token: String::from("wrong"),
+        ..press
+    };
+    let error = rest
+        .update_pressed(&forged, "x")
+        .await
+        .err()
+        .ok_or("no error")?;
+    assert!(error.to_string().contains("HTTP 401"), "{error}");
+    gateway.abort();
     Ok(())
 }

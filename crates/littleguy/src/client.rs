@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::protocol::{ConnectionEntry, PairEntry, Request, Response};
+use crate::protocol::{ApprovalEntry, ConnectionEntry, PairEntry, Request, Response};
 
 /// A fresh message id: the clock in nanoseconds and the process id.
 #[must_use]
@@ -80,8 +80,39 @@ pub fn render(response: &Response) -> (String, bool) {
             String::from("no paired sender has that id. A sender from the config file stays"),
             false,
         ),
+        Response::Waiting { approval } => (
+            format!(
+                "waiting for approval of request #{approval}. Run `lg approvals` to read it, \
+                 then `lg approve {approval}` or `lg deny {approval}`"
+            ),
+            true,
+        ),
+        Response::Busy { approval } => (
+            format!(
+                "the assistant waits for a decision on request #{approval}. Decide it first \
+                 with `lg approve {approval}` or `lg deny {approval}`"
+            ),
+            false,
+        ),
+        Response::Approvals { entries } => (render_approvals(entries), true),
+        Response::Decided { approval } => (
+            format!("decided request #{approval}. The answer went to the requester"),
+            true,
+        ),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// Each call that waits, with what it does.
+fn render_approvals(entries: &[ApprovalEntry]) -> String {
+    if entries.is_empty() {
+        return String::from("no calls wait for approval");
+    }
+    entries
+        .iter()
+        .map(|e| format!("#{} {}\n{}", e.id, e.tool, e.text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// One line per connection: integration, connection id, provider, date and

@@ -15,6 +15,7 @@
 //! model. Each reads its key from the environment only, so the key never
 //! shows in a process list.
 
+mod approvals;
 mod brief;
 mod camel;
 mod client;
@@ -24,6 +25,7 @@ mod oauth;
 mod pairs;
 mod paths;
 mod protocol;
+mod sandbox;
 mod tools;
 
 use std::path::{Path, PathBuf};
@@ -82,6 +84,21 @@ enum Command {
         integration: String,
         /// The connection id, from `lg connections`.
         connection: String,
+    },
+    /// List the calls that wait for an approval.
+    Approvals,
+    /// Run the call that waits as request `id`.
+    Approve {
+        /// The request number, from `lg approvals`.
+        id: i64,
+    },
+    /// Refuse the call that waits as request `id`.
+    Deny {
+        /// The request number, from `lg approvals`.
+        id: i64,
+        /// Why, for the assistant.
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -299,7 +316,7 @@ async fn run(cli: Cli) -> Result<bool> {
         None => env.socket()?,
     };
     match cli.command {
-        Command::Serve(args) => serve(socket, args, &env).await.map(|()| true),
+        Command::Serve(args) => Box::pin(serve(socket, args, &env)).await.map(|()| true),
         Command::Chat(args) => {
             let request = Request::Chat {
                 message_id: args.message_id.unwrap_or_else(client::fresh_message_id),
@@ -322,6 +339,9 @@ async fn run(cli: Cli) -> Result<bool> {
             };
             ask(&socket, &request).await
         }
+        Command::Approvals => ask(&socket, &Request::Approvals).await,
+        Command::Approve { id } => ask(&socket, &Request::Approve { id }).await,
+        Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
     }
 }
 

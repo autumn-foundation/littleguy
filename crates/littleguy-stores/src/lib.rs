@@ -17,6 +17,9 @@
 //! The file also keeps the key of each report that a delivery sent. The
 //! engine delivers a report at least once, so a delivery that checks the
 //! key sends it once.
+//!
+//! The file also keeps each tool call that waits for an approval
+//! ([`approvals`]).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -30,8 +33,12 @@ use autumn_harvest_agent::model::BoxFuture;
 use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+pub mod approvals;
+
+pub use approvals::{ApprovalRecord, Claim, Verdict};
+
 /// The schema version that [`SqliteStores::open`] writes.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// The most edit keys that one memory scope keeps. A retry comes soon after
 /// its first attempt, so the oldest key is safe to forget. The engine keeps
@@ -61,6 +68,17 @@ CREATE TABLE IF NOT EXISTS episode_clears (
     scope   TEXT PRIMARY KEY,
     key     TEXT NOT NULL,
     cleared TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS approvals (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id   TEXT NOT NULL,
+    tool      TEXT NOT NULL,
+    arguments TEXT NOT NULL,
+    reason    TEXT NOT NULL,
+    signal    TEXT UNIQUE,
+    requester TEXT,
+    verdict   TEXT,
+    closed    INTEGER NOT NULL DEFAULT 0
 );
 ";
 

@@ -8,4 +8,4 @@ pub mod discord;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use discord::{DiscordRest, DmMessage, GatewayEvent};
+pub use discord::{Button, ButtonPress, ButtonStyle, DiscordRest, DmMessage, GatewayEvent};

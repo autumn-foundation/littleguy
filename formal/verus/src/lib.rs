@@ -6,6 +6,7 @@
 
 use vstd::prelude::*;
 
+pub mod addr;
 pub mod pairing;
 pub mod route;
 

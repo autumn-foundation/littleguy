@@ -14,8 +14,10 @@ use.
 | M1.7 | OAuth connections kept by an embedded San Mateo on SQLite: `lg connect`, `lg connections`, `lg disconnect` | Done (#6) |
 | M1.5 | Slack over Socket Mode, when autumn-plugin-slack 0.4 is on crates.io | Planned |
 | M2 | Durable memory and an episode log in `memory.db`, and a nightly consolidation pass on a cron schedule | Done (#7) |
-| M2.1 | A weekday morning brief that stays silent when there is nothing to say | This PR |
-| M3 | Tools: web fetch and search, workspace files, sandboxed shell, MCP client, flow rules, approve and deny buttons | Planned |
+| M2.1 | A weekday morning brief that stays silent when there is nothing to say | Done (#8) |
+| M3.1 | Tools: web fetch with a public-address guard, Brave web search, persistent workspace files | This PR |
+| M3.2 | A sandboxed shell, and approve and deny buttons in Discord | Planned |
+| M3.3 | An MCP client and flow rules | Planned |
 | M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Planned |
 | M5 | A web UI over the management API, Postgres mode, camel request and reply, the refine loop | Planned |
 

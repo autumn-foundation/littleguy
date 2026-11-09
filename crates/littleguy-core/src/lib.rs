@@ -3,6 +3,7 @@
 //! The crate holds no I/O. The binary crate reads the config file and the
 //! sockets, then asks [`route`] where each inbound message goes.
 
+pub mod addr;
 pub mod config;
 pub mod ids;
 pub mod pairing;
@@ -10,7 +11,7 @@ pub mod route;
 
 pub use config::{
     BriefConfig, CamelRoute, Config, ConfigError, DiscordConfig, Integration, MemoryConfig,
-    SanMateoConfig, SanMateoError, discord_sender,
+    SanMateoConfig, SanMateoError, ToolsConfig, discord_sender,
 };
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
 pub use pairing::{PairingCode, Pending, PendingPairings};

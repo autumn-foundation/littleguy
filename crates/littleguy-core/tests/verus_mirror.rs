@@ -63,3 +63,11 @@ fn the_pairing_proof_covers_the_shipped_kernel() -> TestResult {
         "formal/verus/src/pairing.rs",
     )
 }
+
+#[test]
+fn the_address_proof_covers_the_shipped_kernel() -> TestResult {
+    mirrors(
+        "crates/littleguy-core/src/addr.rs",
+        "formal/verus/src/addr.rs",
+    )
+}

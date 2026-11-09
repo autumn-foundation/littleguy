@@ -141,6 +141,32 @@ while `lg serve` is down runs once, at the next start. The brief needs the
 Discord channel to reach you. [ADR 0006](docs/adr/0006-morning-brief.md)
 explains the design.
 
+## Tools
+
+The assistant can read a public web page, search the web, and keep files
+in its own workspace. Each tool is on by default:
+
+```toml
+[tools]
+web_fetch = true                # read one http or https page as text
+web_search = true               # needs LG_BRAVE_API_KEY
+files = true                    # read_file, write_file, list_files, delete_file
+fetch_max_chars = 20000         # the most text of one page
+```
+
+- `web_fetch` resolves the host first and refuses a private, loopback,
+  link-local or reserved address, also after a redirect. So a page cannot
+  aim it at your router or a local service. A proof in `formal/verus`
+  covers the IPv4 check. It does not use an HTTP proxy.
+- `web_search` uses the [Brave Search API](https://brave.com/search/api/).
+  Put the key in `LG_BRAVE_API_KEY`; without it there is no search tool.
+- The workspace keeps its files in `workspace/`, next to `lg.db`, and they
+  survive a restart. A path stays inside the workspace.
+
+The web tools only read, and their results count as untrusted input. The
+file tools change only the private workspace. A morning brief can read but
+not write. [ADR 0007](docs/adr/0007-first-tools.md) explains the design.
+
 ## OAuth connections
 
 littleguy embeds [San Mateo](https://github.com/autumn-foundation/san-mateo)
@@ -224,6 +250,7 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
 | `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
+| `crates/littleguy-tools` | The tools: web fetch with its address guard, web search, and the workspace files. |
 | `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own. |
 | `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections` and `disconnect`, the camel routes and San Mateo. |
 | `formal/verus` | Verus proofs of the kernels. |

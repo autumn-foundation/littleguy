@@ -24,6 +24,7 @@ mod oauth;
 mod pairs;
 mod paths;
 mod protocol;
+mod tools;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

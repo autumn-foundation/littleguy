@@ -19,6 +19,7 @@ autumn-harvest-agent = { workspace = true }
 autumn-harvest-plugin = { version = "0.10", default-features = false, features = ["connectors"] }
 autumn-harvest-sqlite = { workspace = true }
 camel-api = "0.57"
+chrono = "0.4"
 camel-builder = "0.57"
 camel-component-api = "0.57"
 camel-component-direct = "0.57"

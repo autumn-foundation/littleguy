@@ -6,6 +6,7 @@ members = [
     "crates/littleguy-core",
     "crates/littleguy-models",
     "crates/littleguy-stores",
+    "crates/littleguy-tools",
     "xtask",
 ]
 
@@ -21,6 +22,7 @@ littleguy-channels = { version = "0.1.0", path = "crates/littleguy-channels" }
 littleguy-core = { version = "0.1.0", path = "crates/littleguy-core" }
 littleguy-models = { version = "0.1.0", path = "crates/littleguy-models" }
 littleguy-stores = { version = "0.1.0", path = "crates/littleguy-stores" }
+littleguy-tools = { version = "0.1.0", path = "crates/littleguy-tools" }
 autumn-harvest-agent = { version = "0.10.0", features = ["sqlite"] }
 autumn-harvest-sqlite = "0.10.0"
 anyhow = "1"

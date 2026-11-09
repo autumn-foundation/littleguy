@@ -119,17 +119,20 @@ pub fn routing(
 /// and an episode log in that store. `db` is the database that the
 /// consolidation dispatcher reads. With `brief`, the delivery sends the
 /// answer of each heartbeat tick to the owner. The daemon arms each tick.
+/// `tools` gives the assistant its tools, and a workspace when the file
+/// tools are on.
 #[must_use]
 pub fn harness(
     config: &Config,
     model: Arc<dyn AgentModel>,
     memory: Option<(Arc<SqliteStores>, &Path)>,
     brief: Option<Arc<BriefDelivery>>,
+    tools: crate::tools::Tools,
 ) -> AgentHarness {
-    let mut profile = AgentProfile::new(ASSISTANT_KIND)
+    let profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
         .window(config.window);
-    let mut harness = AgentHarness::new(model);
+    let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
     if let Some((stores, db)) = memory {
         harness = crate::memory::harness(harness, stores, db);
         profile = crate::memory::profile(profile);
@@ -274,7 +277,13 @@ impl Daemon {
         let memory = stores
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db));
-        sqlite::register(&mut rt, Arc::new(harness(config, model, memory, delivery)));
+        let tools =
+            crate::tools::Tools::new(&config.tools, db, crate::tools::search_key_from_env());
+        tracing::info!(tools = ?tools.names(), "the assistant tools");
+        sqlite::register(
+            &mut rt,
+            Arc::new(harness(config, model, memory, delivery, tools)),
+        );
         crate::memory::schedule(&mut rt, &config.memory)?;
         // The runtime lock is held now, so this daemon is the store's one writer.
         let store = PairStore::open(crate::pairs::path_for(db))?;
@@ -1738,7 +1747,8 @@ mod tests {
     }
 
     /// A model for the memory tests. `remember <note>` calls the memory
-    /// tool. `recall` answers with the notes in its prompt, `quiet` gets
+    /// tool. `save <path> <text>` and `show <path>` call the file tools.
+    /// `recall` answers with the notes in its prompt, `quiet` gets
     /// `HEARTBEAT_OK`, and any other text gets `ok: <text>`. A
     /// consolidation pass gets one fact per episode that says `tea`.
     #[derive(Debug, Default)]
@@ -1790,7 +1800,33 @@ mod tests {
                     .any(|part| matches!(part, ContentPart::ToolResult { .. }))
             });
             if answered {
-                return ContentPart::Text(String::from("noted"));
+                // A read answers with the text of the file.
+                let read = last
+                    .into_iter()
+                    .flat_map(|message| &message.content)
+                    .find_map(|part| match part {
+                        ContentPart::ToolResult { content, .. } => {
+                            serde_json::from_str::<serde_json::Value>(content).ok()
+                        }
+                        _ => None,
+                    })
+                    .and_then(|result| result["text"].as_str().map(str::to_owned));
+                return ContentPart::Text(read.unwrap_or_else(|| String::from("noted")));
+            }
+            let file_call = |name: &str, arguments: serde_json::Value| ContentPart::ToolCall {
+                id: String::from("call-1"),
+                name: String::from(name),
+                arguments,
+            };
+            if let Some(rest) = user.strip_prefix("save ") {
+                let (path, text) = rest.split_once(' ').unwrap_or((rest, ""));
+                return file_call(
+                    "write_file",
+                    serde_json::json!({"path": path, "text": text}),
+                );
+            }
+            if let Some(path) = user.strip_prefix("show ") {
+                return file_call("read_file", serde_json::json!({"path": path}));
             }
             if let Some(note) = user.strip_prefix("remember ") {
                 return ContentPart::ToolCall {
@@ -2177,5 +2213,46 @@ mod tests {
             panic!("a bad brief schedule opened");
         };
         assert!(format!("{error:#}").contains("brief.schedule"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_workspace_file_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let open =
+            || Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        {
+            let mut daemon = open();
+            let saved = daemon
+                .handle_request(UID, request("w-1", "save notes/tea.md green tea"))
+                .await;
+            assert_eq!(reply_text(&saved), "noted");
+        }
+        assert!(crate::tools::workspace_for(&db).is_dir());
+        let mut daemon = open();
+        let shown = daemon
+            .handle_request(UID, request("w-2", "show notes/tea.md"))
+            .await;
+        assert_eq!(reply_text(&shown), "green tea");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn files_off_gives_no_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut config = config();
+        config.tools.files = false;
+        let mut daemon =
+            Daemon::open(&db, &config, Arc::new(MemoryModel::default()), UID, false).unwrap();
+        // The model calls tools that the assistant does not have, so
+        // nothing is kept.
+        daemon
+            .handle_request(UID, request("w-1", "save notes/tea.md green"))
+            .await;
+        let shown = daemon
+            .handle_request(UID, request("w-2", "show notes/tea.md"))
+            .await;
+        assert_ne!(reply_text(&shown), "green");
+        assert!(!crate::tools::workspace_for(&db).exists());
     }
 }

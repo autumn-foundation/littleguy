@@ -3306,6 +3306,7 @@ dependencies = [
  "littleguy-core",
  "littleguy-models",
  "littleguy-stores",
+ "littleguy-tools",
  "reqwest 0.12.28",
  "rustix",
  "san-mateo",
@@ -3370,6 +3371,21 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "littleguy-tools"
+version = "0.1.0"
+dependencies = [
+ "autumn-harvest-agent",
+ "axum",
+ "littleguy-core",
+ "proptest",
+ "reqwest 0.13.5",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "url",
 ]
 
 [[package]]

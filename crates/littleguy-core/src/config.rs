@@ -23,6 +23,12 @@
 //! timezone = "Europe/London"
 //! to = "123456789012345678"
 //!
+//! [tools]
+//! web_fetch = true
+//! web_search = true
+//! files = true
+//! fetch_max_chars = 20000
+//!
 //! [san_mateo]
 //! bind = "127.0.0.1:3003"
 //!
@@ -49,6 +55,10 @@
 //! in `timezone`, the assistant writes a short brief. It sends the brief as
 //! a Discord DM to the user `to`, and stays silent when nothing needs the
 //! owner. The time zone defaults to the memory time zone.
+//!
+//! The `[tools]` section is optional. By default the assistant can read a
+//! public web page, search the web when `LG_BRAVE_API_KEY` is set, and keep
+//! files in its own workspace. Set a key to `false` to take a tool away.
 //!
 //! The `[san_mateo]` section names the OAuth integrations that San Mateo
 //! keeps tokens for. A client secret never goes in the file: the file names
@@ -108,6 +118,9 @@ pub enum ConfigError {
     /// The brief prompt is empty.
     #[error("brief.prompt must not be empty")]
     BriefPrompt,
+    /// The page size of the fetch tool is zero.
+    #[error("tools.fetch_max_chars must be at least 1")]
+    FetchMaxChars,
     /// The San Mateo section is not valid.
     #[error(transparent)]
     SanMateo(#[from] SanMateoError),
@@ -196,6 +209,56 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
     })
 }
 
+/// The default page size of the fetch tool, in characters.
+pub const DEFAULT_FETCH_MAX_CHARS: usize = 20_000;
+
+/// The tools of the assistant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolsConfig {
+    /// Read public web pages.
+    pub web_fetch: bool,
+    /// Search the web. It also needs the key in `LG_BRAVE_API_KEY`.
+    pub web_search: bool,
+    /// Keep files in a persistent workspace.
+    pub files: bool,
+    /// The most characters of one fetched page.
+    pub fetch_max_chars: usize,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            web_fetch: true,
+            web_search: true,
+            files: true,
+            fetch_max_chars: DEFAULT_FETCH_MAX_CHARS,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTools {
+    web_fetch: Option<bool>,
+    web_search: Option<bool>,
+    files: Option<bool>,
+    fetch_max_chars: Option<usize>,
+}
+
+fn tools(raw: &RawTools) -> Result<ToolsConfig, ConfigError> {
+    let defaults = ToolsConfig::default();
+    let fetch_max_chars = raw.fetch_max_chars.unwrap_or(defaults.fetch_max_chars);
+    if fetch_max_chars == 0 {
+        return Err(ConfigError::FetchMaxChars);
+    }
+    Ok(ToolsConfig {
+        web_fetch: raw.web_fetch.unwrap_or(defaults.web_fetch),
+        web_search: raw.web_search.unwrap_or(defaults.web_search),
+        files: raw.files.unwrap_or(defaults.files),
+        fetch_max_chars,
+    })
+}
+
 /// The default schedule of the morning brief: 07:30 on weekdays.
 pub const DEFAULT_BRIEF_SCHEDULE: &str = "30 7 * * 1-5";
 
@@ -278,6 +341,8 @@ struct Raw {
     #[serde(default)]
     memory: RawMemory,
     brief: Option<RawBrief>,
+    #[serde(default)]
+    tools: RawTools,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -504,6 +569,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     /// The morning brief, when the config has the section.
     pub brief: Option<BriefConfig>,
+    /// The tools of the assistant.
+    pub tools: ToolsConfig,
 }
 
 impl Config {
@@ -519,6 +586,7 @@ impl Config {
             san_mateo: None,
             memory: MemoryConfig::default(),
             brief: None,
+            tools: ToolsConfig::default(),
         }
     }
 
@@ -558,6 +626,7 @@ impl Config {
             san_mateo: raw.san_mateo.map(san_mateo).transpose()?,
             memory,
             brief,
+            tools: tools(&raw.tools)?,
         })
     }
 
@@ -583,6 +652,33 @@ mod tests {
     fn a_minimal_config_takes_the_defaults() {
         let config = Config::parse("owner = \"mark\"").unwrap();
         assert_eq!(config, Config::for_owner(OwnerName::new("mark").unwrap()));
+    }
+
+    #[test]
+    fn the_tools_section_is_read_with_its_defaults() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.tools, ToolsConfig::default());
+        let config = Config::parse(
+            "owner = \"mark\"\n[tools]\nweb_search = false\nfiles = false\nfetch_max_chars = 500",
+        )
+        .unwrap();
+        assert_eq!(
+            config.tools,
+            ToolsConfig {
+                web_fetch: true,
+                web_search: false,
+                files: false,
+                fetch_max_chars: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn a_bad_tools_section_is_refused() {
+        let zero = Config::parse("owner = \"mark\"\n[tools]\nfetch_max_chars = 0");
+        assert!(matches!(zero, Err(ConfigError::FetchMaxChars)));
+        let unknown = Config::parse("owner = \"mark\"\n[tools]\nshell = true");
+        assert!(unknown.is_err());
     }
 
     #[test]

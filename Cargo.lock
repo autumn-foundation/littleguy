@@ -3304,6 +3304,7 @@ dependencies = [
  "littleguy-channels",
  "littleguy-core",
  "littleguy-models",
+ "littleguy-stores",
  "reqwest 0.12.28",
  "rustix",
  "san-mateo",
@@ -3355,6 +3356,19 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "littleguy-stores"
+version = "0.1.0"
+dependencies = [
+ "autumn-harvest-agent",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

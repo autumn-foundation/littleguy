@@ -28,6 +28,7 @@ use littleguy_core::{
     ASSISTANT_KIND, ChannelId, ChannelRule, Config, Inbound, MessageId, PairingCode, Pending,
     PendingPairings, Route, Routing, SenderId, discord_sender, pairing::PAIRING_TTL_SECS, route,
 };
+use littleguy_stores::SqliteStores;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
@@ -112,14 +113,23 @@ pub fn routing(
     Ok(table)
 }
 
-/// The harness of the assistant.
+/// The harness of the assistant. With `memory`, the assistant keeps notes
+/// and an episode log in that store. `db` is the database that the
+/// consolidation dispatcher reads.
 #[must_use]
-pub fn harness(config: &Config, model: Arc<dyn AgentModel>) -> AgentHarness {
-    AgentHarness::new(model).agent(
-        AgentProfile::new(ASSISTANT_KIND)
-            .system(config.system.as_str())
-            .window(config.window),
-    )
+pub fn harness(
+    config: &Config,
+    model: Arc<dyn AgentModel>,
+    memory: Option<(Arc<SqliteStores>, &Path)>,
+) -> AgentHarness {
+    let profile = AgentProfile::new(ASSISTANT_KIND)
+        .system(config.system.as_str())
+        .window(config.window);
+    match memory {
+        Some((stores, db)) => crate::memory::harness(AgentHarness::new(model), stores, db)
+            .agent(crate::memory::profile(profile)),
+        None => AgentHarness::new(model).agent(profile),
+    }
 }
 
 /// The seconds since the Unix epoch.
@@ -221,7 +231,14 @@ impl Daemon {
         }
         let mut rt =
             SqliteRuntime::open(db).with_context(|| format!("opening {}", db.display()))?;
-        sqlite::register(&mut rt, Arc::new(harness(config, model)));
+        let stores = if config.memory.enabled {
+            Some(crate::memory::open(db)?)
+        } else {
+            None
+        };
+        let memory = stores.map(|stores| (stores, db));
+        sqlite::register(&mut rt, Arc::new(harness(config, model, memory)));
+        crate::memory::schedule(&mut rt, &config.memory)?;
         // The runtime lock is held now, so this daemon is the store's one writer.
         let store = PairStore::open(crate::pairs::path_for(db))?;
         Ok(Self {
@@ -529,6 +546,9 @@ impl Daemon {
     ///
     /// Returns an error when the runtime cannot drive the run.
     pub async fn tick(&mut self) -> Result<()> {
+        // A poll fires each due schedule, such as the nightly consolidation,
+        // and drives every run once.
+        self.rt.poll_once().await?;
         sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
         Ok(())
     }
@@ -1622,5 +1642,253 @@ mod tests {
         if let Some(connections) = daemon.connections.take() {
             connections.stop().await;
         }
+    }
+
+    /// A model for the memory tests. `remember <note>` calls the memory
+    /// tool. `recall` answers with the notes in its prompt, and any other text
+    /// gets `ok: <text>`. A
+    /// consolidation pass gets one fact per episode that says `tea`.
+    #[derive(Debug, Default)]
+    struct MemoryModel {
+        calls: std::sync::atomic::AtomicU64,
+        passes: std::sync::atomic::AtomicU64,
+    }
+
+    impl MemoryModel {
+        fn text(message: &autumn_harvest_agent::ChatMessage) -> String {
+            message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    autumn_harvest_agent::ContentPart::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn reply(request: &autumn_harvest_agent::ChatRequest) -> autumn_harvest_agent::ContentPart {
+            use autumn_harvest_agent::{ChatRole, ContentPart};
+            let system = request
+                .messages
+                .first()
+                .filter(|message| message.role == ChatRole::System)
+                .map(Self::text)
+                .unwrap_or_default();
+            let last = request.messages.last();
+            let user = last.map(Self::text).unwrap_or_default();
+            if system == autumn_harvest_agent::consolidate::PASS_SYSTEM {
+                let facts: Vec<serde_json::Value> = user
+                    .lines()
+                    .filter(|line| line.contains("tea"))
+                    .filter_map(|line| line.split("id=\"").nth(1)?.split('"').next())
+                    .map(|id| {
+                        serde_json::json!({
+                            "subject": "mark", "relation": "likes", "object": "tea",
+                            "episodes": [id],
+                        })
+                    })
+                    .collect();
+                return ContentPart::Text(serde_json::json!({ "facts": facts }).to_string());
+            }
+            let answered = last.is_some_and(|message| {
+                message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::ToolResult { .. }))
+            });
+            if answered {
+                return ContentPart::Text(String::from("noted"));
+            }
+            if let Some(note) = user.strip_prefix("remember ") {
+                return ContentPart::ToolCall {
+                    id: String::from("call-1"),
+                    name: String::from(autumn_harvest_agent::memory::MEMORY_TOOL),
+                    arguments: serde_json::json!({
+                        "action": "add", "block": "memory", "text": note,
+                    }),
+                };
+            }
+            if user != "recall" {
+                return ContentPart::Text(format!("ok: {user}"));
+            }
+            let notes: Vec<&str> = system
+                .lines()
+                .filter_map(|line| line.strip_prefix("- "))
+                .collect();
+            ContentPart::Text(format!("I know: {}", notes.join("; ")))
+        }
+    }
+
+    impl AgentModel for MemoryModel {
+        fn chat<'a>(
+            &'a self,
+            request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            use std::sync::atomic::Ordering;
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let content = Self::reply(request);
+                if request.tools.is_empty() {
+                    self.passes.fetch_add(1, Ordering::SeqCst);
+                }
+                let stop_reason =
+                    if matches!(content, autumn_harvest_agent::ContentPart::ToolCall { .. }) {
+                        autumn_harvest_agent::StopReason::ToolUse
+                    } else {
+                        autumn_harvest_agent::StopReason::EndTurn
+                    };
+                Ok(autumn_harvest_agent::ChatResponse {
+                    content: vec![content],
+                    stop_reason,
+                    usage: autumn_harvest_agent::TokenUsage::new(1, 1),
+                })
+            })
+        }
+    }
+
+    fn reply_text(response: &Response) -> &str {
+        match response {
+            Response::Reply { text } => text,
+            _ => "",
+        }
+    }
+
+    fn notes(db: &Path) -> Vec<String> {
+        use autumn_harvest_agent::memory::{MemoryScope, MemoryStore};
+        let stores = littleguy_stores::SqliteStores::open(crate::memory::path_for(db)).unwrap();
+        let scope = MemoryScope::new("agent:assistant/mark");
+        let blocks = futures_ready(stores.load(&scope)).unwrap();
+        blocks
+            .into_iter()
+            .find(|block| block.label == "memory")
+            .map(|block| block.entries)
+            .unwrap_or_default()
+    }
+
+    /// Runs a store future, which is ready at once.
+    fn futures_ready<T>(future: impl std::future::Future<Output = T>) -> T {
+        use std::task::{Context, Poll, Waker};
+        let mut future = std::pin::pin!(future);
+        match future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(value) => value,
+            Poll::Pending => panic!("a store call waited"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_note_reaches_the_next_run_and_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        {
+            let mut daemon =
+                Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+            let noted = daemon
+                .handle_request(UID, request("m-1", "remember Mark drinks tea"))
+                .await;
+            assert_eq!(reply_text(&noted), "noted");
+        }
+        assert_eq!(notes(&db), vec![String::from("Mark drinks tea")]);
+
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        let recall = daemon.handle_request(UID, request("m-2", "recall")).await;
+        assert_eq!(reply_text(&recall), "I know: Mark drinks tea");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_nightly_pass_turns_episodes_into_facts_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let model = Arc::new(MemoryModel::default());
+        let mut daemon = Daemon::open(
+            &db,
+            &config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("m-1", "I like tea"))
+            .await;
+        daemon
+            .handle_request(UID, request("m-2", "the weather is bad"))
+            .await;
+
+        // Fire the nightly schedule now, as 03:00 would.
+        let schedules = daemon.rt.list_schedules().unwrap();
+        assert_eq!(schedules.len(), 1);
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        let passes = model.passes.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(passes, 1);
+        let facts = notes(&db);
+        assert_eq!(facts.len(), 1, "{facts:?}");
+        assert!(
+            facts[0].starts_with("mark likes tea [episodes: "),
+            "{facts:?}"
+        );
+
+        // No new episode waits, so the next firing calls no model.
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        assert_eq!(model.passes.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memory_off_keeps_no_notes_and_no_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut on = config();
+        drop(open_with(&db, &on));
+        on.memory.enabled = false;
+        let mut daemon = open_with(&db, &on);
+        assert!(daemon.rt.list_schedules().unwrap().is_empty());
+        let reply = daemon.handle_request(UID, request("m-1", "hi")).await;
+        assert!(matches!(reply, Response::Reply { .. }));
+        // A daemon that never kept memory opens no memory file.
+        let fresh = dir.path().join("fresh");
+        std::fs::create_dir(&fresh).unwrap();
+        drop(open_with(&fresh.join("lg.db"), &on));
+        assert!(!crate::memory::path_for(&fresh.join("lg.db")).exists());
+    }
+
+    #[test]
+    fn a_bad_consolidation_schedule_is_refused_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = config();
+        bad.memory.timezone = String::from("Mars/Olympus");
+        let error = Daemon::open(
+            &dir.path().join("lg.db"),
+            &bad,
+            Arc::new(OfflineModel::new()),
+            UID,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("memory.consolidate"),
+            "{error:#}"
+        );
     }
 }

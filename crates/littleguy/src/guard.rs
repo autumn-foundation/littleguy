@@ -22,7 +22,6 @@ use autumn_harvest_agent::flow::{FlowRules, effect_label};
 use autumn_harvest_agent::sandbox::SandboxTool;
 use autumn_harvest_agent::{
     AgentHarness, AgentProfile, BoxFuture, Rule, RunInfo, Tool, ToolCall, ToolDecision, ToolPolicy,
-    ToolRules,
 };
 use littleguy_stores::SqliteStores;
 
@@ -44,17 +43,19 @@ pub struct Guard {
     pub flow: FlowRules,
     /// The runtime of the `run_code` tool, when the sandbox is on.
     pub sandbox: Option<Arc<SandboxRuntime>>,
+    /// Whether the Google tools are on, so each send and invite waits.
+    pub google: bool,
 }
 
 impl Guard {
-    /// Whether anything can make a call wait: the sandbox, or a flow rule
-    /// that `tools` can complete.
+    /// Whether anything can make a call wait: a tool that always asks
+    /// (`always`), or a flow rule that `tools` can complete.
     ///
     /// A rule can trip only when the tools carry each label of its set. The
     /// default tools carry no private data, so the Rule of Two alone needs
     /// no store until a tool such as an MCP server brings that label.
     #[must_use]
-    pub fn asks(flow: &FlowRules, tools: &[Arc<dyn Tool>], sandbox: bool) -> bool {
+    pub fn asks(flow: &FlowRules, tools: &[Arc<dyn Tool>], always: bool) -> bool {
         let carried: BTreeSet<&str> = tools
             .iter()
             .flat_map(|tool| {
@@ -64,7 +65,7 @@ impl Guard {
                     .chain([effect_label(tool.effect())])
             })
             .collect();
-        sandbox
+        always
             || flow.rules().iter().any(|rule| {
                 *rule.rule() == Rule::Ask
                     && rule.labels().iter().all(|l| carried.contains(l.as_str()))
@@ -79,11 +80,11 @@ impl Guard {
         mut harness: AgentHarness,
         profile: AgentProfile,
     ) -> (AgentHarness, AgentProfile) {
-        let ask_tools = self.sandbox.is_some();
+        let run_code = self.sandbox.is_some();
         if let Some(runtime) = self.sandbox {
             harness = harness.tool(SandboxTool::new(runtime).shared());
         }
-        let gate = ApprovalGate::new(self.stores, ask_tools, &self.flow);
+        let gate = ApprovalGate::new(self.stores, run_code, self.google, &self.flow);
         if !self.flow.is_empty() {
             harness = harness.flow_rules(self.flow);
         }
@@ -94,8 +95,8 @@ impl Guard {
     }
 }
 
-/// Asks a person before each `run_code` call, and records each call that
-/// may wait.
+/// Asks a person before each `run_code` call, each mail send and each
+/// invite, and records each call that may wait.
 ///
 /// Every other tool runs without a question from the gate. A flow rule may
 /// still hold it. A call that cannot be recorded is denied, so no call
@@ -103,20 +104,17 @@ impl Guard {
 #[derive(Debug)]
 pub struct ApprovalGate {
     stores: Arc<SqliteStores>,
-    rules: ToolRules,
+    run_code: bool,
+    google: bool,
     watched: BTreeSet<String>,
 }
 
 impl ApprovalGate {
     /// A gate that records in `stores`. With `run_code`, each `run_code`
-    /// call waits. Each call with a label of a rule in `flow` is recorded.
+    /// call waits. With `google`, each mail send and each invite waits.
+    /// Each call with a label of a rule in `flow` is recorded.
     #[must_use]
-    pub fn new(stores: Arc<SqliteStores>, run_code: bool, flow: &FlowRules) -> Self {
-        let rules = if run_code {
-            ToolRules::new().tool(TOOL, Rule::Ask)
-        } else {
-            ToolRules::new()
-        };
+    pub fn new(stores: Arc<SqliteStores>, run_code: bool, google: bool, flow: &FlowRules) -> Self {
         let watched = flow
             .rules()
             .iter()
@@ -125,9 +123,21 @@ impl ApprovalGate {
             .collect();
         Self {
             stores,
-            rules,
+            run_code,
+            google,
             watched,
         }
+    }
+
+    /// Why `call` always waits for a person, or `None`.
+    fn ask_reason(&self, call: &ToolCall) -> Option<&'static str> {
+        if self.run_code && call.name == TOOL {
+            return Some(ASK_REASON);
+        }
+        if self.google {
+            return littleguy_tools::google::approval_reason(&call.name, &call.arguments);
+        }
+        None
     }
 
     /// Whether a flow rule may hold a call to `tool`.
@@ -166,24 +176,18 @@ impl ApprovalGate {
         let refused = || ToolDecision::Deny {
             reason: String::from("the call could not be recorded for approval, so it did not run"),
         };
-        match self.rules.decide_now(call, tool) {
-            ToolDecision::RequireApproval { .. } => {
-                if !self.record(call, ASK_REASON) {
-                    return refused();
-                }
-                ToolDecision::RequireApproval {
-                    reason: String::from(ASK_REASON),
-                }
+        if let Some(reason) = self.ask_reason(call) {
+            if !self.record(call, reason) {
+                return refused();
             }
-            ToolDecision::Allow if self.watches(tool) => {
-                if self.record(call, FLOW_REASON) {
-                    ToolDecision::Allow
-                } else {
-                    refused()
-                }
-            }
-            other => other,
+            return ToolDecision::RequireApproval {
+                reason: String::from(reason),
+            };
         }
+        if self.watches(tool) && !self.record(call, FLOW_REASON) {
+            return refused();
+        }
+        ToolDecision::Allow
     }
 }
 
@@ -244,7 +248,7 @@ mod tests {
     fn the_gate_watches_the_labels_of_ask_rules() {
         let dir = tempfile::tempdir().unwrap();
         let stores = crate::memory::open(&dir.path().join("lg.db")).unwrap();
-        let gate = ApprovalGate::new(stores, false, &FlowRules::rule_of_two());
+        let gate = ApprovalGate::new(Arc::clone(&stores), false, false, &FlowRules::rule_of_two());
         let web = tool("web", ToolEffect::ReadOnly, &[UNTRUSTED_INPUT]);
         let note = tool("note", ToolEffect::Internal, &[]);
         assert!(gate.watches(Some(web.as_ref())));
@@ -267,6 +271,19 @@ mod tests {
             gate.decide_call(&call, None),
             ToolDecision::Allow,
             "without the sandbox, run_code is not asked"
+        );
+        let send = ToolCall {
+            id: String::from("c-2"),
+            name: String::from("mail_send"),
+            arguments: json!({"to": "a@x.org", "subject": "s", "body": "b"}),
+        };
+        assert_eq!(gate.decide_call(&send, None), ToolDecision::Allow);
+        let mailing = ApprovalGate::new(stores, false, true, &FlowRules::new());
+        assert_eq!(
+            mailing.decide_call(&send, None),
+            ToolDecision::RequireApproval {
+                reason: String::from(littleguy_tools::google::SEND_REASON),
+            }
         );
     }
 }

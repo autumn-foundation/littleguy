@@ -270,7 +270,10 @@ key = "google"
 provider = "google"            # a provider of the San Mateo catalog
 client_id = "1234.apps.googleusercontent.com"
 client_secret_env = "LG_GOOGLE_CLIENT_SECRET"
-scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+scopes = [
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/calendar.events",
+]
 ```
 
 The sealing key and each client secret come from the environment only:
@@ -287,6 +290,37 @@ lg disconnect google <connection id>
 Register `http://127.0.0.1:3003/oauth/callback` as the redirect URI of the
 OAuth app. [ADR 0004](docs/adr/0004-oauth-with-san-mateo.md) explains the
 design.
+
+## Mail and calendar
+
+With a Google connection, the assistant reads and writes your Gmail and
+Google Calendar. Name the San Mateo integration in `[google]`:
+
+```toml
+[[san_mateo.integration]]
+key = "google"
+provider = "google"
+client_id = "1234.apps.googleusercontent.com"
+client_secret_env = "LG_GOOGLE_CLIENT_SECRET"
+scopes = [
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/calendar.events",
+]
+
+[google]
+integration = "google"   # the key of the integration above
+mail = true              # mail_search, mail_read, mail_draft, mail_send
+calendar = true          # calendar_events, calendar_create
+```
+
+Run `lg connect google` once to connect the account.
+
+Each send waits for a person, and so does each event that invites someone.
+The approver sees the addresses, the subject and the whole body before
+anything goes out. Mail and events count as untrusted input and private
+data, so after a read the Rule of Two also holds each draft. Tokens stay in
+San Mateo, and no tool sees one.
+[ADR 0010](docs/adr/0010-mail-and-calendar.md) explains the design.
 
 ## Config
 
@@ -337,7 +371,7 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
 | `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
-| `crates/littleguy-tools` | The tools: web fetch with its address guard, web search, the workspace files, and the MCP client. |
+| `crates/littleguy-tools` | The tools: web fetch with its address guard, web search, the workspace files, the MCP client, and Gmail and Calendar. |
 | `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own, and the calls that wait for approval. |
 | `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections`, `disconnect`, `approvals`, `approve` and `deny`, the camel routes, San Mateo, the sandbox and the approval gate. |
 | `formal/verus` | Verus proofs of the kernels. |

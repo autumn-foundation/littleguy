@@ -73,7 +73,15 @@
 //! provider = "google"
 //! client_id = "1234.apps.googleusercontent.com"
 //! client_secret_env = "LG_GOOGLE_CLIENT_SECRET"
-//! scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+//! scopes = [
+//!     "https://www.googleapis.com/auth/gmail.modify",
+//!     "https://www.googleapis.com/auth/calendar.events",
+//! ]
+//!
+//! [google]
+//! integration = "google"
+//! mail = true
+//! calendar = true
 //! ```
 //!
 //! The `[discord]` section is optional. The bot token never goes in the
@@ -123,6 +131,10 @@
 //! The `[san_mateo]` section names the OAuth integrations that San Mateo
 //! keeps tokens for. A client secret never goes in the file: the file names
 //! the variable that holds it.
+//!
+//! The `[google]` section gives the assistant Gmail and Google Calendar
+//! tools on one San Mateo integration with the `google` provider. Each send
+//! and each invite waits for a person.
 
 use std::path::{Path, PathBuf};
 
@@ -200,6 +212,9 @@ pub enum ConfigError {
     /// The San Mateo section is not valid.
     #[error(transparent)]
     SanMateo(#[from] SanMateoError),
+    /// The Google section is not valid.
+    #[error("the google section is not valid: {0}")]
+    Google(String),
     /// A camel route reads from a component that littleguy does not run.
     #[error("camel route `{id}` reads from `{from}`: use one of {}", CAMEL_SCHEMES.join(", "))]
     CamelScheme {
@@ -392,6 +407,62 @@ fn brief(raw: RawBrief, memory_timezone: &str) -> Result<BriefConfig, ConfigErro
         prompt,
         to: raw.to.as_deref().map(discord_sender).transpose()?,
     })
+}
+
+/// The San Mateo provider that the Google tools need.
+pub const GOOGLE_PROVIDER: &str = "google";
+
+/// The Gmail and Google Calendar tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleConfig {
+    /// The San Mateo integration that holds the Google connection.
+    pub integration: String,
+    /// The Gmail tools.
+    pub mail: bool,
+    /// The Google Calendar tools.
+    pub calendar: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGoogle {
+    integration: String,
+    mail: Option<bool>,
+    calendar: Option<bool>,
+}
+
+/// Checks the Google section against the San Mateo integrations.
+fn google(raw: RawGoogle, san_mateo: Option<&SanMateoConfig>) -> Result<GoogleConfig, ConfigError> {
+    let found = san_mateo
+        .into_iter()
+        .flat_map(|section| &section.integrations)
+        .find(|integration| integration.key == raw.integration);
+    match found {
+        None => {
+            return Err(ConfigError::Google(format!(
+                "integration `{}` is not a [[san_mateo.integration]]",
+                raw.integration
+            )));
+        }
+        Some(integration) if integration.provider != GOOGLE_PROVIDER => {
+            return Err(ConfigError::Google(format!(
+                "integration `{}` has provider `{}`: use provider `{GOOGLE_PROVIDER}`",
+                raw.integration, integration.provider
+            )));
+        }
+        Some(_) => {}
+    }
+    let config = GoogleConfig {
+        integration: raw.integration,
+        mail: raw.mail.unwrap_or(true),
+        calendar: raw.calendar.unwrap_or(true),
+    };
+    if !config.mail && !config.calendar {
+        return Err(ConfigError::Google(String::from(
+            "mail and calendar are both off: leave the section out",
+        )));
+    }
+    Ok(config)
 }
 
 /// The default San Mateo address.
@@ -792,6 +863,7 @@ struct Raw {
     #[serde(default)]
     camel: RawCamel,
     san_mateo: Option<RawSanMateo>,
+    google: Option<RawGoogle>,
     #[serde(default)]
     memory: RawMemory,
     brief: Option<RawBrief>,
@@ -1026,6 +1098,8 @@ pub struct Config {
     pub camel: Vec<CamelRoute>,
     /// The San Mateo settings, when the config has the section.
     pub san_mateo: Option<SanMateoConfig>,
+    /// The Gmail and Google Calendar tools, when the config has the section.
+    pub google: Option<GoogleConfig>,
     /// The memory settings.
     pub memory: MemoryConfig,
     /// The morning brief, when the config has the section.
@@ -1053,6 +1127,7 @@ impl Config {
             discord: DiscordConfig::default(),
             camel: Vec::new(),
             san_mateo: None,
+            google: None,
             memory: MemoryConfig::default(),
             brief: None,
             tools: ToolsConfig::default(),
@@ -1083,6 +1158,11 @@ impl Config {
             .map(|id| discord_sender(id))
             .collect::<Result<_, _>>()?;
         let memory = memory(raw.memory)?;
+        let san_mateo_section = raw.san_mateo.map(san_mateo).transpose()?;
+        let google_section = raw
+            .google
+            .map(|raw| google(raw, san_mateo_section.as_ref()))
+            .transpose()?;
         let brief = raw
             .brief
             .map(|raw| brief(raw, &memory.timezone))
@@ -1096,7 +1176,8 @@ impl Config {
                 allowed,
             },
             camel: camel_routes(raw.camel.route)?,
-            san_mateo: raw.san_mateo.map(san_mateo).transpose()?,
+            san_mateo: san_mateo_section,
+            google: google_section,
             memory,
             brief,
             tools: tools(&raw.tools)?,
@@ -1459,6 +1540,34 @@ mod tests {
             blocks += 1;
         }
         assert!(blocks >= 5, "the README lost its config blocks");
+    }
+
+    #[test]
+    fn the_google_section_needs_a_google_integration() {
+        let san = "[san_mateo]\n[[san_mateo.integration]]\nkey = \"g\"\nprovider = \"google\"\n\
+                   [[san_mateo.integration]]\nkey = \"gh\"\nprovider = \"github\"\n";
+        let parse =
+            |google: &str| Config::parse(&format!("owner = \"m\"\n{san}[google]\n{google}"));
+        assert_eq!(
+            parse("integration = \"g\"").unwrap().google,
+            Some(GoogleConfig {
+                integration: String::from("g"),
+                mail: true,
+                calendar: true,
+            })
+        );
+        let mail_only = parse("integration = \"g\"\ncalendar = false").unwrap();
+        assert!(mail_only.google.is_some_and(|g| g.mail && !g.calendar));
+        let bad = |google: &str| match parse(google) {
+            Err(ConfigError::Google(why)) => why,
+            other => panic!("{google}: {other:?}"),
+        };
+        assert!(bad("integration = \"x\"").contains("not a [[san_mateo.integration]]"));
+        assert!(bad("integration = \"gh\"").contains("provider `github`"));
+        assert!(bad("integration = \"g\"\nmail = false\ncalendar = false").contains("both off"));
+        let alone = Config::parse("owner = \"m\"\n[google]\nintegration = \"g\"");
+        assert!(matches!(alone, Err(ConfigError::Google(_))));
+        assert_eq!(Config::parse("owner = \"m\"").unwrap().google, None);
     }
 
     #[test]

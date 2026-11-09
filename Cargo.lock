@@ -3295,6 +3295,7 @@ dependencies = [
  "autumn-harvest-plugin",
  "autumn-harvest-sqlite",
  "axum",
+ "base64 0.23.1",
  "camel-api",
  "camel-builder",
  "camel-component-api",
@@ -3385,6 +3386,7 @@ version = "0.1.0"
 dependencies = [
  "autumn-harvest-agent",
  "axum",
+ "base64 0.23.1",
  "littleguy-core",
  "littleguy-tools",
  "proptest",

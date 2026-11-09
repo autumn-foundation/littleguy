@@ -220,6 +220,8 @@ pub struct Extras {
     pub sandbox: Option<Arc<autumn_harvest::sandbox::SandboxRuntime>>,
     /// The tools of the MCP servers.
     pub mcp: Vec<Arc<dyn autumn_harvest_agent::Tool>>,
+    /// The Google API of the owner, for the `[google]` tools.
+    pub google: Option<Arc<dyn littleguy_tools::google::GoogleApi>>,
 }
 
 /// The daemon state: the runtime, the routing table and the pairings.
@@ -281,7 +283,7 @@ impl Daemon {
             .transpose()?;
         let extras = Extras {
             sandbox,
-            mcp: Vec::new(),
+            ..Extras::default()
         };
         Self::open_with(db, config, model, owner_uid, discord, extras)
     }
@@ -315,12 +317,15 @@ impl Daemon {
         // guard keeps its calls that wait. So each opens the store even
         // when memory is off.
         let runtime = extras.sandbox.filter(|_| config.sandbox.is_some());
+        let google = crate::tools::google_tools(config.google.as_ref(), extras.google);
+        let google_on = !google.is_empty();
         let tools =
             crate::tools::Tools::new(&config.tools, db, crate::tools::search_key_from_env())
-                .with(extras.mcp);
+                .with(extras.mcp)
+                .with(google);
         tracing::info!(tools = ?tools.names(), "the assistant tools");
         let flow = config.flow.rules();
-        let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some());
+        let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || google_on);
         let stores = if config.memory.enabled || config.brief.is_some() || asks {
             Some(crate::memory::open(db)?)
         } else {
@@ -344,6 +349,7 @@ impl Daemon {
             timeout: Duration::from_secs(config.approvals.timeout_secs),
             flow,
             sandbox: runtime,
+            google: google_on,
         });
         let approver = config
             .approvals
@@ -2439,5 +2445,6 @@ mod tests {
     }
 
     mod flow;
+    mod google;
     mod sandboxed;
 }

@@ -67,7 +67,7 @@ fn open_sandboxed(db: &Path, config: &Config, backend: &Arc<CountingBackend>) ->
     .unwrap();
     let extras = Extras {
         sandbox: Some(runtime),
-        mcp: Vec::new(),
+        ..Extras::default()
     };
     Daemon::open_with(
         db,
@@ -323,7 +323,7 @@ async fn discord_buttons_decide_and_held_messages_run_after() {
     .unwrap();
     let extras = Extras {
         sandbox: Some(runtime),
-        mcp: Vec::new(),
+        ..Extras::default()
     };
     let daemon = Daemon::open_with(
         &dir.path().join("lg.db"),

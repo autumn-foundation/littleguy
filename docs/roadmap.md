@@ -11,16 +11,18 @@ use.
 | M0.6 | OpenAI and OpenRouter over one Chat Completions adapter | Done (#3) |
 | M1 | Discord direct messages over the gateway, pairing codes, replies sent once | Done (#4) |
 | M1.6 | Camel routes (file and timer) that feed the assistant through harvest-camel on SQLite | Done (#5) |
-| M1.7 | OAuth connections kept by an embedded San Mateo on SQLite: `lg connect`, `lg connections`, `lg disconnect` | This PR |
+| M1.7 | OAuth connections kept by an embedded San Mateo on SQLite: `lg connect`, `lg connections`, `lg disconnect` | Done (#6) |
 | M1.5 | Slack over Socket Mode, when autumn-plugin-slack 0.4 is on crates.io | Planned |
-| M2 | Durable memory, nightly consolidation, a weekday morning brief | Planned |
+| M2 | Durable memory and an episode log in `memory.db`, and a nightly consolidation pass on a cron schedule | This PR |
+| M2.1 | A weekday morning brief that stays silent when there is nothing to say | Planned |
 | M3 | Tools: web fetch and search, workspace files, sandboxed shell, MCP client, flow rules, approve and deny buttons | Planned |
 | M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Planned |
 | M5 | A web UI over the management API, Postgres mode, camel request and reply, the refine loop | Planned |
 
 Each engine gap gets a workaround here first. The engine issues are
 autumn-harvest #2603 (approval notices), #2604 (durable episode and
-transcript stores) and #2605 (a shared Claude model).
+transcript stores) and #2605 (a shared Claude model). `littleguy-stores`
+is the #2604 workaround for memory and episodes.
 
 The Discord channel uses `autumn-plugin-discord` 0.3 for the gateway. Three
 gaps get a workaround in `littleguy-channels`: the plugin has no call to

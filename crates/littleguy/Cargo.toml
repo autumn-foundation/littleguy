@@ -31,6 +31,7 @@ getrandom = "0.4"
 littleguy-channels = { workspace = true }
 littleguy-core = { workspace = true }
 littleguy-models = { workspace = true }
+littleguy-stores = { workspace = true }
 rustix = { workspace = true }
 san-mateo = "0.1"
 san-mateo-sqlite = "0.1"

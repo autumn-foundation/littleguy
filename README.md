@@ -96,6 +96,30 @@ prompt = "A file arrived. Summarize it."      # goes before each body
 - The owner writes the routes, so their messages need no pairing.
   [ADR 0003](docs/adr/0003-camel-routes.md) explains the design.
 
+## Memory
+
+The assistant keeps notes across runs, as the `memory` and `user` blocks of
+its prompt. It edits them itself with the `memory` tool, and a run reads
+them once, at its start. Ask it to remember something, and the next run
+knows it.
+
+Each answer also goes into an episode log. Each night a consolidation pass
+reads the new episodes, asks the model for durable facts, and adds each one
+to the `memory` block, such as `mark likes tea [episodes: ...]`. An idle
+night costs no model call.
+
+```toml
+[memory]
+enabled = true                  # false keeps no notes
+consolidate = "0 3 * * *"       # cron, in the time zone below
+timezone = "Europe/London"      # IANA name; the default is UTC
+```
+
+The notes and the log live in `memory.db`, next to `lg.db`. The pass runs
+only while `lg serve` runs. After a night off it runs once, at the next
+start. [ADR 0005](docs/adr/0005-memory-and-consolidation.md) explains the
+design.
+
 ## OAuth connections
 
 littleguy embeds [San Mateo](https://github.com/autumn-foundation/san-mateo)
@@ -179,6 +203,7 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
 | `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
+| `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own. |
 | `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections` and `disconnect`, the camel routes and San Mateo. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |

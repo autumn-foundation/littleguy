@@ -18,6 +18,7 @@
 mod camel;
 mod client;
 mod daemon;
+mod memory;
 mod oauth;
 mod pairs;
 mod paths;

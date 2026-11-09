@@ -14,6 +14,10 @@
 //! from = "file:/home/mark/lg-inbox?delete=true"
 //! prompt = "A file arrived. Summarize it."
 //!
+//! [memory]
+//! consolidate = "0 3 * * *"
+//! timezone = "Europe/London"
+//!
 //! [san_mateo]
 //! bind = "127.0.0.1:3003"
 //!
@@ -30,6 +34,11 @@
 //!
 //! Each `[[camel.route]]` is a camel route that feeds the assistant. The
 //! owner writes it, so its messages need no pairing.
+//!
+//! The `[memory]` section is optional. The assistant keeps notes across
+//! runs by default. Each night a consolidation pass turns its recent answers
+//! into facts in those notes. `consolidate` is a cron expression in
+//! `timezone`. Set `enabled = false` to keep no notes.
 //!
 //! The `[san_mateo]` section names the OAuth integrations that San Mateo
 //! keeps tokens for. A client secret never goes in the file: the file names
@@ -77,6 +86,12 @@ pub enum ConfigError {
     /// Two camel routes have one id.
     #[error("two camel routes have the id `{0}`")]
     CamelRouteTwice(String),
+    /// The consolidation schedule is not a five-field cron expression.
+    #[error("memory.consolidate `{0}` is not a cron expression such as \"0 3 * * *\"")]
+    Consolidate(String),
+    /// The time zone is empty or holds a space.
+    #[error("memory.timezone `{0}` is not a time zone name such as \"Europe/London\"")]
+    Timezone(String),
     /// The San Mateo section is not valid.
     #[error(transparent)]
     SanMateo(#[from] SanMateoError),
@@ -110,6 +125,61 @@ pub enum SanMateoError {
     Variable(String),
 }
 
+/// The default cron expression of the nightly consolidation: 03:00.
+pub const DEFAULT_CONSOLIDATE: &str = "0 3 * * *";
+
+/// The default time zone of the consolidation schedule.
+pub const DEFAULT_TIMEZONE: &str = "UTC";
+
+/// The memory settings of the assistant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// Whether the assistant keeps notes and an episode log.
+    pub enabled: bool,
+    /// The cron expression of the consolidation pass, five fields.
+    pub consolidate: String,
+    /// The IANA time zone of `consolidate`.
+    pub timezone: String,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            consolidate: String::from(DEFAULT_CONSOLIDATE),
+            timezone: String::from(DEFAULT_TIMEZONE),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMemory {
+    enabled: Option<bool>,
+    consolidate: Option<String>,
+    timezone: Option<String>,
+}
+
+/// Checks the memory section. The engine checks each cron field and the
+/// time zone name when the daemon opens. This check catches a wrong field
+/// count early, with a message that names the key.
+fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
+    let defaults = MemoryConfig::default();
+    let consolidate = raw.consolidate.unwrap_or(defaults.consolidate);
+    if consolidate.split_whitespace().count() != 5 {
+        return Err(ConfigError::Consolidate(consolidate));
+    }
+    let timezone = raw.timezone.unwrap_or(defaults.timezone);
+    if timezone.trim().is_empty() || timezone.chars().any(char::is_whitespace) {
+        return Err(ConfigError::Timezone(timezone));
+    }
+    Ok(MemoryConfig {
+        enabled: raw.enabled.unwrap_or(defaults.enabled),
+        consolidate,
+        timezone,
+    })
+}
+
 /// The default San Mateo address.
 pub const DEFAULT_SAN_MATEO_BIND: &str = "127.0.0.1:3003";
 
@@ -130,6 +200,8 @@ struct Raw {
     #[serde(default)]
     camel: RawCamel,
     san_mateo: Option<RawSanMateo>,
+    #[serde(default)]
+    memory: RawMemory,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -352,6 +424,8 @@ pub struct Config {
     pub camel: Vec<CamelRoute>,
     /// The San Mateo settings, when the config has the section.
     pub san_mateo: Option<SanMateoConfig>,
+    /// The memory settings.
+    pub memory: MemoryConfig,
 }
 
 impl Config {
@@ -365,6 +439,7 @@ impl Config {
             discord: DiscordConfig::default(),
             camel: Vec::new(),
             san_mateo: None,
+            memory: MemoryConfig::default(),
         }
     }
 
@@ -374,7 +449,7 @@ impl Config {
     ///
     /// Returns an error when the text is not valid TOML, names an unknown
     /// key, holds a bad owner name or Discord user id, sets a zero window,
-    /// or holds a bad camel route or San Mateo setting.
+    /// or holds a bad camel route, memory or San Mateo setting.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: Raw = toml::from_str(text)?;
         let window = raw.window.unwrap_or(DEFAULT_WINDOW);
@@ -397,6 +472,7 @@ impl Config {
             },
             camel: camel_routes(raw.camel.route)?,
             san_mateo: raw.san_mateo.map(san_mateo).transpose()?,
+            memory: memory(raw.memory)?,
         })
     }
 
@@ -422,6 +498,37 @@ mod tests {
     fn a_minimal_config_takes_the_defaults() {
         let config = Config::parse("owner = \"mark\"").unwrap();
         assert_eq!(config, Config::for_owner(OwnerName::new("mark").unwrap()));
+    }
+
+    #[test]
+    fn the_memory_section_is_read() {
+        let config = Config::parse(
+            "owner = \"mark\"\n[memory]\nenabled = false\nconsolidate = \"30 2 * * 1-5\"\ntimezone = \"Europe/London\"",
+        )
+        .unwrap();
+        assert_eq!(
+            config.memory,
+            MemoryConfig {
+                enabled: false,
+                consolidate: String::from("30 2 * * 1-5"),
+                timezone: String::from("Europe/London"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_bad_memory_section_is_refused() {
+        let parse =
+            |section: &str| Config::parse(&format!("owner = \"mark\"\n[memory]\n{section}"));
+        assert!(matches!(
+            parse("consolidate = \"every night\""),
+            Err(ConfigError::Consolidate(_))
+        ));
+        assert!(matches!(
+            parse("timezone = \"\""),
+            Err(ConfigError::Timezone(_))
+        ));
+        assert!(matches!(parse("other = 1"), Err(ConfigError::Parse(_))));
     }
 
     #[test]

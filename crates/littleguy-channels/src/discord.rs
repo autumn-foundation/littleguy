@@ -10,6 +10,11 @@
 //!
 //! The plugin has no call that posts a message to a channel or opens a DM.
 //! [`DiscordRest`] adds both, with one retry after a rate limit.
+//!
+//! A message can carry buttons. A press of a button arrives on the gateway
+//! as an `INTERACTION_CREATE` ([`ButtonPress`]). Discord waits three seconds
+//! for its answer, so the daemon answers each press before it does slow
+//! work.
 
 use std::time::Duration;
 
@@ -72,6 +77,87 @@ pub struct DmMessage {
     pub content: String,
 }
 
+/// One press of a message button.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ButtonPress {
+    /// The interaction snowflake.
+    pub interaction_id: String,
+    /// The token that answers the interaction. It stays out of each log.
+    pub token: String,
+    /// The user who pressed the button.
+    pub user_id: String,
+    /// The custom id of the button.
+    pub custom_id: String,
+    /// The channel of the message.
+    pub channel_id: String,
+}
+
+/// The token stays out of every log line.
+impl std::fmt::Debug for ButtonPress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ButtonPress")
+            .field("interaction_id", &self.interaction_id)
+            .field("user_id", &self.user_id)
+            .field("custom_id", &self.custom_id)
+            .field("channel_id", &self.channel_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The interaction type of a message component.
+const MESSAGE_COMPONENT: u64 = 3;
+
+/// Reads a button press from an `INTERACTION_CREATE` payload.
+///
+/// Another interaction type yields `None`. In a DM the user is `user`. In a
+/// server the user is `member.user`.
+#[must_use]
+pub fn parse_press(data: &Value) -> Option<ButtonPress> {
+    if data["type"].as_u64() != Some(MESSAGE_COMPONENT) {
+        return None;
+    }
+    let user = data["user"]["id"]
+        .as_str()
+        .or_else(|| data["member"]["user"]["id"].as_str())?;
+    Some(ButtonPress {
+        interaction_id: data["id"].as_str()?.to_owned(),
+        token: data["token"].as_str()?.to_owned(),
+        user_id: user.to_owned(),
+        custom_id: data["data"]["custom_id"].as_str()?.to_owned(),
+        channel_id: data["channel_id"].as_str()?.to_owned(),
+    })
+}
+
+/// The look of a button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonStyle {
+    /// Green.
+    Success,
+    /// Red.
+    Danger,
+}
+
+/// One button of a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Button {
+    /// The id that a press carries back. At most 100 characters.
+    pub custom_id: String,
+    /// The label.
+    pub label: String,
+    /// The look.
+    pub style: ButtonStyle,
+}
+
+impl Button {
+    fn to_json(&self) -> Value {
+        let style = match self.style {
+            ButtonStyle::Success => 3,
+            ButtonStyle::Danger => 4,
+        };
+        json!({"type": 2, "style": style, "label": self.label, "custom_id": self.custom_id})
+    }
+}
+
 /// One event of the gateway that the daemon acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GatewayEvent {
@@ -79,6 +165,8 @@ pub enum GatewayEvent {
     Ready,
     /// A direct message arrived.
     Message(DmMessage),
+    /// A user pressed a button.
+    Press(ButtonPress),
 }
 
 /// Reads a direct message from a `MESSAGE_CREATE` payload or a history
@@ -196,6 +284,82 @@ impl DiscordRest {
         Ok(())
     }
 
+    /// Sends `text` to `channel_id` with `buttons` under it. A long text
+    /// splits, and the buttons go under its last piece.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the first piece that fails.
+    pub async fn send_with_buttons(
+        &self,
+        channel_id: &str,
+        text: &str,
+        buttons: &[Button],
+    ) -> Result<(), ChannelError> {
+        let path = format!("/channels/{channel_id}/messages");
+        let pieces = split_message(text, MAX_MESSAGE_CHARS);
+        let last = pieces.len().saturating_sub(1);
+        for (index, piece) in pieces.into_iter().enumerate() {
+            let mut body = json!({"content": piece, "allowed_mentions": {"parse": []}});
+            if index == last && !buttons.is_empty() {
+                let row: Vec<Value> = buttons.iter().map(Button::to_json).collect();
+                body["components"] = json!([{"type": 1, "components": row}]);
+            }
+            self.call(reqwest::Method::POST, &path, Some(&body)).await?;
+        }
+        Ok(())
+    }
+
+    /// Answers `press` by replacing its message with `text`, with no
+    /// buttons. So nobody can press them again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the call fails.
+    pub async fn update_pressed(
+        &self,
+        press: &ButtonPress,
+        text: &str,
+    ) -> Result<(), ChannelError> {
+        let content: String = text.chars().take(MAX_MESSAGE_CHARS).collect();
+        let body = json!({
+            "type": 7,
+            "data": {"content": content, "components": [], "allowed_mentions": {"parse": []}},
+        });
+        self.callback(press, &body).await
+    }
+
+    /// Answers `press` with `text` that only the presser sees. The message
+    /// and its buttons stay.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the call fails.
+    pub async fn answer_privately(
+        &self,
+        press: &ButtonPress,
+        text: &str,
+    ) -> Result<(), ChannelError> {
+        let content: String = text.chars().take(MAX_MESSAGE_CHARS).collect();
+        let body = json!({
+            "type": 4,
+            "data": {"content": content, "flags": 64, "allowed_mentions": {"parse": []}},
+        });
+        self.callback(press, &body).await
+    }
+
+    /// One interaction callback. The token of the press authorizes it, so
+    /// the call sends no bot token.
+    async fn callback(&self, press: &ButtonPress, body: &Value) -> Result<(), ChannelError> {
+        let path = format!(
+            "/interactions/{}/{}/callback",
+            press.interaction_id, press.token
+        );
+        self.send_once(reqwest::Method::POST, &path, Some(body), false)
+            .await
+            .map(drop)
+    }
+
     /// The DM channel with `user_id`. Discord returns the same channel for
     /// the same user, so a second call opens nothing new.
     ///
@@ -242,19 +406,32 @@ impl DiscordRest {
         Ok(messages)
     }
 
-    /// One call, with one retry after a rate limit.
+    /// One call with the bot token, with one retry after a rate limit.
     async fn call(
         &self,
         method: reqwest::Method,
         path: &str,
         body: Option<&Value>,
     ) -> Result<Value, ChannelError> {
+        self.send_once(method, path, body, true).await
+    }
+
+    /// One call, with one retry after a rate limit. `bot` adds the token.
+    async fn send_once(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        bot: bool,
+    ) -> Result<Value, ChannelError> {
         let mut retried = false;
         loop {
             let mut request = self
                 .client
-                .request(method.clone(), format!("{}{path}", self.base))
-                .header("Authorization", format!("Bot {}", self.token));
+                .request(method.clone(), format!("{}{path}", self.base));
+            if bot {
+                request = request.header("Authorization", format!("Bot {}", self.token));
+            }
             if let Some(body) = body {
                 request = request.json(body);
             }
@@ -304,6 +481,7 @@ impl EventHandler for Forward {
         let event = match name {
             "READY" => Some(GatewayEvent::Ready),
             "MESSAGE_CREATE" => parse_dm(data).map(GatewayEvent::Message),
+            "INTERACTION_CREATE" => parse_press(data).map(GatewayEvent::Press),
             _ => None,
         };
         if let Some(event) = event {
@@ -468,6 +646,53 @@ mod tests {
         assert!(!format!("{rest:?}").contains("secret-token"));
     }
 
+    fn press(kind: u64) -> Value {
+        json!({
+            "id": "77",
+            "token": "secret-press-token",
+            "type": kind,
+            "channel_id": "900",
+            "user": {"id": "42"},
+            "data": {"custom_id": "lg:approve:3", "component_type": 2},
+        })
+    }
+
+    #[test]
+    fn a_button_press_parses_in_a_dm_and_in_a_server() {
+        let parsed = parse_press(&press(3)).unwrap();
+        assert_eq!(parsed.interaction_id, "77");
+        assert_eq!(parsed.user_id, "42");
+        assert_eq!(parsed.custom_id, "lg:approve:3");
+        assert_eq!(parsed.channel_id, "900");
+        assert!(!format!("{parsed:?}").contains("secret-press-token"));
+
+        let mut server = press(3);
+        server.as_object_mut().unwrap().remove("user");
+        server["member"] = json!({"user": {"id": "43"}});
+        assert_eq!(parse_press(&server).unwrap().user_id, "43");
+
+        assert_eq!(parse_press(&press(2)), None);
+        let mut no_id = press(3);
+        no_id["data"] = json!({});
+        assert_eq!(parse_press(&no_id), None);
+    }
+
+    #[test]
+    fn a_button_has_the_documented_shape() {
+        let approve = Button {
+            custom_id: String::from("a"),
+            label: String::from("Approve"),
+            style: ButtonStyle::Success,
+        };
+        assert_eq!(approve.to_json()["style"], 3);
+        assert_eq!(approve.to_json()["type"], 2);
+        let deny = Button {
+            style: ButtonStyle::Danger,
+            ..approve
+        };
+        assert_eq!(deny.to_json()["style"], 4);
+    }
+
     #[test]
     fn the_forwarder_passes_ready_and_direct_messages_only() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -480,6 +705,9 @@ mod tests {
         forward.on_event("MESSAGE_CREATE", &guild);
         assert_eq!(rx.try_recv().unwrap(), GatewayEvent::Ready);
         assert!(matches!(rx.try_recv().unwrap(), GatewayEvent::Message(m) if m.id == "7"));
+        forward.on_event("INTERACTION_CREATE", &press(3));
+        forward.on_event("INTERACTION_CREATE", &press(2));
+        assert!(matches!(rx.try_recv().unwrap(), GatewayEvent::Press(p) if p.user_id == "42"));
         assert!(rx.try_recv().is_err());
     }
 }

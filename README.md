@@ -167,6 +167,45 @@ The web tools only read, and their results count as untrusted input. The
 file tools change only the private workspace. A morning brief can read but
 not write. [ADR 0007](docs/adr/0007-first-tools.md) explains the design.
 
+## Running code
+
+`[sandbox]` gives the assistant a `run_code` tool for python3, node, bash
+and sh. No call runs until a person approves it:
+
+```toml
+[sandbox]
+backend = "firecracker"         # or "process", for development only
+network = false                 # the code gets no network
+approver = "123456789012345678" # the Discord user who gets the buttons
+approval_timeout_secs = 3600    # no decision by then denies the call
+
+[sandbox.firecracker]
+firecracker = "/usr/local/bin/firecracker"
+jailer = "/usr/local/bin/jailer"
+kernel = "/var/lib/littleguy/vmlinux"
+rootfs = "/var/lib/littleguy/rootfs.ext4"   # with the engine guest agent
+uid = 990
+gid = 990
+netns = "/run/netns/littleguy"              # optional, an empty namespace
+```
+
+When the assistant wants to run code, the approver gets a Discord DM with
+the code and **Approve** and **Deny** buttons. The owner can also decide
+from the shell:
+
+```sh
+lg approvals            # each call that waits, with its code
+lg approve 3
+lg deny 3 --reason "not on this machine"
+```
+
+The call runs with exactly the code that the approver read. While it
+waits, the assistant takes no new work: `lg chat` says it is busy, and a
+Discord message waits and runs after the decision. The `firecracker`
+backend runs each call in a new microVM. The `process` backend runs code as
+a host process, so use it only for development.
+[ADR 0008](docs/adr/0008-sandbox-and-approvals.md) explains the design.
+
 ## OAuth connections
 
 littleguy embeds [San Mateo](https://github.com/autumn-foundation/san-mateo)
@@ -251,8 +290,8 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
 | `crates/littleguy-tools` | The tools: web fetch with its address guard, web search, and the workspace files. |
-| `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own. |
-| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections` and `disconnect`, the camel routes and San Mateo. |
+| `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own, and the calls that wait for approval. |
+| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections`, `disconnect`, `approvals`, `approve` and `deny`, the camel routes, San Mateo and the sandbox. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |
 

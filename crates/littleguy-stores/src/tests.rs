@@ -339,3 +339,130 @@ proptest! {
         }
     }
 }
+
+mod approvals {
+    use serde_json::json;
+
+    use crate::approvals::MAX_APPROVALS;
+    use crate::{SqliteStores, Verdict};
+
+    fn store() -> SqliteStores {
+        SqliteStores::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn a_record_is_claimed_decided_and_closed_once() {
+        let stores = store();
+        let args = json!({"runtime": "sh", "code": "echo hi"});
+        let id = stores
+            .record_approval("call-1", "run_code", &args, "ask")
+            .unwrap();
+        // Unclaimed records are not open.
+        assert_eq!(stores.open_approvals().unwrap().len(), 0);
+        // A decision needs a claim.
+        assert!(!stores.set_verdict(id, Verdict::Approved).unwrap());
+
+        let claim = stores
+            .claim_approval("tool_approval:1:0:call-1", "call-1", Some("cli"))
+            .unwrap()
+            .unwrap();
+        assert!(claim.fresh);
+        assert_eq!(claim.record.id, id);
+        assert_eq!(claim.record.arguments, args);
+        assert_eq!(claim.record.requester.as_deref(), Some("cli"));
+
+        // A second sight of the same wait finds the same record.
+        let again = stores
+            .claim_approval("tool_approval:1:0:call-1", "call-1", Some("other"))
+            .unwrap()
+            .unwrap();
+        assert!(!again.fresh);
+        assert_eq!(again.record.requester.as_deref(), Some("cli"));
+
+        assert_eq!(stores.open_approvals().unwrap(), vec![again.record]);
+        assert!(stores.set_verdict(id, Verdict::Approved).unwrap());
+        assert!(!stores.set_verdict(id, Verdict::Denied).unwrap());
+        assert_eq!(
+            stores.approval(id).unwrap().unwrap().verdict,
+            Some(Verdict::Approved)
+        );
+
+        stores.close_approval(id).unwrap();
+        assert_eq!(stores.open_approvals().unwrap().len(), 0);
+        assert!(stores.approval(id).unwrap().unwrap().closed);
+        assert_eq!(stores.approval(id + 1).unwrap(), None);
+    }
+
+    #[test]
+    fn a_wait_claims_the_newest_record_of_its_call() {
+        let stores = store();
+        let old = stores
+            .record_approval("call-1", "run_code", &json!({"code": "old"}), "ask")
+            .unwrap();
+        stores
+            .claim_approval("tool_approval:1:0:call-1", "call-1", None)
+            .unwrap()
+            .unwrap();
+        stores.close_approval(old).unwrap();
+        // The model used the same call id in a later round.
+        let new = stores
+            .record_approval("call-1", "run_code", &json!({"code": "new"}), "ask")
+            .unwrap();
+        let claim = stores
+            .claim_approval("tool_approval:2:0:call-1", "call-1", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.record.id, new);
+        assert_eq!(claim.record.arguments["code"], "new");
+        assert_eq!(
+            stores
+                .claim_approval("tool_approval:3:0:other", "other", None)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn old_closed_records_are_dropped() {
+        let stores = store();
+        let first = stores
+            .record_approval("c", "run_code", &json!({}), "ask")
+            .unwrap();
+        stores
+            .claim_approval("tool_approval:0:0:c", "c", None)
+            .unwrap()
+            .unwrap();
+        // An open record stays, however old.
+        for _ in 0..MAX_APPROVALS {
+            stores
+                .record_approval("x", "run_code", &json!({}), "ask")
+                .unwrap();
+        }
+        assert!(stores.approval(first).unwrap().is_some());
+        stores.close_approval(first).unwrap();
+        stores
+            .record_approval("x", "run_code", &json!({}), "ask")
+            .unwrap();
+        // The closed record and the oldest unclaimed one are gone.
+        assert!(stores.approval(first).unwrap().is_none());
+        assert!(stores.approval(first + 1).unwrap().is_none());
+        assert!(stores.approval(first + 2).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_version_two_file_gains_the_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE sent_reports (key TEXT PRIMARY KEY);")
+                .unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+        let stores = SqliteStores::open(&path).unwrap();
+        let id = stores
+            .record_approval("c", "run_code", &json!({"a": 1}), "ask")
+            .unwrap();
+        assert_eq!(stores.approval(id).unwrap().unwrap().tool, "run_code");
+    }
+}

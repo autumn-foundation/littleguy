@@ -14,8 +14,12 @@
 //! keeps the last message whose reply went out. After a reconnect, the
 //! daemon reads the history after that cursor, so a message sent while it
 //! was down still gets its answer.
+//!
+//! A `run_code` call waits for a person ([`crate::approvals`]). While it
+//! waits, the daemon takes no new op. It holds each new Discord message and
+//! runs it after the decision. `lg chat` gets a busy answer instead.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,7 +28,7 @@ use anyhow::{Context, Result, bail};
 use autumn_harvest_agent::{AgentHarness, AgentId, AgentModel, AgentOp, AgentProfile, sqlite};
 use autumn_harvest_sqlite::SqliteRuntime;
 use chrono::{DateTime, Utc};
-use littleguy_channels::discord::{DiscordRest, DmMessage, GatewayEvent, run_gateway};
+use littleguy_channels::discord::{ButtonPress, DiscordRest, DmMessage, GatewayEvent, run_gateway};
 use littleguy_core::{
     ASSISTANT_KIND, ChannelId, ChannelRule, Config, Inbound, MessageId, PairingCode, Pending,
     PendingPairings, Route, Routing, SenderId, discord_sender, pairing::PAIRING_TTL_SECS, route,
@@ -34,6 +38,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::approvals::Requester;
 use crate::brief::{BriefDelivery, Calendar};
 use crate::camel::Camel;
 use crate::oauth::Connections;
@@ -120,7 +125,7 @@ pub fn routing(
 /// consolidation dispatcher reads. With `brief`, the delivery sends the
 /// answer of each heartbeat tick to the owner. The daemon arms each tick.
 /// `tools` gives the assistant its tools, and a workspace when the file
-/// tools are on.
+/// tools are on. `sandbox` adds the `run_code` tool and its approval gate.
 #[must_use]
 pub fn harness(
     config: &Config,
@@ -128,11 +133,15 @@ pub fn harness(
     memory: Option<(Arc<SqliteStores>, &Path)>,
     brief: Option<Arc<BriefDelivery>>,
     tools: crate::tools::Tools,
+    sandbox: Option<crate::sandbox::Sandbox>,
 ) -> AgentHarness {
     let profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
         .window(config.window);
     let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
+    if let Some(sandbox) = sandbox {
+        (harness, profile) = sandbox.apply(harness, profile);
+    }
     if let Some((stores, db)) = memory {
         harness = crate::memory::harness(harness, stores, db);
         profile = crate::memory::profile(profile);
@@ -214,6 +223,14 @@ pub struct Daemon {
     brief: Option<Calendar>,
     rest: Arc<OnceLock<DiscordRest>>,
     clock: Clock,
+    /// The store of the calls that wait, when the sandbox is on.
+    approvals: Option<Arc<SqliteStores>>,
+    /// The Discord user id of the approver.
+    approver: Option<String>,
+    /// The request that the assistant waits on.
+    waiting: Option<i64>,
+    /// The Discord messages that arrived while a request waited.
+    held: VecDeque<DmMessage>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
@@ -244,6 +261,28 @@ impl Daemon {
         owner_uid: u32,
         discord: bool,
     ) -> Result<Self> {
+        let sandbox = config
+            .sandbox
+            .as_ref()
+            .map(crate::sandbox::runtime)
+            .transpose()?;
+        Self::open_sandboxed(db, config, model, owner_uid, discord, sandbox)
+    }
+
+    /// [`Self::open`] with the sandbox runtime `sandbox`. It needs a
+    /// `[sandbox]` section, which sets the approver and the wait.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`].
+    pub fn open_sandboxed(
+        db: &Path,
+        config: &Config,
+        model: Arc<dyn AgentModel>,
+        owner_uid: u32,
+        discord: bool,
+        sandbox: Option<Arc<autumn_harvest::sandbox::SandboxRuntime>>,
+    ) -> Result<Self> {
         if let Some(parent) = db.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -255,9 +294,11 @@ impl Daemon {
             .as_ref()
             .map(|settings| Calendar::new(settings, Utc::now()))
             .transpose()?;
-        // The brief keeps its sent reports in the memory store, so it opens
-        // the store even when memory is off.
-        let stores = if config.memory.enabled || config.brief.is_some() {
+        // The brief keeps its sent reports in the memory store, and the
+        // sandbox keeps its calls that wait. So each opens the store even
+        // when memory is off.
+        let settings = config.sandbox.as_ref().zip(sandbox);
+        let stores = if config.memory.enabled || config.brief.is_some() || settings.is_some() {
             Some(crate::memory::open(db)?)
         } else {
             None
@@ -274,6 +315,23 @@ impl Daemon {
                     Arc::clone(&rest),
                 ))
             });
+        let approvals = stores.clone().filter(|_| settings.is_some());
+        let sandbox = settings
+            .zip(approvals.clone())
+            .map(|((settings, runtime), stores)| crate::sandbox::Sandbox {
+                runtime,
+                stores,
+                timeout: Duration::from_secs(settings.approval_timeout_secs),
+            });
+        let approver = config
+            .sandbox
+            .as_ref()
+            .and_then(|settings| settings.approver.as_ref())
+            .and_then(|sender| sender.as_str().strip_prefix("discord:"))
+            .map(str::to_owned);
+        if approver.is_some() && !discord {
+            tracing::warn!("sandbox.approver is set, but Discord is off: decide with `lg approve`");
+        }
         let memory = stores
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db));
@@ -282,11 +340,16 @@ impl Daemon {
         tracing::info!(tools = ?tools.names(), "the assistant tools");
         sqlite::register(
             &mut rt,
-            Arc::new(harness(config, model, memory, delivery, tools)),
+            Arc::new(harness(config, model, memory, delivery, tools, sandbox)),
         );
         crate::memory::schedule(&mut rt, &config.memory)?;
         // The runtime lock is held now, so this daemon is the store's one writer.
         let store = PairStore::open(crate::pairs::path_for(db))?;
+        // A request that waited before a restart still waits.
+        let waiting = match &approvals {
+            Some(stores) => stores.open_approvals()?.first().map(|record| record.id),
+            None => None,
+        };
         Ok(Self {
             routing: routing(config, owner_uid, &store, discord)?,
             rt,
@@ -298,6 +361,10 @@ impl Daemon {
             brief,
             rest,
             clock: Arc::new(Utc::now),
+            approvals,
+            approver,
+            waiting,
+            held: VecDeque::new(),
         })
     }
 
@@ -389,6 +456,17 @@ impl Daemon {
                     message: String::from("only the owner of the daemon may do that"),
                 })
             }
+            Request::Approvals => self.approval_list(),
+            Request::Approve { id } => {
+                self.decide_and_resume(id, crate::approvals::Choice::Approve)
+                    .await
+            }
+            Request::Deny { id, reason } => {
+                let reason =
+                    reason.unwrap_or_else(|| String::from(crate::approvals::DEFAULT_DENY_REASON));
+                self.decide_and_resume(id, crate::approvals::Choice::Deny(reason))
+                    .await
+            }
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
             Request::Unpair { sender } => self.unpair(&sender),
@@ -434,6 +512,9 @@ impl Daemon {
                 return Ok(Response::Dropped);
             }
         };
+        if let Some(approval) = self.waiting {
+            return Ok(Response::Busy { approval });
+        }
         let before = sqlite::state(&self.rt, &id).await?;
         let failures_before = before.as_ref().map_or(0, |state| state.failures);
         let key = inbound.message_id.as_str();
@@ -444,7 +525,15 @@ impl Daemon {
                 last_answer: before.and_then(|state| state.last_answer),
             });
         }
-        sqlite::drive(&mut self.rt, &id).await?;
+        let run = sqlite::drive(&mut self.rt, &id).await?;
+        let requester = if inbound.channel.as_str() == DISCORD_CHANNEL {
+            Requester::Discord(reply_to.to_owned())
+        } else {
+            Requester::Cli
+        };
+        if let Some(approval) = self.settle(run.as_ref(), Some(&requester)).await? {
+            return Ok(Response::Waiting { approval });
+        }
         let Some(state) = sqlite::state(&self.rt, &id).await? else {
             return Ok(Response::NoAnswer {
                 reason: String::from("the assistant has no running run"),
@@ -478,6 +567,13 @@ impl Daemon {
         if self.store.is_delivered(&channel, &sender, &message.id) {
             return Ok(None);
         }
+        // A request waits, so the message runs after the decision.
+        if self.waiting.is_some() {
+            if !self.held.iter().any(|held| held.id == message.id) {
+                self.held.push_back(message.clone());
+            }
+            return Ok(None);
+        }
         let inbound = Inbound {
             channel,
             sender: sender.clone(),
@@ -494,6 +590,7 @@ impl Daemon {
             ),
             Response::NoAnswer { reason } => (format!("Sorry, I could not answer: {reason}"), true),
             Response::Pairing { code } => (pairing_text(code.as_deref()), false),
+            Response::Waiting { approval } => (crate::approvals::waiting_text(approval), true),
             _ => return Ok(None),
         };
         Ok(Some(Outgoing {
@@ -645,12 +742,18 @@ impl Daemon {
         // A poll fires each due schedule, such as the nightly consolidation,
         // and drives every run once.
         self.rt.poll_once().await?;
-        sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
+        let first = sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
         // The arm comes after the drive, so a due brief tick runs first. A
         // second drive books the armed tick at once.
-        if self.arm_brief().await?.is_some() {
-            sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
-        }
+        let run = if self.arm_brief().await?.is_some() {
+            sqlite::drive(&mut self.rt, self.routing.assistant()).await?
+        } else {
+            first
+        };
+        // A wait can start or end without a message: a brief tick asks, or
+        // a deadline passes.
+        self.settle(run.as_ref(), None).await?;
+        self.release_held().await;
         Ok(())
     }
 }
@@ -742,6 +845,11 @@ enum Job {
     },
     /// The cursors to read the missed history from.
     Cursors { reply: oneshot::Sender<Vec<Cursor>> },
+    /// A press of an approval button.
+    Press {
+        press: ButtonPress,
+        reply: oneshot::Sender<gate::PressAnswer>,
+    },
 }
 
 /// What the daemon needs to run the Discord channel. Its `Debug` form
@@ -776,6 +884,7 @@ async fn run_job(daemon: &mut Daemon, job: Job) {
             let response = daemon.handle_request(uid, request).await;
             // A client that hung up gets no answer. The op still ran.
             let _ = reply.send(response);
+            daemon.release_held().await;
         }
         Job::Discord { message, reply } => {
             let outgoing = daemon.discord(&message).await.unwrap_or_else(|error| {
@@ -795,6 +904,15 @@ async fn run_job(daemon: &mut Daemon, job: Job) {
         }
         Job::Cursors { reply } => {
             let _ = reply.send(daemon.cursors());
+        }
+        Job::Press { press, reply } => {
+            // The answer goes first: Discord waits three seconds for it.
+            let (answer, decided) = daemon.press(&press);
+            let _ = reply.send(answer);
+            if let Some(record) = decided {
+                daemon.resume_after_press(&record, &press).await;
+            }
+            daemon.release_held().await;
         }
     }
 }
@@ -871,6 +989,7 @@ async fn discord_loop(
     while let Some(event) = events.recv().await {
         match event {
             GatewayEvent::Message(message) => deliver(&rest, &jobs, message).await,
+            GatewayEvent::Press(press) => answer_press(&rest, &jobs, press).await,
             GatewayEvent::Ready => {
                 let (reply, cursors) = oneshot::channel();
                 if jobs.send(Job::Cursors { reply }).await.is_err() {
@@ -913,6 +1032,26 @@ async fn deliver(rest: &DiscordRest, jobs: &mpsc::Sender<Job>, message: DmMessag
                 message_id: outgoing.message_id,
             })
             .await;
+    }
+}
+
+/// Hands one button press to the daemon, and sends its answer.
+async fn answer_press(rest: &DiscordRest, jobs: &mpsc::Sender<Job>, press: ButtonPress) {
+    let (reply, answer) = oneshot::channel();
+    let job = Job::Press {
+        press: press.clone(),
+        reply,
+    };
+    if jobs.send(job).await.is_err() {
+        return;
+    }
+    let result = match answer.await {
+        Ok(gate::PressAnswer::Update(text)) => rest.update_pressed(&press, &text).await,
+        Ok(gate::PressAnswer::Private(text)) => rest.answer_privately(&press, &text).await,
+        Err(_) => return,
+    };
+    if let Err(error) = result {
+        tracing::warn!(%error, "the answer to a button press did not go out");
     }
 }
 
@@ -978,6 +1117,8 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
         .context("writing the response")?;
     Ok(())
 }
+
+mod gate;
 
 #[cfg(test)]
 mod tests {
@@ -1748,6 +1889,7 @@ mod tests {
 
     /// A model for the memory tests. `remember <note>` calls the memory
     /// tool. `save <path> <text>` and `show <path>` call the file tools.
+    /// `run <code>` calls `run_code`, and answers `ran: <stdout>`.
     /// `recall` answers with the notes in its prompt, `quiet` gets
     /// `HEARTBEAT_OK`, and any other text gets `ok: <text>`. A
     /// consolidation pass gets one fact per episode that says `tea`.
@@ -1810,7 +1952,12 @@ mod tests {
                         }
                         _ => None,
                     })
-                    .and_then(|result| result["text"].as_str().map(str::to_owned));
+                    .and_then(|result| {
+                        let ran = result["stdout"]
+                            .as_str()
+                            .map(|out| format!("ran: {}", out.trim()));
+                        result["text"].as_str().map(str::to_owned).or(ran)
+                    });
                 return ContentPart::Text(read.unwrap_or_else(|| String::from("noted")));
             }
             let file_call = |name: &str, arguments: serde_json::Value| ContentPart::ToolCall {
@@ -1823,6 +1970,12 @@ mod tests {
                 return file_call(
                     "write_file",
                     serde_json::json!({"path": path, "text": text}),
+                );
+            }
+            if let Some(code) = user.strip_prefix("run ") {
+                return file_call(
+                    crate::sandbox::TOOL,
+                    serde_json::json!({"runtime": "sh", "code": code}),
                 );
             }
             if let Some(path) = user.strip_prefix("show ") {
@@ -2255,4 +2408,6 @@ mod tests {
         assert_ne!(reply_text(&shown), "green");
         assert!(!crate::tools::workspace_for(&db).exists());
     }
+
+    mod sandboxed;
 }

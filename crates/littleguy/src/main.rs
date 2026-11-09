@@ -4,6 +4,8 @@
 //! - `lg chat <text>` sends one message to the daemon and prints the answer.
 //! - `lg pair <code>`, `lg pairs` and `lg unpair <sender>` manage who may
 //!   talk to the assistant on Discord.
+//! - `lg connect <integration>`, `lg connections` and `lg disconnect` manage
+//!   the OAuth accounts that San Mateo keeps tokens for.
 //!
 //! With `DISCORD_BOT_TOKEN` set, `lg serve` also answers Discord direct
 //! messages. The token comes from the environment only. Each
@@ -16,6 +18,7 @@
 mod camel;
 mod client;
 mod daemon;
+mod oauth;
 mod pairs;
 mod paths;
 mod protocol;
@@ -62,6 +65,20 @@ enum Command {
     Unpair {
         /// The sender id, such as `discord:123456789012345678`.
         sender: String,
+    },
+    /// Print a link that connects an account of an OAuth integration.
+    Connect {
+        /// The integration key from the config, such as `google`.
+        integration: String,
+    },
+    /// List the OAuth connections.
+    Connections,
+    /// Delete one OAuth connection.
+    Disconnect {
+        /// The integration key.
+        integration: String,
+        /// The connection id, from `lg connections`.
+        connection: String,
     },
 }
 
@@ -226,7 +243,25 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
     let link = discord_link(&args, |var| std::env::var(var).ok());
     let uid = rustix::process::getuid().as_raw();
-    let daemon = daemon::Daemon::open(&db, &config, model, uid, link.is_some())?;
+    let mut daemon = daemon::Daemon::open(&db, &config, model, uid, link.is_some())?;
+    if let Some(section) = &config.san_mateo {
+        let key = std::env::var(oauth::KEY_VAR).with_context(|| {
+            format!(
+                "set {}, 32 random bytes in base64, to keep OAuth connections",
+                oauth::KEY_VAR
+            )
+        })?;
+        let connections = oauth::Connections::start(
+            section,
+            config.owner.as_str(),
+            &db,
+            &key,
+            |var| std::env::var(var).ok(),
+            oauth::Hooks::default(),
+        )
+        .await?;
+        daemon = daemon.with_connections(connections);
+    }
     let listener = daemon::bind(&socket).await?;
     let stop = async {
         // A failed signal handler leaves only a kill to stop the daemon.
@@ -272,6 +307,18 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Pair { code } => ask(&socket, &Request::Pair { code }).await,
         Command::Pairs => ask(&socket, &Request::Pairs).await,
         Command::Unpair { sender } => ask(&socket, &Request::Unpair { sender }).await,
+        Command::Connect { integration } => ask(&socket, &Request::Connect { integration }).await,
+        Command::Connections => ask(&socket, &Request::Connections).await,
+        Command::Disconnect {
+            integration,
+            connection,
+        } => {
+            let request = Request::Disconnect {
+                integration,
+                connection,
+            };
+            ask(&socket, &request).await
+        }
     }
 }
 
@@ -405,6 +452,16 @@ mod tests {
         assert!(matches!(cli.command, Command::Pair { ref code } if code == "ABCD-1234"));
         let cli = Cli::try_parse_from(["lg", "pairs"]).unwrap();
         assert!(matches!(cli.command, Command::Pairs));
+        let cli = Cli::try_parse_from(["lg", "connect", "google"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Connect { ref integration } if integration == "google")
+        );
+        let cli = Cli::try_parse_from(["lg", "connections"]).unwrap();
+        assert!(matches!(cli.command, Command::Connections));
+        let cli = Cli::try_parse_from(["lg", "disconnect", "google", "c-1"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Disconnect { ref connection, .. } if connection == "c-1")
+        );
         let cli = Cli::try_parse_from(["lg", "unpair", "discord:1"]).unwrap();
         assert!(matches!(cli.command, Command::Unpair { ref sender } if sender == "discord:1"));
     }

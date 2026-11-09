@@ -33,6 +33,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::camel::Camel;
+use crate::oauth::Connections;
 use crate::pairs::{Entry, PairStore};
 use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response};
 
@@ -187,6 +188,7 @@ pub struct Daemon {
     config_allowed: BTreeSet<SenderId>,
     pending: PendingPairings,
     store: PairStore,
+    connections: Option<Connections>,
 }
 
 impl std::fmt::Debug for Daemon {
@@ -229,7 +231,15 @@ impl Daemon {
             config_allowed: config.discord.allowed.iter().cloned().collect(),
             pending: PendingPairings::default(),
             store,
+            connections: None,
         })
+    }
+
+    /// Keeps OAuth connections with `connections`.
+    #[must_use]
+    pub fn with_connections(mut self, connections: Connections) -> Self {
+        self.connections = Some(connections);
+        self
     }
 
     /// The agent that the owner talks to.
@@ -294,12 +304,17 @@ impl Daemon {
             owner_only if uid != self.owner_uid => {
                 tracing::warn!(uid, request = ?owner_only, "refused an owner request");
                 Ok(Response::Error {
-                    message: String::from("only the owner of the daemon may change pairings"),
+                    message: String::from("only the owner of the daemon may do that"),
                 })
             }
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
             Request::Unpair { sender } => self.unpair(&sender),
+            request @ (Request::Connect { .. }
+            | Request::Connections
+            | Request::Disconnect { .. }) => {
+                oauth_request(self.connections.as_ref(), request).await
+            }
         };
         result.unwrap_or_else(|error| {
             tracing::error!(error = %format!("{error:#}"), "a request failed");
@@ -519,6 +534,31 @@ impl Daemon {
     }
 }
 
+/// Handles one OAuth request of the owner.
+async fn oauth_request(connections: Option<&Connections>, request: Request) -> Result<Response> {
+    let Some(connections) = connections else {
+        return Ok(Response::Error {
+            message: String::from(
+                "this daemon keeps no OAuth connections. Add a [san_mateo] section",
+            ),
+        });
+    };
+    Ok(match request {
+        Request::Connect { integration } => Response::ConnectLink {
+            link: connections.connect(&integration).await?,
+        },
+        Request::Disconnect {
+            integration,
+            connection,
+        } => Response::Disconnected {
+            removed: connections.disconnect(&integration, &connection).await?,
+        },
+        _ => Response::Connections {
+            entries: connections.list().await?,
+        },
+    })
+}
+
 /// Builds the inbound message of one socket chat request.
 fn cli_inbound(uid: u32, message_id: String, text: String) -> Result<Inbound> {
     Ok(Inbound {
@@ -693,6 +733,9 @@ pub async fn run(
     }
     if let Some(camel) = camel {
         camel.stop().await;
+    }
+    if let Some(connections) = daemon.connections.take() {
+        connections.stop().await;
     }
     Ok(())
 }
@@ -1081,7 +1124,7 @@ mod tests {
             },
         ] {
             let refused = daemon.handle_request(UID + 1, request).await;
-            assert!(matches!(refused, Response::Error { .. }), "{refused:?}");
+            assert!(matches!(refused, Response::Error { .. }));
         }
     }
 
@@ -1135,8 +1178,9 @@ mod tests {
         assert_eq!(model.calls(), 1);
 
         let pairs = daemon.handle_request(UID, Request::Pairs).await;
+        // An answer can hold a connect link, so the failure does not print it.
         let Response::Pairs { entries } = pairs else {
-            panic!("{pairs:?}");
+            panic!("`lg pairs` gave another answer");
         };
         let rows: Vec<(&str, &str, &str)> = entries
             .iter()
@@ -1523,5 +1567,60 @@ mod tests {
 
     fn open_with(db: &Path, config: &Config) -> Daemon {
         Daemon::open(db, config, Arc::new(OfflineModel::new()), UID, false).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn oauth_requests_are_for_the_owner_and_need_the_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon = open(&db, Arc::new(OfflineModel::new()));
+        let refused = daemon.handle_request(UID + 1, Request::Connections).await;
+        assert!(matches!(refused, Response::Error { ref message } if message.contains("owner")));
+        let none = daemon.handle_request(UID, Request::Connections).await;
+        assert!(matches!(none, Response::Error { ref message } if message.contains("[san_mateo]")));
+
+        let fake = san_mateo::MemoryTransport::new();
+        let config = crate::oauth::tests::section("acme", None);
+        let connections = crate::oauth::tests::start(&db, &config, &fake)
+            .await
+            .unwrap();
+        let mut daemon = daemon.with_connections(connections);
+        let link = daemon
+            .handle_request(
+                UID,
+                Request::Connect {
+                    integration: String::from("acme"),
+                },
+            )
+            .await;
+        // The link holds a session token, so the assertion does not print it.
+        assert!(
+            matches!(&link, Response::ConnectLink { link } if link.contains("connect_session_token="))
+        );
+        let unknown = daemon
+            .handle_request(
+                UID,
+                Request::Connect {
+                    integration: String::from("x"),
+                },
+            )
+            .await;
+        assert!(matches!(unknown, Response::Error { .. }));
+        // These answers come from San Mateo. The checks do not print them.
+        let list = daemon.handle_request(UID, Request::Connections).await;
+        assert!(matches!(list, Response::Connections { ref entries } if entries.is_empty()));
+        let gone = daemon
+            .handle_request(
+                UID,
+                Request::Disconnect {
+                    integration: String::from("acme"),
+                    connection: String::from("c-1"),
+                },
+            )
+            .await;
+        assert!(matches!(gone, Response::Disconnected { removed: false }));
+        if let Some(connections) = daemon.connections.take() {
+            connections.stop().await;
+        }
     }
 }

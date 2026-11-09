@@ -96,6 +96,40 @@ prompt = "A file arrived. Summarize it."      # goes before each body
 - The owner writes the routes, so their messages need no pairing.
   [ADR 0003](docs/adr/0003-camel-routes.md) explains the design.
 
+## OAuth connections
+
+littleguy embeds [San Mateo](https://github.com/autumn-foundation/san-mateo)
+to keep OAuth tokens for later tools, such as mail and calendar. San Mateo
+seals each token with AES-256-GCM in `san-mateo.db`, next to `lg.db`, and
+refreshes it before it expires. Name each integration in `lg.toml`:
+
+```toml
+[san_mateo]
+bind = "127.0.0.1:3003"        # loopback only
+
+[[san_mateo.integration]]
+key = "google"
+provider = "google"            # a provider of the San Mateo catalog
+client_id = "1234.apps.googleusercontent.com"
+client_secret_env = "LG_GOOGLE_CLIENT_SECRET"
+scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+```
+
+The sealing key and each client secret come from the environment only:
+
+```sh
+export LG_SAN_MATEO_KEY="$(openssl rand -base64 32)"   # keep it: it opens the tokens
+export LG_GOOGLE_CLIENT_SECRET=...
+lg serve &
+lg connect google      # prints a link: open it in a browser on this machine
+lg connections         # integration, connection id, provider, date, state
+lg disconnect google <connection id>
+```
+
+Register `http://127.0.0.1:3003/oauth/callback` as the redirect URI of the
+OAuth app. [ADR 0004](docs/adr/0004-oauth-with-san-mateo.md) explains the
+design.
+
 ## Config
 
 `lg serve` reads `<config home>/littleguy/lg.toml` when it exists:
@@ -120,6 +154,7 @@ from = "file:/home/mark/lg-inbox?delete=true"
 | `--db` | `LG_DB` | `<data home>/littleguy/lg.db` |
 | `--config` | `LG_CONFIG` | `<config home>/littleguy/lg.toml` |
 | none | `DISCORD_BOT_TOKEN` | unset: no Discord |
+| none | `LG_SAN_MATEO_KEY` | required with `[san_mateo]` |
 
 `<data home>` is `$XDG_DATA_HOME`, or `~/.local/share`. `<config home>` is
 `$XDG_CONFIG_HOME`, or `~/.config`.
@@ -144,7 +179,7 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
 | `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
-| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs` and `unpair`, and the camel routes. |
+| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections` and `disconnect`, the camel routes and San Mateo. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |
 

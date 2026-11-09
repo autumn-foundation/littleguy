@@ -10,11 +10,12 @@ use.
 | M0.5 | A Claude model, ported from `examples/autoresearch/src/claude.rs` in autumn-harvest, with thinking-block replay | Done (#2) |
 | M0.6 | OpenAI and OpenRouter over one Chat Completions adapter | Done (#3) |
 | M1 | Discord direct messages over the gateway, pairing codes, replies sent once | Done (#4) |
-| M1.6 | Camel routes (file and timer) that feed the assistant through harvest-camel on SQLite | This PR |
+| M1.6 | Camel routes (file and timer) that feed the assistant through harvest-camel on SQLite | Done (#5) |
+| M1.7 | OAuth connections kept by an embedded San Mateo on SQLite: `lg connect`, `lg connections`, `lg disconnect` | This PR |
 | M1.5 | Slack over Socket Mode, when autumn-plugin-slack 0.4 is on crates.io | Planned |
 | M2 | Durable memory, nightly consolidation, a weekday morning brief | Planned |
 | M3 | Tools: web fetch and search, workspace files, sandboxed shell, MCP client, flow rules, approve and deny buttons | Planned |
-| M4 | Mail and calendar through san-mateo (OAuth tokens and refresh), with drafts that wait for approval | Planned |
+| M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Planned |
 | M5 | A web UI over the management API, Postgres mode, camel request and reply, the refine loop | Planned |
 
 Each engine gap gets a workaround here first. The engine issues are

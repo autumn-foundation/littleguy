@@ -1605,13 +1605,9 @@ mod tests {
             )
             .await;
         assert!(matches!(unknown, Response::Error { .. }));
+        // These answers come from San Mateo. The checks do not print them.
         let list = daemon.handle_request(UID, Request::Connections).await;
-        assert_eq!(
-            list,
-            Response::Connections {
-                entries: Vec::new()
-            }
-        );
+        assert!(matches!(list, Response::Connections { ref entries } if entries.is_empty()));
         let gone = daemon
             .handle_request(
                 UID,
@@ -1621,7 +1617,7 @@ mod tests {
                 },
             )
             .await;
-        assert_eq!(gone, Response::Disconnected { removed: false });
+        assert!(matches!(gone, Response::Disconnected { removed: false }));
         if let Some(connections) = daemon.connections.take() {
             connections.stop().await;
         }

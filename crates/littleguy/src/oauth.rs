@@ -448,7 +448,10 @@ github:
         assert!(unknown.is_err());
 
         let connections = start(&db, &section("acme", None), &fake).await.unwrap();
-        let error = connections.connect("other").await.unwrap_err();
+        // A link holds a session token, so neither branch prints it.
+        let Err(error) = connections.connect("other").await else {
+            panic!("an unknown integration gave a link");
+        };
         assert!(error.to_string().contains("no integration `other`"));
         connections.stop().await;
         // The key is stored with provider acme. Another provider is refused.
@@ -460,6 +463,8 @@ github:
     fn the_secret_key_is_fresh() {
         let a = fresh_secret_key().unwrap();
         assert!(a.starts_with("sk_lg_") && a.len() == 54);
-        assert_ne!(a, fresh_secret_key().unwrap());
+        // `assert_ne!` prints both keys on failure, so compare them plainly.
+        let differ = a != fresh_secret_key().unwrap();
+        assert!(differ);
     }
 }

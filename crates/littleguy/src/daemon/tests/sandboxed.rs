@@ -83,7 +83,7 @@ fn approval_entries(response: &Response) -> Vec<ApprovalEntryView> {
                 text: e.text.clone(),
             })
             .collect(),
-        other => panic!("not a list: {other:?}"),
+        _ => panic!("the response is not a list of approvals"),
     }
 }
 
@@ -180,7 +180,10 @@ async fn a_denied_call_never_runs() {
             },
         )
         .await;
-    assert!(matches!(denied, Response::Reply { .. }), "{denied:?}");
+    assert!(
+        matches!(denied, Response::Reply { .. }),
+        "a denial gets a reply"
+    );
     assert_ne!(reply_text(&denied), "ran: hi");
     assert_eq!(backend.runs.load(Ordering::SeqCst), 0);
 }
@@ -226,7 +229,10 @@ async fn a_deadline_denies_the_call() {
     assert_eq!(daemon.waiting, None);
     assert_eq!(backend.runs.load(Ordering::SeqCst), 0);
     let late = daemon.handle_request(UID, Request::Approve { id: 1 }).await;
-    assert!(matches!(late, Response::Error { .. }), "{late:?}");
+    assert!(
+        matches!(late, Response::Error { .. }),
+        "a late approval is refused"
+    );
     let next = daemon.handle_request(UID, request("t-2", "hello")).await;
     assert_eq!(reply_text(&next), "ok: hello");
 }
@@ -244,12 +250,15 @@ async fn no_sandbox_means_no_approvals() {
     .unwrap();
     // The model asks for a tool that the assistant does not have.
     let answer = daemon.handle_request(UID, request("n-1", "run date")).await;
-    assert!(matches!(answer, Response::Reply { .. }), "{answer:?}");
+    assert!(
+        matches!(answer, Response::Reply { .. }),
+        "the assistant answers"
+    );
     for request in [Request::Approvals, Request::Approve { id: 1 }] {
         let refused = daemon.handle_request(UID, request).await;
         assert!(
             matches!(&refused, Response::Error { message } if message.contains("[sandbox]")),
-            "{refused:?}"
+            "a daemon with no sandbox refuses approvals"
         );
     }
 }

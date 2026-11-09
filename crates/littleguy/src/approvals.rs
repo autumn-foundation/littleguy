@@ -203,7 +203,7 @@ pub fn notice(record: &ApprovalRecord) -> String {
 #[must_use]
 pub fn waiting_text(id: i64) -> String {
     format!(
-        "I need approval before I run code (request #{id}). I will answer here once it is decided."
+        "I need approval before I go on (request #{id}). I will answer here once it is decided."
     )
 }
 

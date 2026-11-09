@@ -6,7 +6,7 @@ use autumn_harvest::sandbox::{
     IsolationLevel, RunStatus, SandboxBackend, SandboxError, SandboxJob, SandboxOutcome,
 };
 use littleguy_channels::testing::FakeDiscord;
-use littleguy_core::{SandboxBackend as BackendKind, SandboxConfig};
+use littleguy_core::{ApprovalsConfig, SandboxBackend as BackendKind, SandboxConfig};
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -51,9 +51,11 @@ fn sandbox_config(approver: Option<&str>, timeout: u64) -> Config {
     config.sandbox = Some(SandboxConfig {
         backend: BackendKind::Process,
         network: false,
-        approver: approver.map(|id| discord_sender(id).unwrap()),
-        approval_timeout_secs: timeout,
     });
+    config.approvals = ApprovalsConfig {
+        approver: approver.map(|id| discord_sender(id).unwrap()),
+        timeout_secs: timeout,
+    };
     config
 }
 
@@ -63,13 +65,17 @@ fn open_sandboxed(db: &Path, config: &Config, backend: &Arc<CountingBackend>) ->
         config.sandbox.as_ref().unwrap(),
     )
     .unwrap();
-    Daemon::open_sandboxed(
+    let extras = Extras {
+        sandbox: Some(runtime),
+        mcp: Vec::new(),
+    };
+    Daemon::open_with(
         db,
         config,
         Arc::new(MemoryModel::default()),
         UID,
         !config.discord.allowed.is_empty(),
-        Some(runtime),
+        extras,
     )
     .unwrap()
 }
@@ -254,6 +260,8 @@ async fn no_sandbox_means_no_approvals() {
         matches!(answer, Response::Reply { .. }),
         "the assistant answers"
     );
+    // The Rule of Two is on, but no tool brings private data. So no call
+    // can wait.
     for request in [Request::Approvals, Request::Approve { id: 1 }] {
         let refused = daemon.handle_request(UID, request).await;
         assert!(
@@ -278,8 +286,6 @@ fn a_firecracker_backend_with_missing_files_does_not_open() {
             netns: None,
         }),
         network: false,
-        approver: None,
-        approval_timeout_secs: 60,
     });
     let error = Daemon::open(
         &dir.path().join("lg.db"),
@@ -315,13 +321,17 @@ async fn discord_buttons_decide_and_held_messages_run_after() {
         config.sandbox.as_ref().unwrap(),
     )
     .unwrap();
-    let daemon = Daemon::open_sandboxed(
+    let extras = Extras {
+        sandbox: Some(runtime),
+        mcp: Vec::new(),
+    };
+    let daemon = Daemon::open_with(
         &dir.path().join("lg.db"),
         &config,
         Arc::new(MemoryModel::default()),
         uid,
         true,
-        Some(runtime),
+        extras,
     )
     .unwrap();
     let listener = bind(&socket).await.unwrap();

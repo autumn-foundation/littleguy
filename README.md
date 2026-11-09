@@ -176,8 +176,10 @@ and sh. No call runs until a person approves it:
 [sandbox]
 backend = "firecracker"         # or "process", for development only
 network = false                 # the code gets no network
+
+[approvals]
 approver = "123456789012345678" # the Discord user who gets the buttons
-approval_timeout_secs = 3600    # no decision by then denies the call
+timeout_secs = 3600             # no decision by then denies the call
 
 [sandbox.firecracker]
 firecracker = "/usr/local/bin/firecracker"
@@ -205,6 +207,52 @@ Discord message waits and runs after the decision. The `firecracker`
 backend runs each call in a new microVM. The `process` backend runs code as
 a host process, so use it only for development.
 [ADR 0008](docs/adr/0008-sandbox-and-approvals.md) explains the design.
+
+## MCP servers
+
+Each `[[mcp.server]]` gives the assistant the tools of one MCP server. A
+server runs as a child process, or answers at a URL:
+
+```toml
+[[mcp.server]]
+id = "github"                           # each tool is github__<tool>
+command = "github-mcp-server"
+args = ["stdio"]
+env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]  # the only variables it gets, with PATH and HOME
+labels = ["untrusted_input", "private_data"]
+effect = "external"                     # read_only, internal, write or external (the default)
+
+[[mcp.server]]
+id = "notes"
+url = "http://127.0.0.1:8808/mcp"       # https, or http to this machine
+bearer_env = "LG_NOTES_TOKEN"           # the variable that holds the bearer token
+labels = ["private_data"]
+effect = "write"
+tools = ["search", "append"]            # keep only these
+timeout_secs = 60                       # the bound on one call
+```
+
+A server that does not start costs only its own tools, and the log says
+why. You set the labels and the effect, not the server. Label a server
+`untrusted_input` when strangers can write what it returns, such as mail or
+issues. Label it `private_data` when it returns what only you should see.
+
+### Flow rules
+
+The Rule of Two is on by default. A call waits for a person when the
+conversation would then hold untrusted input, private data, and a write or
+an outside effect, all three. The decision works as for code: the approver
+gets the call in a DM with buttons, or you run `lg approve`.
+
+```toml
+[flow]
+rule_of_two = true          # false turns the rule off
+recheck = "each_call"       # or "until_approved": one yes per op
+```
+
+The labels stay with the conversation. After the assistant reads your
+private mail, each later send asks first. The web tools count as untrusted
+input. [ADR 0009](docs/adr/0009-mcp-and-flow-rules.md) explains the design.
 
 ## OAuth connections
 
@@ -289,9 +337,9 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
 | `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
-| `crates/littleguy-tools` | The tools: web fetch with its address guard, web search, and the workspace files. |
+| `crates/littleguy-tools` | The tools: web fetch with its address guard, web search, the workspace files, and the MCP client. |
 | `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own, and the calls that wait for approval. |
-| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections`, `disconnect`, `approvals`, `approve` and `deny`, the camel routes, San Mateo and the sandbox. |
+| `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections`, `disconnect`, `approvals`, `approve` and `deny`, the camel routes, San Mateo, the sandbox and the approval gate. |
 | `formal/verus` | Verus proofs of the kernels. |
 | `xtask` | Every CI gate: `cargo xtask ci`. |
 

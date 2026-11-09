@@ -5,26 +5,17 @@
 //! process for development. The engine records the outcome, so a replay
 //! never runs the code again.
 //!
-//! Each `run_code` call waits for a person. [`ApprovalGate`] asks the engine
-//! for that wait. It also records the call with its arguments in
-//! `memory.db`, because the engine names the wait but does not show the
-//! call. The daemon reads the record and shows it to the approver
-//! (`crate::approvals`).
+//! Each `run_code` call waits for a person. The approval gate of
+//! [`crate::guard`] asks the engine for that wait.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use autumn_harvest::sandbox::{
     NetworkPolicy, SandboxBackend as Backend, SandboxPolicy, SandboxRuntime,
 };
-use autumn_harvest_agent::sandbox::{DEFAULT_TOOL_NAME, SandboxTool};
-use autumn_harvest_agent::{
-    AgentHarness, AgentProfile, BoxFuture, Rule, RunInfo, Tool, ToolCall, ToolDecision, ToolPolicy,
-    ToolRules,
-};
+use autumn_harvest_agent::sandbox::DEFAULT_TOOL_NAME;
 use littleguy_core::{FirecrackerConfig, SandboxBackend, SandboxConfig};
-use littleguy_stores::SqliteStores;
 
 /// The name of the tool.
 pub const TOOL: &str = DEFAULT_TOOL_NAME;
@@ -96,95 +87,4 @@ fn firecracker(config: &FirecrackerConfig) -> Result<Arc<dyn Backend>> {
         .map_err(|error| anyhow::anyhow!("firecracker does not start: {}", error.message()))
         .context("building the sandbox backend")?;
     Ok(Arc::new(backend))
-}
-
-/// The tool, its gate and its wait.
-#[derive(Debug, Clone)]
-pub struct Sandbox {
-    /// The runtime that runs the code.
-    pub runtime: Arc<SandboxRuntime>,
-    /// The store that keeps each call that waits.
-    pub stores: Arc<SqliteStores>,
-    /// How long a call waits for a decision.
-    pub timeout: Duration,
-}
-
-impl Sandbox {
-    /// Gives the harness the tool and the gate, and the profile the wait.
-    #[must_use]
-    pub fn apply(
-        self,
-        harness: AgentHarness,
-        profile: AgentProfile,
-    ) -> (AgentHarness, AgentProfile) {
-        let tool: Arc<dyn Tool> = SandboxTool::new(self.runtime).shared();
-        let gate = ApprovalGate::new(self.stores);
-        (
-            harness.tool(tool).policy(Arc::new(gate)),
-            profile.approval_timeout(self.timeout),
-        )
-    }
-}
-
-/// Asks a person before each `run_code` call, and records the call.
-///
-/// Every other tool runs without a question, as before. A call that cannot
-/// be recorded is denied, so no call waits that the approver cannot read.
-#[derive(Debug)]
-pub struct ApprovalGate {
-    stores: Arc<SqliteStores>,
-    rules: ToolRules,
-}
-
-impl ApprovalGate {
-    /// A gate that records in `stores`.
-    #[must_use]
-    pub fn new(stores: Arc<SqliteStores>) -> Self {
-        Self {
-            stores,
-            rules: ToolRules::new().tool(TOOL, Rule::Ask),
-        }
-    }
-
-    /// The decision on `call`. The policy runs inside the model-turn
-    /// activity, and replay reads its answer. So a call is recorded once
-    /// for each attempt of that activity.
-    #[must_use]
-    pub fn decide_call(&self, call: &ToolCall, tool: Option<&dyn Tool>) -> ToolDecision {
-        match self.rules.decide_now(call, tool) {
-            ToolDecision::RequireApproval { .. } => {
-                match self
-                    .stores
-                    .record_approval(&call.id, &call.name, &call.arguments, ASK_REASON)
-                {
-                    Ok(id) => {
-                        tracing::info!(approval = id, tool = %call.name, "a call waits for approval");
-                        ToolDecision::RequireApproval {
-                            reason: String::from(ASK_REASON),
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "a call that needs approval was not recorded");
-                        ToolDecision::Deny {
-                            reason: String::from(
-                                "the call could not be recorded for approval, so it did not run",
-                            ),
-                        }
-                    }
-                }
-            }
-            other => other,
-        }
-    }
-}
-
-impl ToolPolicy for ApprovalGate {
-    fn decide<'a>(
-        &'a self,
-        call: &'a ToolCall,
-        tool: Option<&'a dyn Tool>,
-        _info: &'a RunInfo,
-    ) -> BoxFuture<'a, ToolDecision> {
-        Box::pin(std::future::ready(self.decide_call(call, tool)))
-    }
 }

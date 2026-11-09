@@ -12,6 +12,7 @@ autumn-harvest-agent = { version = "0.10.0", default-features = false }
 serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+url = "2"
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-11-09.
+Accepted, 2026-11-09. [ADR 0009](0009-mcp-and-flow-rules.md) moves the
+approver and the deadline to `[approvals]`.
 
 ## Context
 

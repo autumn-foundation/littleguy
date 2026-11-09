@@ -1,4 +1,5 @@
-//! The tools of the assistant: web fetch, web search and workspace files.
+//! The tools of the assistant: web fetch, web search, workspace files and
+//! the tools of the MCP servers.
 //!
 //! `[tools]` turns each one on or off. Web search also needs the Brave
 //! Search API key in [`SEARCH_KEY_ENV`]. The key never goes in the config
@@ -13,7 +14,8 @@ use std::sync::Arc;
 
 use autumn_harvest::payload_codec::PayloadCodecs;
 use autumn_harvest_agent::{AgentHarness, AgentProfile, DirWorkspaceBlobs, Tool, WorkspaceStore};
-use littleguy_core::ToolsConfig;
+use littleguy_core::{McpServer, ToolsConfig};
+use littleguy_tools::mcp::Vars;
 use littleguy_tools::{FetchTool, SearchTool, file_tools};
 
 /// The variable that holds the Brave Search API key.
@@ -36,6 +38,24 @@ pub fn search_key_from_env() -> Option<String> {
     std::env::var(SEARCH_KEY_ENV)
         .ok()
         .filter(|key| !key.trim().is_empty())
+}
+
+/// Opens each MCP server of the config and returns its tools. A server
+/// that fails gives no tools, and the log says why. The daemon still
+/// starts, so one broken server does not take the assistant down.
+pub async fn mcp_tools(servers: &[McpServer]) -> Vec<Arc<dyn Tool>> {
+    if servers.is_empty() {
+        return Vec::new();
+    }
+    let vars: Vars = Arc::new(|name: &str| std::env::var(name).ok());
+    let found = littleguy_tools::mcp::connect(servers, &vars).await;
+    for (id, error) in &found.failed {
+        tracing::warn!(server = %id, %error, "an MCP server gives no tools");
+    }
+    for note in &found.skipped {
+        tracing::warn!("{note}");
+    }
+    found.tools
 }
 
 /// The tools that `config` turns on, and the workspace store they need.
@@ -68,6 +88,19 @@ impl Tools {
             tools,
             workspace: config.files.then(|| workspace_for(db)),
         }
+    }
+
+    /// Adds `extra`, such as the tools of the MCP servers.
+    #[must_use]
+    pub fn with(mut self, extra: impl IntoIterator<Item = Arc<dyn Tool>>) -> Self {
+        self.tools.extend(extra);
+        self
+    }
+
+    /// The tools, in order.
+    #[must_use]
+    pub fn all(&self) -> &[Arc<dyn Tool>] {
+        &self.tools
     }
 
     /// The names of the tools, in order.
@@ -140,5 +173,48 @@ mod tests {
     #[test]
     fn a_bare_database_name_keeps_the_workspace_beside_it() {
         assert_eq!(workspace_for(Path::new("lg.db")), Path::new("workspace"));
+    }
+
+    #[tokio::test]
+    async fn a_broken_mcp_server_gives_no_tools() {
+        assert!(mcp_tools(&[]).await.is_empty());
+        let broken = McpServer {
+            id: String::from("gone"),
+            transport: littleguy_core::McpTransport::Stdio {
+                command: String::from("/nonexistent/lg-mcp"),
+                args: Vec::new(),
+                env: Vec::new(),
+            },
+            labels: Vec::new(),
+            effect: autumn_harvest_agent::ToolEffect::External,
+            tools: None,
+            timeout_secs: 5,
+        };
+        assert!(mcp_tools(&[broken]).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_join_the_others() {
+        let server = littleguy_tools::testing::serve_http(None).await.unwrap();
+        let web = McpServer {
+            id: String::from("web"),
+            transport: littleguy_core::McpTransport::Http {
+                url: server.url.clone(),
+                bearer_env: None,
+            },
+            labels: Vec::new(),
+            effect: autumn_harvest_agent::ToolEffect::ReadOnly,
+            tools: Some(vec![String::from("echo"), String::from("gone")]),
+            timeout_secs: 5,
+        };
+        let mcp = mcp_tools(&[web]).await;
+        let config = ToolsConfig {
+            web_search: false,
+            files: false,
+            ..ToolsConfig::default()
+        };
+        let tools = Tools::new(&config, Path::new("/var/lg/lg.db"), None).with(mcp);
+        assert_eq!(tools.names(), ["web_fetch", "web__echo"]);
+        assert_eq!(tools.all().len(), 2);
     }
 }

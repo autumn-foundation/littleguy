@@ -1,6 +1,6 @@
 [package]
 name = "littleguy-tools"
-description = "The tools of the littleguy assistant: web fetch, web search and workspace files"
+description = "The tools of the littleguy assistant: web fetch, web search, workspace files and MCP servers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,14 +11,38 @@ repository.workspace = true
 autumn-harvest-agent = { version = "0.10.0", default-features = false }
 littleguy-core = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rmcp = { version = "3.9", default-features = false, features = [
+    "client",
+    "reqwest-tls-no-provider",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 url = "2"
 
+# The MCP test server that the tests of this crate and of the daemon run against.
+axum = { version = "0.8", optional = true }
+
+[features]
+testing = [
+    "dep:axum",
+    "rmcp/server",
+    "rmcp/transport-io",
+    "rmcp/transport-streamable-http-server",
+]
+
 [dev-dependencies]
 axum = "0.8"
+littleguy-tools = { path = ".", features = ["testing"] }
 proptest = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[[test]]
+name = "mcp_stdio"
+harness = false
 
 [lints]
 workspace = true

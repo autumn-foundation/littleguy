@@ -14,10 +14,16 @@ use std::sync::Arc;
 
 use autumn_harvest::payload_codec::PayloadCodecs;
 use autumn_harvest_agent::{AgentHarness, AgentProfile, DirWorkspaceBlobs, Tool, WorkspaceStore};
-use littleguy_core::{GoogleConfig, McpServer, ToolsConfig};
+#[cfg(feature = "google")]
+use littleguy_core::GoogleConfig;
+use littleguy_core::{McpServer, ToolsConfig};
+use littleguy_tools::file_tools;
+#[cfg(feature = "google")]
 use littleguy_tools::google::GoogleApi;
+#[cfg(feature = "mcp")]
 use littleguy_tools::mcp::Vars;
-use littleguy_tools::{FetchTool, SearchTool, file_tools};
+#[cfg(feature = "web")]
+use littleguy_tools::{FetchTool, SearchTool};
 
 /// The variable that holds the Brave Search API key.
 pub const SEARCH_KEY_ENV: &str = "LG_BRAVE_API_KEY";
@@ -44,6 +50,7 @@ pub fn search_key_from_env() -> Option<String> {
 /// Opens each MCP server of the config and returns its tools. A server
 /// that fails gives no tools, and the log says why. The daemon still
 /// starts, so one broken server does not take the assistant down.
+#[cfg(feature = "mcp")]
 pub async fn mcp_tools(servers: &[McpServer]) -> Vec<Arc<dyn Tool>> {
     if servers.is_empty() {
         return Vec::new();
@@ -59,8 +66,17 @@ pub async fn mcp_tools(servers: &[McpServer]) -> Vec<Arc<dyn Tool>> {
     found.tools
 }
 
+/// The tools of the MCP servers. This build has no MCP client, so there
+/// are none. A config with servers fails at start
+/// ([`crate::features::check`]).
+#[cfg(not(feature = "mcp"))]
+pub fn mcp_tools(_servers: &[McpServer]) -> std::future::Ready<Vec<Arc<dyn Tool>>> {
+    std::future::ready(Vec::new())
+}
+
 /// The Gmail and Calendar tools of `config` on `api`. A config with a
 /// `[google]` section but no API, which only a test builds, gets none.
+#[cfg(feature = "google")]
 pub fn google_tools(
     config: Option<&GoogleConfig>,
     api: Option<Arc<dyn GoogleApi>>,
@@ -77,6 +93,23 @@ pub fn google_tools(
     }
 }
 
+/// The web tools that `config` turns on. Web search needs `search_key`.
+#[cfg(feature = "web")]
+fn web_tools(config: &ToolsConfig, search_key: Option<&str>) -> Vec<Arc<dyn Tool>> {
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    if config.web_fetch {
+        tools.push(Arc::new(FetchTool::new(config.fetch_max_chars)));
+    }
+    match (config.web_search, search_key) {
+        (true, Some(key)) => tools.push(Arc::new(SearchTool::new(key))),
+        (true, None) => {
+            tracing::info!("web search is off: set {SEARCH_KEY_ENV} to turn it on");
+        }
+        (false, _) => {}
+    }
+    tools
+}
+
 /// The tools that `config` turns on, and the workspace store they need.
 #[derive(Debug, Default)]
 pub struct Tools {
@@ -88,18 +121,12 @@ impl Tools {
     /// The tools of `config` for the database `db`. Web search needs
     /// `search_key`.
     #[must_use]
-    pub fn new(config: &ToolsConfig, db: &Path, search_key: Option<String>) -> Self {
+    pub fn new(config: &ToolsConfig, db: &Path, search_key: Option<&str>) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-        if config.web_fetch {
-            tools.push(Arc::new(FetchTool::new(config.fetch_max_chars)));
-        }
-        match (config.web_search, search_key) {
-            (true, Some(key)) => tools.push(Arc::new(SearchTool::new(key))),
-            (true, None) => {
-                tracing::info!("web search is off: set {SEARCH_KEY_ENV} to turn it on");
-            }
-            (false, _) => {}
-        }
+        #[cfg(feature = "web")]
+        tools.extend(web_tools(config, search_key));
+        #[cfg(not(feature = "web"))]
+        let _ = search_key;
         if config.files {
             tools.extend(file_tools());
         }
@@ -157,18 +184,15 @@ mod tests {
     #[test]
     fn the_config_picks_the_tools() {
         let db = Path::new("/var/lg/lg.db");
-        let all = Tools::new(&ToolsConfig::default(), db, Some(String::from("k")));
-        assert_eq!(
-            all.names(),
-            [
-                "web_fetch",
-                "web_search",
-                "read_file",
-                "write_file",
-                "list_files",
-                "delete_file"
-            ]
-        );
+        let all = Tools::new(&ToolsConfig::default(), db, Some("k"));
+        let web: &[&str] = if cfg!(feature = "web") {
+            &["web_fetch", "web_search"]
+        } else {
+            &[]
+        };
+        let files = ["read_file", "write_file", "list_files", "delete_file"];
+        let expected: Vec<&str> = web.iter().copied().chain(files).collect();
+        assert_eq!(all.names(), expected);
         assert_eq!(
             all.workspace.as_deref(),
             Some(Path::new("/var/lg/workspace"))
@@ -184,9 +208,15 @@ mod tests {
             files: false,
             ..ToolsConfig::default()
         };
-        let empty = Tools::new(&none, db, Some(String::from("k")));
+        let empty = Tools::new(&none, db, Some("k"));
         assert_eq!(empty.names().len(), 0);
         assert_eq!(empty.workspace, None);
+    }
+
+    #[cfg(not(feature = "mcp"))]
+    #[tokio::test]
+    async fn without_mcp_there_are_no_mcp_tools() {
+        assert!(mcp_tools(&[]).await.is_empty());
     }
 
     #[test]
@@ -194,6 +224,7 @@ mod tests {
         assert_eq!(workspace_for(Path::new("lg.db")), Path::new("workspace"));
     }
 
+    #[cfg(feature = "mcp")]
     #[tokio::test]
     async fn a_broken_mcp_server_gives_no_tools() {
         assert!(mcp_tools(&[]).await.is_empty());
@@ -212,6 +243,7 @@ mod tests {
         assert!(mcp_tools(&[broken]).await.is_empty());
     }
 
+    #[cfg(all(feature = "mcp", feature = "web"))]
     #[tokio::test]
     async fn mcp_tools_join_the_others() {
         let server = littleguy_tools::testing::serve_http(None).await.unwrap();

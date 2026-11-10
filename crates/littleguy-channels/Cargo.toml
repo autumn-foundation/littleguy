@@ -8,22 +8,35 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-autumn-plugin-discord = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider"] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+autumn-plugin-discord = { version = "0.3", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"], optional = true }
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "form", "rustls-no-provider"] }
+rustls = { version = "0.23.46", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.29", optional = true, default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 tracing = { workspace = true }
 
 [features]
+default = ["discord", "slack"]
+# Discord over the gateway, with its REST client.
+discord = ["dep:autumn-plugin-discord", "dep:reqwest", "dep:rustls"]
+# Slack over Socket Mode, with its Web API client.
+slack = ["dep:tokio-tungstenite", "dep:futures-util", "dep:reqwest", "dep:rustls"]
 # The fake Discord and the fake Slack that the tests run against.
-testing = []
+testing = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 [dev-dependencies]
-littleguy-channels = { path = ".", features = ["testing"] }
+littleguy-channels = { path = ".", default-features = false, features = ["testing"] }
+
+[[test]]
+name = "fake_discord"
+required-features = ["discord"]
+
+[[test]]
+name = "fake_slack"
+required-features = ["slack"]
 
 [lints]
 workspace = true

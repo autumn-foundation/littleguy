@@ -13,20 +13,20 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-axum = "0.8"
-autumn-harvest = { version = "0.10", features = ["sandbox-activities"] }
-autumn-harvest-agent = { workspace = true, features = ["sandbox"] }
-autumn-harvest-plugin = { version = "0.10", default-features = false, features = ["connectors"] }
+axum = { version = "0.8", optional = true }
+autumn-harvest = "0.10"
+autumn-harvest-agent = { workspace = true }
+autumn-harvest-plugin = { version = "0.10", optional = true, default-features = false, features = ["connectors"] }
 autumn-harvest-sqlite = { workspace = true }
-camel-api = "0.57"
+camel-api = { version = "0.57", optional = true }
 chrono = "0.4"
-camel-builder = "0.57"
-camel-component-api = "0.57"
-camel-component-direct = "0.57"
-camel-component-file = "0.57"
-camel-component-timer = "0.57"
-camel-core = "0.57"
-harvest-camel = { version = "0.4", default-features = false, features = ["sqlite"] }
+camel-builder = { version = "0.57", optional = true }
+camel-component-api = { version = "0.57", optional = true }
+camel-component-direct = { version = "0.57", optional = true }
+camel-component-file = { version = "0.57", optional = true }
+camel-component-timer = { version = "0.57", optional = true }
+camel-core = { version = "0.57", optional = true }
+harvest-camel = { version = "0.4", optional = true, default-features = false, features = ["sqlite"] }
 clap = { workspace = true }
 getrandom = "0.4"
 littleguy-channels = { workspace = true }
@@ -35,14 +35,49 @@ littleguy-models = { workspace = true }
 littleguy-stores = { workspace = true }
 littleguy-tools = { workspace = true }
 rustix = { workspace = true }
-san-mateo = "0.1"
-san-mateo-sqlite = "0.1"
+san-mateo = { version = "0.1", optional = true }
+san-mateo-sqlite = { version = "0.1", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[features]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox"]
+# Every integration.
+full = ["default", "camel", "google"]
+# Discord direct messages over the gateway.
+discord = ["littleguy-channels/discord"]
+# Slack direct messages over Socket Mode.
+slack = ["littleguy-channels/slack"]
+# `--model claude`: Claude over the Messages API.
+claude = ["littleguy-models/claude"]
+# `--model openai` and `--model openrouter`.
+openai = ["littleguy-models/openai"]
+# The `web_fetch` and `web_search` tools.
+web = ["littleguy-tools/web"]
+# The tools of each `[[mcp.server]]`.
+mcp = ["littleguy-tools/mcp"]
+# The `run_code` tool and `[sandbox]`.
+sandbox = ["autumn-harvest/sandbox-activities", "autumn-harvest-agent/sandbox"]
+# `[[camel.route]]`: Apache Camel routes that feed the assistant.
+camel = [
+    "dep:autumn-harvest-plugin",
+    "dep:camel-api",
+    "dep:camel-builder",
+    "dep:camel-component-api",
+    "dep:camel-component-direct",
+    "dep:camel-component-file",
+    "dep:camel-component-timer",
+    "dep:camel-core",
+    "dep:harvest-camel",
+]
+# `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo.
+oauth = ["dep:san-mateo", "dep:san-mateo-sqlite", "dep:axum"]
+# `[google]`: the Gmail and Google Calendar tools. Needs `oauth`.
+google = ["oauth", "littleguy-tools/google"]
 
 [dev-dependencies]
 base64 = "0.23"

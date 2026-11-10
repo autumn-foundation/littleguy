@@ -153,6 +153,7 @@ pub fn is_after(a: &str, b: &str) -> bool {
     }
 }
 
+#[cfg(any(feature = "discord", feature = "slack"))]
 /// A reqwest client with a 30 second bound, on the ring provider.
 pub(crate) fn http_client() -> reqwest::Client {
     // Reqwest panics without a provider. An `Err` means that one is installed.
@@ -163,12 +164,14 @@ pub(crate) fn http_client() -> reqwest::Client {
         .unwrap_or_default()
 }
 
+#[cfg(any(feature = "discord", feature = "slack"))]
 /// The first and the longest pause between two connects.
 pub(crate) const BACKOFF: (std::time::Duration, std::time::Duration) = (
     std::time::Duration::from_secs(1),
     std::time::Duration::from_secs(60),
 );
 
+#[cfg(any(feature = "discord", feature = "slack"))]
 /// The pause after `current`: twice as long, up to the longest.
 pub(crate) fn next_backoff(current: std::time::Duration) -> std::time::Duration {
     (current * 2).min(BACKOFF.1)

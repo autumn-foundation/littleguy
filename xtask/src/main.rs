@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use smop::prelude::*;
 
+mod features;
 mod verus;
 
 /// Repository automation for littleguy.
@@ -33,8 +34,22 @@ enum Command {
     Coverage(CoverageArgs),
     /// Verify the Verus proofs in `formal/verus`.
     Verus,
-    /// Run fmt, clippy and test, in that order. The pre-push gate.
+    /// Run clippy on each crate with no features, each feature alone and
+    /// all features, then its tests with no features.
+    Features,
+    /// Check that `docs/features.md` matches the manifests.
+    FeatureDocs(FeatureDocsArgs),
+    /// Run fmt, the feature docs check, clippy and test, in that order.
+    /// The pre-push gate.
     Ci,
+}
+
+/// Arguments of `cargo xtask feature-docs`.
+#[derive(Debug, Args)]
+struct FeatureDocsArgs {
+    /// Render the table into the file instead of checking it.
+    #[arg(long)]
+    write: bool,
 }
 
 /// Arguments of `cargo xtask coverage`.
@@ -65,6 +80,7 @@ fn clippy() -> Result<()> {
         "clippy",
         "--workspace",
         "--all-targets",
+        "--all-features",
         "--locked",
         "--",
         "-D",
@@ -73,17 +89,19 @@ fn clippy() -> Result<()> {
 }
 
 fn test() -> Result<()> {
-    cargo(&["test", "--workspace", "--locked"])
+    cargo(&["test", "--workspace", "--all-features", "--locked"])
 }
 
 /// The arguments of the coverage run. The xtask crate is excluded: it drives
-/// tools, and its tests would need those tools installed.
+/// tools, and its tests would need those tools installed. Every feature is
+/// on, so each integration counts.
 fn coverage_args(fail_under: u8) -> Vec<String> {
     [
         "llvm-cov",
         "--workspace",
         "--exclude",
         "xtask",
+        "--all-features",
         "--locked",
         "--fail-under-lines",
     ]
@@ -110,8 +128,11 @@ fn run(command: &Command) -> Result<()> {
         Command::Test => test(),
         Command::Coverage(args) => coverage(args),
         Command::Verus => verus::check(&repo_root()),
+        Command::Features => features::check(&repo_root()),
+        Command::FeatureDocs(args) => features::docs(&repo_root(), args.write),
         Command::Ci => {
             fmt()?;
+            features::docs(&repo_root(), false)?;
             clippy()?;
             test()
         }
@@ -143,11 +164,21 @@ mod tests {
         let args = coverage_args(85);
         assert_eq!(args.last().map(String::as_str), Some("85"));
         assert!(args.windows(2).any(|pair| pair == ["--exclude", "xtask"]));
+        assert!(args.iter().any(|arg| arg == "--all-features"));
     }
 
     #[test]
     fn the_cli_parses_every_command() {
-        for name in ["fmt", "clippy", "test", "verus", "ci", "coverage"] {
+        for name in [
+            "fmt",
+            "clippy",
+            "test",
+            "verus",
+            "ci",
+            "coverage",
+            "features",
+            "feature-docs",
+        ] {
             assert!(Cli::try_parse_from(["xtask", name]).is_ok(), "{name}");
         }
         let cli = Cli::try_parse_from(["xtask", "coverage", "--fail-under", "90"]).unwrap();

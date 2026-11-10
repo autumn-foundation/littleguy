@@ -20,6 +20,16 @@ Every gate runs through `cargo xtask`, built on
 Add a command to `xtask/src/main.rs`. [`docs/xtask.md`](docs/xtask.md) lists
 each command.
 
+## Features
+
+- Each integration is a cargo feature. A new one gets a comment above it
+  in `Cargo.toml`, and `cargo xtask feature-docs --write` renders
+  `docs/features.md` again. CI fails when the table drifts.
+- A config section of a missing feature fails `lg serve` at start
+  (`crates/littleguy/src/features.rs`). Never skip it quietly.
+- `cargo xtask features` builds each feature alone and none at all. Run it
+  when a change touches a `#[cfg(feature = ...)]`.
+
 ## Rust rules
 
 - `cargo fmt` and clippy pedantic plus nursery, with warnings denied.

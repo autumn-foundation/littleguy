@@ -349,7 +349,7 @@ fn route(fake: &FakeSlack, method: &str, fields: &BTreeMap<String, String>) -> (
                 .get(&channel)
                 .into_iter()
                 .flatten()
-                .filter(|m| crate::slack::is_after(m["ts"].as_str().unwrap_or("0"), &oldest))
+                .filter(|m| crate::chat::is_after(m["ts"].as_str().unwrap_or("0"), &oldest))
                 .map(|m| {
                     let mut entry = m.clone();
                     // Slack leaves the channel out of each history entry.

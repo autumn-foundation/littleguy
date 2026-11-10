@@ -46,6 +46,24 @@ cargo run --bin lg -- serve --model openrouter --model-name <vendor>/<model>
 `--base-url` (or `LG_BASE_URL`) points `--model openai` at any other server
 that speaks the same API, such as a local one.
 
+## Build features
+
+Each integration is a cargo feature, so a build carries only the crates it
+uses. The default set is `discord`, `slack`, `claude`, `openai`, `web`,
+`mcp` and `sandbox`. `camel`, `oauth` and `google` are opt-in, and `full`
+turns on every one:
+
+```sh
+cargo install --path crates/littleguy --features full
+cargo install --path crates/littleguy --no-default-features --features discord,claude
+```
+
+A config section of a feature that the build leaves out stops `lg serve`
+at start, and the error names the feature.
+[`docs/features.md`](docs/features.md) lists each feature and the crates
+it adds. CI renders that table from the manifests, so it cannot drift.
+[ADR 0012](docs/adr/0012-feature-flags.md) explains the design.
+
 ## Discord
 
 Create a bot in the Discord developer portal. Under Privileged Gateway
@@ -117,6 +135,8 @@ or a person. Discord and Slack can run in one daemon.
 [ADR 0011](docs/adr/0011-slack-over-socket-mode.md) explains the design.
 
 ## Camel routes
+
+Feature `camel`, off by default.
 
 littleguy runs [harvest-camel](https://github.com/autumn-foundation/harvest-camel)
 routes on its own SQLite file. Each route reads from a camel component and
@@ -296,6 +316,8 @@ input. [ADR 0009](docs/adr/0009-mcp-and-flow-rules.md) explains the design.
 
 ## OAuth connections
 
+Feature `oauth`, off by default.
+
 littleguy embeds [San Mateo](https://github.com/autumn-foundation/san-mateo)
 to keep OAuth tokens for later tools, such as mail and calendar. San Mateo
 seals each token with AES-256-GCM in `san-mateo.db`, next to `lg.db`, and
@@ -332,6 +354,8 @@ OAuth app. [ADR 0004](docs/adr/0004-oauth-with-san-mateo.md) explains the
 design.
 
 ## Mail and calendar
+
+Feature `google`, off by default. It turns `oauth` on.
 
 With a Google connection, the assistant reads and writes your Gmail and
 Google Calendar. Name the San Mateo integration in `[google]`:
@@ -416,6 +440,6 @@ when a code is live and when a new one is issued.
 | `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own, and the calls that wait for approval. |
 | `crates/littleguy` | The `lg` binary: `serve`, `chat`, `pair`, `pairs`, `unpair`, `connect`, `connections`, `disconnect`, `approvals`, `approve` and `deny`, the camel routes, San Mateo, the sandbox and the approval gate. |
 | `formal/verus` | Verus proofs of the kernels. |
-| `xtask` | Every CI gate: `cargo xtask ci`. |
+| `xtask` | Every CI gate: `cargo xtask ci`, and the feature matrix: `cargo xtask features`. |
 
 [`docs/roadmap.md`](docs/roadmap.md) lists the milestones.

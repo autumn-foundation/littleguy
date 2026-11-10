@@ -11,23 +11,33 @@
 //! - [`google::google_tools`] read and send Gmail, and read and add Google
 //!   Calendar events, through a token proxy.
 //!
+//! Feature `web` builds the fetch and search tools, feature `mcp` the MCP
+//! tools and feature `google` the Google tools. All three are on by
+//! default. The file tools are always on.
+//!
 //! The web tools read only, and label their results as untrusted input,
 //! so flow rules can fence what follows them. The file tools change only
 //! the private workspace of the agent.
 
+#[cfg(feature = "web")]
 mod fetch;
 mod files;
+#[cfg(feature = "google")]
 pub mod google;
 pub mod html;
+#[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(feature = "web")]
 mod search;
 #[cfg(feature = "testing")]
 pub mod testing;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "web")]
 pub use fetch::{FetchTool, MAX_BODY_BYTES, MAX_REDIRECTS};
 pub use files::{MAX_READ_CHARS, file_tools};
+#[cfg(feature = "web")]
 pub use search::{BRAVE_ENDPOINT, SearchTool};
 
 use autumn_harvest_agent::{AgentError, ErrorKind};
@@ -55,6 +65,7 @@ fn clip(text: &str, max: usize) -> (String, bool) {
 
 /// Installs the TLS provider. Reqwest panics without one, and an `Err`
 /// means that one is installed already.
+#[cfg(any(feature = "web", feature = "mcp"))]
 fn tls() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

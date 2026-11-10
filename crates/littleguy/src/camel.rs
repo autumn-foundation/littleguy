@@ -297,8 +297,9 @@ impl Camel {
 }
 
 /// Receives batches, has the runtime task apply them, and settles them.
-/// It ends when the bridge closes or the runtime task stops.
-pub async fn pump(inbound: Arc<SqliteInbound>, jobs: mpsc::Sender<Apply>) {
+/// `wrap` turns each batch into a job of `jobs`. It ends when the bridge
+/// closes or the runtime task stops.
+pub async fn pump<T>(inbound: Arc<SqliteInbound>, jobs: mpsc::Sender<T>, wrap: fn(Apply) -> T) {
     loop {
         let batch = match inbound.receive(RECEIVE_WAIT).await {
             Ok(batch) => batch,
@@ -313,7 +314,7 @@ pub async fn pump(inbound: Arc<SqliteInbound>, jobs: mpsc::Sender<Apply>) {
             continue;
         }
         let (reply, applied) = oneshot::channel();
-        if jobs.send(Apply { batch, reply }).await.is_err() {
+        if jobs.send(wrap(Apply { batch, reply })).await.is_err() {
             return;
         }
         let Ok(applied) = applied.await else {

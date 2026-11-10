@@ -8,27 +8,36 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-base64 = "0.23"
+base64 = { version = "0.23", optional = true }
 autumn-harvest-agent = { version = "0.10.0", default-features = false }
 littleguy-core = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
-rmcp = { version = "3.9", default-features = false, features = [
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "rustls-no-provider"] }
+rmcp = { version = "3.9", optional = true, default-features = false, features = [
     "client",
     "reqwest-tls-no-provider",
     "transport-child-process",
     "transport-streamable-http-client-reqwest",
 ] }
-rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.46", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-url = "2"
+url = { version = "2", optional = true }
 
 # The MCP test server that the tests of this crate and of the daemon run against.
 axum = { version = "0.8", optional = true }
 
 [features]
+default = ["web", "mcp", "google"]
+# `web_fetch` and `web_search`.
+web = ["dep:reqwest", "dep:rustls", "dep:url"]
+# The tools of each MCP server in the config.
+mcp = ["dep:rmcp", "dep:rustls"]
+# Gmail and Google Calendar, through a token proxy.
+google = ["dep:base64"]
+# The MCP test server that the tests of this crate and of the daemon run against.
 testing = [
+    "mcp",
     "dep:axum",
     "rmcp/server",
     "rmcp/transport-io",
@@ -37,13 +46,14 @@ testing = [
 
 [dev-dependencies]
 axum = "0.8"
-littleguy-tools = { path = ".", features = ["testing"] }
+littleguy-tools = { path = ".", default-features = false, features = ["testing"] }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 
 [[test]]
 name = "mcp_stdio"
 harness = false
+required-features = ["mcp"]
 
 [lints]
 workspace = true

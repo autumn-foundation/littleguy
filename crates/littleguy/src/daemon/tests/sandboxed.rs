@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use autumn_harvest::sandbox::{
     IsolationLevel, RunStatus, SandboxBackend, SandboxError, SandboxJob, SandboxOutcome,
 };
+#[cfg(feature = "discord")]
 use littleguy_channels::testing::FakeDiscord;
 use littleguy_core::{ApprovalsConfig, SandboxBackend as BackendKind, SandboxConfig};
 use tokio_util::sync::CancellationToken;
@@ -307,6 +308,7 @@ fn a_network_on_a_backend_without_one_is_refused() {
     assert!(format!("{error:#}").contains("network"), "{error:#}");
 }
 
+#[cfg(feature = "discord")]
 #[tokio::test(flavor = "multi_thread")]
 async fn discord_buttons_decide_and_held_messages_run_after() {
     let fake = FakeDiscord::start().await.unwrap();
@@ -386,16 +388,7 @@ async fn discord_buttons_decide_and_held_messages_run_after() {
         stop_tx.send(()).unwrap();
     };
     let (served, ()) = tokio::join!(
-        run(
-            daemon,
-            listener,
-            Links {
-                discord: Some(link),
-                ..Links::default()
-            },
-            None,
-            stop
-        ),
+        run(daemon, listener, Links::with_discord(link), None, stop),
         script
     );
     served.unwrap();
@@ -403,6 +396,7 @@ async fn discord_buttons_decide_and_held_messages_run_after() {
     assert!(fake.sent()[2..].iter().all(|s| s.channel_id == "dm43"));
 }
 
+#[cfg(feature = "discord")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cli_request_decided_in_discord_answers_the_approver() {
     let fake = FakeDiscord::start().await.unwrap();
@@ -410,7 +404,9 @@ async fn a_cli_request_decided_in_discord_answers_the_approver() {
     let backend = Arc::new(CountingBackend::default());
     let config = sandbox_config(Some("42"), 3600);
     let mut daemon = open_sandboxed(&dir.path().join("lg.db"), &config, &backend);
-    daemon.discord_rest(DiscordRest::new(fake.api_base.clone(), "token"));
+    daemon
+        .chats
+        .set_discord(DiscordRest::new(fake.api_base.clone(), "token"));
     let waiting = daemon
         .handle_request(UID, request("c-1", "run echo hi"))
         .await;
@@ -443,6 +439,7 @@ fn the_process_backend_opens_with_the_development_policy() {
     );
 }
 
+#[cfg(feature = "slack")]
 /// The approval flow over Slack: the notice, a stranger's press, the
 /// approver's press, and the held message that runs after it.
 #[tokio::test(flavor = "multi_thread")]
@@ -478,10 +475,7 @@ async fn a_slack_approver_decides_with_a_button() {
     )
     .unwrap();
     let listener = bind(&socket).await.unwrap();
-    let links = Links {
-        slack: Some(SlackApi::new(fake.api_base.clone(), BOT_TOKEN, APP_TOKEN)),
-        ..Links::default()
-    };
+    let links = Links::with_slack(SlackApi::new(fake.api_base.clone(), BOT_TOKEN, APP_TOKEN));
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let stop = async {
         let _ = stop_rx.await;

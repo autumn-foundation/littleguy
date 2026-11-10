@@ -48,6 +48,22 @@ jobs:
       - name: Run every test
         run: cargo xtask test
 
+  features:
+    name: Feature matrix
+    runs-on: ubuntu-latest
+    # Each crate builds once per feature set, so this job is the longest.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: The feature table matches the manifests
+        run: cargo xtask feature-docs
+      - name: Clippy and tests on each feature set
+        run: cargo xtask features
+
   coverage:
     name: Coverage (85% lines)
     runs-on: ubuntu-latest

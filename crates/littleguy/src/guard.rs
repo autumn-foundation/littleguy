@@ -17,15 +17,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use autumn_harvest::sandbox::SandboxRuntime;
 use autumn_harvest_agent::flow::{FlowRules, effect_label};
-use autumn_harvest_agent::sandbox::SandboxTool;
 use autumn_harvest_agent::{
     AgentHarness, AgentProfile, BoxFuture, Rule, RunInfo, Tool, ToolCall, ToolDecision, ToolPolicy,
 };
 use littleguy_stores::SqliteStores;
 
-use crate::sandbox::{ASK_REASON, TOOL};
+use crate::sandbox::{ASK_REASON, Runtime, TOOL};
 
 /// The reason of a call that a flow rule may hold, for the approver.
 pub const FLOW_REASON: &str = "a flow rule holds this call: the conversation would hold \
@@ -42,7 +40,7 @@ pub struct Guard {
     /// The flow rules.
     pub flow: FlowRules,
     /// The runtime of the `run_code` tool, when the sandbox is on.
-    pub sandbox: Option<Arc<SandboxRuntime>>,
+    pub sandbox: Option<Runtime>,
     /// Whether the Google tools are on, so each send and invite waits.
     pub google: bool,
 }
@@ -81,9 +79,7 @@ impl Guard {
         profile: AgentProfile,
     ) -> (AgentHarness, AgentProfile) {
         let run_code = self.sandbox.is_some();
-        if let Some(runtime) = self.sandbox {
-            harness = harness.tool(SandboxTool::new(runtime).shared());
-        }
+        harness = crate::sandbox::give(harness, self.sandbox);
         let gate = ApprovalGate::new(self.stores, run_code, self.google, &self.flow);
         if !self.flow.is_empty() {
             harness = harness.flow_rules(self.flow);
@@ -135,7 +131,7 @@ impl ApprovalGate {
             return Some(ASK_REASON);
         }
         if self.google {
-            return littleguy_tools::google::approval_reason(&call.name, &call.arguments);
+            return google_reason(call);
         }
         None
     }
@@ -200,6 +196,19 @@ impl ToolPolicy for ApprovalGate {
     ) -> BoxFuture<'a, ToolDecision> {
         Box::pin(std::future::ready(self.decide_call(call, tool)))
     }
+}
+
+/// Why the Google call `call` always waits, or `None`.
+#[cfg(feature = "google")]
+fn google_reason(call: &ToolCall) -> Option<&'static str> {
+    littleguy_tools::google::approval_reason(&call.name, &call.arguments)
+}
+
+/// Why the Google call `call` always waits. This build has no Google
+/// tools, so no call waits for that.
+#[cfg(not(feature = "google"))]
+const fn google_reason(_call: &ToolCall) -> Option<&'static str> {
+    None
 }
 
 #[cfg(test)]
@@ -279,11 +288,14 @@ mod tests {
         };
         assert_eq!(gate.decide_call(&send, None), ToolDecision::Allow);
         let mailing = ApprovalGate::new(stores, false, true, &FlowRules::new());
+        #[cfg(feature = "google")]
         assert_eq!(
             mailing.decide_call(&send, None),
             ToolDecision::RequireApproval {
                 reason: String::from(littleguy_tools::google::SEND_REASON),
             }
         );
+        #[cfg(not(feature = "google"))]
+        assert_eq!(mailing.decide_call(&send, None), ToolDecision::Allow);
     }
 }

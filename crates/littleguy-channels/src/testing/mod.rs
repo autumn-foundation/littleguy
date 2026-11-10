@@ -375,7 +375,7 @@ fn history_after(state: &Mutex<State>, channel: &str, after: &str) -> Vec<Value>
         .get(channel)
         .into_iter()
         .flatten()
-        .filter(|m| crate::discord::is_after(m["id"].as_str().unwrap_or("0"), after))
+        .filter(|m| crate::chat::is_after(m["id"].as_str().unwrap_or("0"), after))
         .cloned()
         .collect();
     newer.reverse();

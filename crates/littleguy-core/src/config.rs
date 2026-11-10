@@ -222,6 +222,9 @@ pub enum ConfigError {
     /// The Google section is not valid.
     #[error("the google section is not valid: {0}")]
     Google(String),
+    /// The refine section is not valid.
+    #[error("the refine section is not valid: {0}")]
+    Refine(String),
     /// A camel route reads from a component that littleguy does not run.
     #[error("camel route `{id}` reads from `{from}`: use one of {}", CAMEL_SCHEMES.join(", "))]
     CamelScheme {
@@ -250,6 +253,64 @@ pub enum SanMateoError {
     /// A variable name is not an environment variable name.
     #[error("`{0}` is not an environment variable name")]
     Variable(String),
+}
+
+/// The transcript messages that a refine proposal reads, when the config
+/// names no number.
+pub const DEFAULT_REFINE_MESSAGES: u32 = 40;
+
+/// The most transcript messages that a refine proposal reads.
+pub const MAX_REFINE_MESSAGES: u32 = 500;
+
+/// The part of the assistant setup that a refine proposal edits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RefineDimension {
+    /// How the assistant works, independent of the subject.
+    #[default]
+    Inv,
+    /// What a practitioner in the domain of the owner knows.
+    Dom,
+}
+
+/// The refine loop: proposals for the assistant profile, from its own
+/// transcript. A proposal waits until the owner activates it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefineConfig {
+    /// The last transcript messages that a proposal reads.
+    pub messages: u32,
+    /// The part of the setup that a proposal edits.
+    pub dimension: RefineDimension,
+}
+
+impl Default for RefineConfig {
+    fn default() -> Self {
+        Self {
+            messages: DEFAULT_REFINE_MESSAGES,
+            dimension: RefineDimension::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRefine {
+    messages: Option<u32>,
+    dimension: Option<RefineDimension>,
+}
+
+/// Checks the refine section.
+fn refine(raw: RawRefine) -> Result<RefineConfig, ConfigError> {
+    let messages = raw.messages.unwrap_or(DEFAULT_REFINE_MESSAGES);
+    if !(1..=MAX_REFINE_MESSAGES).contains(&messages) {
+        return Err(ConfigError::Refine(format!(
+            "messages must be from 1 to {MAX_REFINE_MESSAGES}, not {messages}"
+        )));
+    }
+    Ok(RefineConfig {
+        messages,
+        dimension: raw.dimension.unwrap_or_default(),
+    })
 }
 
 /// The default cron expression of the nightly consolidation: 03:00.
@@ -886,6 +947,7 @@ struct Raw {
     flow: RawFlow,
     #[serde(default)]
     mcp: RawMcp,
+    refine: Option<RawRefine>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1163,6 +1225,8 @@ pub struct Config {
     pub flow: FlowConfig,
     /// The MCP servers.
     pub mcp: Vec<McpServer>,
+    /// The refine loop, when the config has the section.
+    pub refine: Option<RefineConfig>,
 }
 
 impl Config {
@@ -1185,6 +1249,7 @@ impl Config {
             approvals: ApprovalsConfig::default(),
             flow: FlowConfig::default(),
             mcp: Vec::new(),
+            refine: None,
         }
     }
 
@@ -1248,6 +1313,7 @@ impl Config {
                 recheck: raw.flow.recheck.unwrap_or_default(),
             },
             mcp: mcp_servers(raw.mcp.server)?,
+            refine: raw.refine.map(refine).transpose()?,
         })
     }
 
@@ -1300,6 +1366,34 @@ mod tests {
         assert!(matches!(zero, Err(ConfigError::FetchMaxChars)));
         let unknown = Config::parse("owner = \"mark\"\n[tools]\nshell = true");
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn the_refine_section_is_read_with_its_defaults() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.refine, None);
+        let bare = Config::parse("owner = \"mark\"\n[refine]").unwrap();
+        assert_eq!(bare.refine, Some(RefineConfig::default()));
+        let set = Config::parse("owner = \"mark\"\n[refine]\nmessages = 12\ndimension = \"dom\"")
+            .unwrap();
+        assert_eq!(
+            set.refine,
+            Some(RefineConfig {
+                messages: 12,
+                dimension: RefineDimension::Dom,
+            })
+        );
+    }
+
+    #[test]
+    fn a_bad_refine_section_is_refused() {
+        for text in ["messages = 0", "messages = 501"] {
+            let result = Config::parse(&format!("owner = \"mark\"\n[refine]\n{text}"));
+            assert!(matches!(result, Err(ConfigError::Refine(_))), "{text}");
+        }
+        assert!(Config::parse("owner = \"mark\"\n[refine]\nmessages = 500").is_ok());
+        assert!(Config::parse("owner = \"mark\"\n[refine]\ndimension = \"all\"").is_err());
+        assert!(Config::parse("owner = \"mark\"\n[refine]\nauto = true").is_err());
     }
 
     #[test]

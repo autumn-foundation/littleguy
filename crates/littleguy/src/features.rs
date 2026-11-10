@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 10] = [
+pub const ALL: [Feature; 11] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -51,6 +51,10 @@ pub const ALL: [Feature; 10] = [
     Feature {
         name: "sandbox",
         on: cfg!(feature = "sandbox"),
+    },
+    Feature {
+        name: "refine",
+        on: cfg!(feature = "refine"),
     },
     Feature {
         name: "camel",
@@ -90,6 +94,7 @@ pub fn check(config: &Config) -> Result<()> {
         (config.google.is_some(), "[google]", "google"),
         (!config.mcp.is_empty(), "[[mcp.server]]", "mcp"),
         (config.sandbox.is_some(), "[sandbox]", "sandbox"),
+        (config.refine.is_some(), "[refine]", "refine"),
     ];
     let problems: Vec<String> = needs
         .into_iter()
@@ -169,6 +174,7 @@ mod tests {
                 "[[mcp.server]]",
                 "mcp",
             ),
+            ("owner = \"mark\"\n[refine]", "[refine]", "refine"),
             (
                 "owner = \"mark\"\n[[camel.route]]\nid = \"inbox\"\nfrom = \"file:/tmp/in\"",
                 "[[camel.route]]",

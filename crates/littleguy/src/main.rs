@@ -38,6 +38,8 @@ mod oauth;
 mod pairs;
 mod paths;
 mod protocol;
+#[cfg(feature = "refine")]
+mod refine;
 mod sandbox;
 mod tools;
 
@@ -120,6 +122,57 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Propose, list and activate profile overlays of the assistant.
+    #[command(subcommand)]
+    Refine(RefineCommand),
+}
+
+/// The `lg refine` commands. Each one needs a `[refine]` section.
+#[derive(Debug, Subcommand)]
+enum RefineCommand {
+    /// Ask the model for an overlay from the assistant transcript. The
+    /// overlay waits until you activate it.
+    Propose,
+    /// List the overlay versions. `*` marks the active one.
+    List,
+    /// Print one overlay version.
+    Show {
+        /// The version, from `lg refine list`.
+        version: u64,
+    },
+    /// Store an overlay JSON file as a new version. It is not active.
+    Put {
+        /// The file. `{}` is the config profile with no change.
+        file: PathBuf,
+    },
+    /// Make the assistant run on one version from its next message.
+    Activate {
+        /// The version, from `lg refine list`.
+        version: u64,
+    },
+    /// Activate the version that was active before the current one.
+    Rollback,
+}
+
+impl RefineCommand {
+    /// The request of this command.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the overlay file of `put` does not read.
+    fn request(self) -> Result<Request> {
+        Ok(match self {
+            Self::Propose => Request::RefinePropose,
+            Self::List => Request::Overlays,
+            Self::Show { version } => Request::OverlayShow { version },
+            Self::Put { file } => Request::OverlayPut {
+                overlay: std::fs::read_to_string(&file)
+                    .with_context(|| format!("reading {}", file.display()))?,
+            },
+            Self::Activate { version } => Request::OverlayActivate { version },
+            Self::Rollback => Request::OverlayRollback,
+        })
+    }
 }
 
 /// The models that `lg serve` can run.
@@ -483,6 +536,7 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Approvals => ask(&socket, &Request::Approvals).await,
         Command::Approve { id } => ask(&socket, &Request::Approve { id }).await,
         Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
+        Command::Refine(command) => ask(&socket, &command.request()?).await,
     }
 }
 
@@ -508,6 +562,53 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refine_request(words: &[&str]) -> Result<Request> {
+        match Cli::try_parse_from(words).unwrap().command {
+            Command::Refine(command) => command.request(),
+            _ => panic!("not refine"),
+        }
+    }
+
+    #[test]
+    fn each_refine_command_sends_its_request() {
+        let cases = [
+            (vec!["lg", "refine", "propose"], Request::RefinePropose),
+            (vec!["lg", "refine", "list"], Request::Overlays),
+            (
+                vec!["lg", "refine", "show", "3"],
+                Request::OverlayShow { version: 3 },
+            ),
+            (
+                vec!["lg", "refine", "activate", "2"],
+                Request::OverlayActivate { version: 2 },
+            ),
+            (vec!["lg", "refine", "rollback"], Request::OverlayRollback),
+        ];
+        for (words, request) in cases {
+            assert_eq!(refine_request(&words).unwrap(), request, "{words:?}");
+        }
+        assert!(Cli::try_parse_from(["lg", "refine", "show", "x"]).is_err());
+    }
+
+    #[test]
+    fn refine_put_sends_the_file_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("base.json");
+        std::fs::write(&file, "{}").unwrap();
+        let path = file.to_str().unwrap();
+        assert_eq!(
+            refine_request(&["lg", "refine", "put", path]).unwrap(),
+            Request::OverlayPut {
+                overlay: String::from("{}")
+            }
+        );
+        let missing = dir.path().join("none.json");
+        let error = refine_request(&["lg", "refine", "put", missing.to_str().unwrap()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("none.json"), "{error}");
+    }
 
     fn serve_args(words: &[&str]) -> ServeArgs {
         let cli = Cli::try_parse_from(words).unwrap();

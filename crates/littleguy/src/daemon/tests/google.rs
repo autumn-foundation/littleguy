@@ -91,8 +91,7 @@ async fn a_mail_waits_for_approval_then_goes_out_once_as_shown() {
     assert_eq!(entries[0].tool, "mail_send");
     assert!(
         entries[0].text.starts_with("To: ana@x.org\nSubject: Lunch"),
-        "{}",
-        entries[0].text
+        "the approver sees the address and the subject first"
     );
     assert!(entries[0].text.contains("Yes, noon."));
 

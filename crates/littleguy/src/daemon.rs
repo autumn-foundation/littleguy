@@ -296,6 +296,9 @@ pub struct Daemon {
     waiting: Option<i64>,
     /// The chat messages that arrived while a request waited.
     held: VecDeque<(Service, DmMessage)>,
+    /// The overlay store and the proposer, with a `[refine]` section.
+    #[cfg(feature = "refine")]
+    refine: Option<Box<crate::refine::Refine>>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
@@ -419,10 +422,12 @@ impl Daemon {
         let memory = stores
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db));
-        sqlite::register(
-            &mut rt,
-            Arc::new(harness(config, model, memory, delivery, tools, guard)),
-        );
+        #[cfg(feature = "refine")]
+        let refine_model = Arc::clone(&model);
+        let assistant = harness(config, model, memory, delivery, tools, guard);
+        #[cfg(feature = "refine")]
+        let (assistant, refine) = refine::attach(assistant, config, db, refine_model)?;
+        sqlite::register(&mut rt, Arc::new(assistant));
         crate::memory::schedule(&mut rt, &config.memory)?;
         // The runtime lock is held now, so this daemon is the store's one writer.
         let store = PairStore::open(crate::pairs::path_for(db))?;
@@ -453,6 +458,8 @@ impl Daemon {
             approver,
             waiting,
             held: VecDeque::new(),
+            #[cfg(feature = "refine")]
+            refine,
         })
     }
 
@@ -567,6 +574,22 @@ impl Daemon {
                     message: crate::features::missing("an OAuth connection", "oauth"),
                 })
             }
+            #[cfg(feature = "refine")]
+            request @ (Request::RefinePropose
+            | Request::Overlays
+            | Request::OverlayShow { .. }
+            | Request::OverlayPut { .. }
+            | Request::OverlayActivate { .. }
+            | Request::OverlayRollback) => Box::pin(self.refine_request(request)).await,
+            #[cfg(not(feature = "refine"))]
+            Request::RefinePropose
+            | Request::Overlays
+            | Request::OverlayShow { .. }
+            | Request::OverlayPut { .. }
+            | Request::OverlayActivate { .. }
+            | Request::OverlayRollback => Ok(Response::Error {
+                message: crate::features::missing("lg refine", "refine"),
+            }),
         };
         result.unwrap_or_else(|error| {
             tracing::error!(error = %format!("{error:#}"), "a request failed");
@@ -1283,6 +1306,8 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
 #[cfg(feature = "discord")]
 mod discord;
 mod gate;
+#[cfg(feature = "refine")]
+mod refine;
 #[cfg(feature = "discord")]
 pub use discord::DiscordLink;
 #[cfg(feature = "slack")]

@@ -50,6 +50,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
 | `openai` | yes | `--model openai` and `--model openrouter`. | `reqwest`, `rustls` |
+| `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `slack` | yes | Slack direct messages over Socket Mode. | `futures-util`, `reqwest`, `rustls`, `tokio-tungstenite` |
 | `web` | yes | The `web_fetch` and `web_search` tools. | `reqwest`, `rustls`, `url` |

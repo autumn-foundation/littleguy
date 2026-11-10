@@ -62,6 +62,43 @@ pub enum Request {
         /// Why, for the assistant.
         reason: Option<String>,
     },
+    /// Ask the model for a profile overlay from the assistant transcript.
+    /// Only the owner may.
+    RefinePropose,
+    /// List the overlay versions of the assistant. Only the owner may.
+    Overlays,
+    /// Show one overlay version. Only the owner may.
+    OverlayShow {
+        /// The version.
+        version: u64,
+    },
+    /// Store an overlay as a new version. Only the owner may.
+    OverlayPut {
+        /// The overlay JSON.
+        overlay: String,
+    },
+    /// Make one version the active one. Only the owner may.
+    OverlayActivate {
+        /// The version.
+        version: u64,
+    },
+    /// Activate the version that was active before. Only the owner may.
+    OverlayRollback,
+}
+
+/// One overlay version of the assistant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayEntry {
+    /// The version.
+    pub version: u64,
+    /// Who wrote it, such as `operator:lg-refine`.
+    pub author: String,
+    /// When it was stored, in RFC 3339.
+    pub created_at: String,
+    /// Whether the assistant runs on it.
+    pub active: bool,
+    /// The parts that it sets, such as `guardrails`.
+    pub parts: Vec<String>,
 }
 
 /// One OAuth connection, with no credentials.
@@ -177,6 +214,41 @@ pub enum Response {
     Decided {
         /// The request number.
         approval: i64,
+    },
+    /// The proposer wrote an overlay. It waits for `lg refine activate`.
+    Proposed {
+        /// The stored version.
+        version: u64,
+        /// The overlay JSON.
+        overlay: String,
+    },
+    /// The proposer kept the active overlay.
+    Kept,
+    /// The overlay versions.
+    Overlays {
+        /// The active version, if any.
+        active: Option<u64>,
+        /// Each version, oldest first.
+        entries: Vec<OverlayEntry>,
+    },
+    /// One overlay version.
+    Overlay {
+        /// The version.
+        entry: OverlayEntry,
+        /// The overlay JSON.
+        overlay: String,
+    },
+    /// An overlay was stored. It is not active.
+    OverlayStored {
+        /// The version.
+        version: u64,
+    },
+    /// The assistant runs on `version` from its next op.
+    OverlayActive {
+        /// The active version.
+        version: u64,
+        /// The version that was active before, if any.
+        previous: Option<u64>,
     },
     /// The request was not valid, or the daemon failed.
     Error {

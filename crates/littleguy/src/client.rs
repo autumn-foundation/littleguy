@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::protocol::{ApprovalEntry, ConnectionEntry, PairEntry, Request, Response};
+use crate::protocol::{ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response};
 
 /// A fresh message id: the clock in nanoseconds and the process id.
 #[must_use]
@@ -99,8 +99,71 @@ pub fn render(response: &Response) -> (String, bool) {
             format!("decided request #{approval}. The answer went to the requester"),
             true,
         ),
+        Response::Proposed { version, overlay } => (
+            format!(
+                "proposed overlay version {version}. It is not active.\n{overlay}\n\
+                 Run `lg refine activate {version}` to use it"
+            ),
+            true,
+        ),
+        Response::Kept => (
+            String::from("the proposer kept the active overlay. Nothing was stored"),
+            true,
+        ),
+        Response::Overlays { active, entries } => (render_overlays(*active, entries), true),
+        Response::Overlay { entry, overlay } => {
+            (format!("{}\n{overlay}", render_overlay_line(entry)), true)
+        }
+        Response::OverlayStored { version } => (
+            format!(
+                "stored overlay version {version}. It is not active. \
+                 Run `lg refine activate {version}` to use it"
+            ),
+            true,
+        ),
+        Response::OverlayActive { version, previous } => (
+            match previous {
+                Some(previous) if previous != version => format!(
+                    "the assistant runs on overlay version {version} from its next message \
+                     (was {previous})"
+                ),
+                _ => {
+                    format!("the assistant runs on overlay version {version} from its next message")
+                }
+            },
+            true,
+        ),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// One line per overlay version, oldest first, and the active one.
+fn render_overlays(active: Option<u64>, entries: &[OverlayEntry]) -> String {
+    if entries.is_empty() {
+        return String::from("no overlay versions. Run `lg refine propose`");
+    }
+    let mut lines: Vec<String> = entries.iter().map(render_overlay_line).collect();
+    if active.is_none() {
+        lines.push(String::from(
+            "no version is active: the assistant runs on its config",
+        ));
+    }
+    lines.join("\n")
+}
+
+/// One overlay version: a mark for the active one, the version, the
+/// author, the date and the parts that it sets.
+fn render_overlay_line(entry: &OverlayEntry) -> String {
+    let mark = if entry.active { "*" } else { " " };
+    let parts = if entry.parts.is_empty() {
+        String::from("(no change)")
+    } else {
+        entry.parts.join(", ")
+    };
+    format!(
+        "{mark} v{}\t{}\t{}\t{parts}",
+        entry.version, entry.author, entry.created_at
+    )
 }
 
 /// Each call that waits, with what it does.
@@ -191,6 +254,69 @@ mod tests {
             })
             .1
         );
+    }
+
+    fn overlay(version: u64, active: bool, parts: &[&str]) -> OverlayEntry {
+        OverlayEntry {
+            version,
+            author: String::from("operator:lg-refine"),
+            created_at: String::from("2026-11-10T00:00:00+00:00"),
+            active,
+            parts: parts.iter().map(|&p| p.to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn overlays_print_one_line_each_and_mark_the_active_one() {
+        let (text, ok) = render(&Response::Overlays {
+            active: Some(2),
+            entries: vec![overlay(1, false, &["system"]), overlay(2, true, &[])],
+        });
+        assert!(ok);
+        assert_eq!(
+            text,
+            "  v1\toperator:lg-refine\t2026-11-10T00:00:00+00:00\tsystem\n\
+             * v2\toperator:lg-refine\t2026-11-10T00:00:00+00:00\t(no change)"
+        );
+        let (none, _) = render(&Response::Overlays {
+            active: None,
+            entries: vec![overlay(1, false, &["system"])],
+        });
+        assert!(none.ends_with("the assistant runs on its config"), "{none}");
+        let (empty, _) = render(&Response::Overlays {
+            active: None,
+            entries: Vec::new(),
+        });
+        assert!(empty.contains("lg refine propose"), "{empty}");
+    }
+
+    #[test]
+    fn refine_answers_name_the_next_step() {
+        let (text, ok) = render(&Response::Proposed {
+            version: 3,
+            overlay: String::from("{}"),
+        });
+        assert!(ok && text.contains("lg refine activate 3"), "{text}");
+        let (text, _) = render(&Response::OverlayStored { version: 4 });
+        assert!(text.contains("lg refine activate 4"), "{text}");
+        let (text, _) = render(&Response::Kept);
+        assert!(text.contains("Nothing was stored"), "{text}");
+        let (text, _) = render(&Response::OverlayActive {
+            version: 1,
+            previous: Some(2),
+        });
+        assert!(text.contains("(was 2)"), "{text}");
+        let (text, _) = render(&Response::OverlayActive {
+            version: 1,
+            previous: None,
+        });
+        assert!(!text.contains("was"), "{text}");
+        let (text, _) = render(&Response::Overlay {
+            entry: overlay(1, true, &["guardrails"]),
+            overlay: String::from("{\"guardrails\": \"x\"}"),
+        });
+        assert!(text.starts_with("* v1"), "{text}");
+        assert!(text.ends_with("{\"guardrails\": \"x\"}"), "{text}");
     }
 
     #[test]

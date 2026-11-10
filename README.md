@@ -50,8 +50,8 @@ that speaks the same API, such as a local one.
 
 Each integration is a cargo feature, so a build carries only the crates it
 uses. The default set is `discord`, `slack`, `claude`, `openai`, `web`,
-`mcp` and `sandbox`. `camel`, `oauth` and `google` are opt-in, and `full`
-turns on every one:
+`mcp`, `sandbox` and `refine`. `camel`, `oauth` and `google` are opt-in,
+and `full` turns on every one:
 
 ```sh
 cargo install --path crates/littleguy --features full
@@ -385,6 +385,32 @@ anything goes out. Mail and events count as untrusted input and private
 data, so after a read the Rule of Two also holds each draft. Tokens stay in
 San Mateo, and no tool sees one.
 [ADR 0010](docs/adr/0010-mail-and-calendar.md) explains the design.
+
+## Refine loop
+
+The assistant can propose changes to its own profile. Add a `[refine]`
+section, talk to the assistant for a while, then ask for a proposal:
+
+```toml
+[refine]
+messages = 40      # the transcript tail that a proposal reads, 1 to 500
+dimension = "inv"  # "inv": how it works; "dom": what it knows of your domain
+```
+
+```sh
+lg refine propose      # the model writes an overlay; it is not active
+lg refine list         # every version; * marks the active one
+lg refine show 1       # the overlay JSON
+lg refine activate 1   # the next message runs on it
+lg refine rollback     # back to the version before
+lg refine put base.json   # your own overlay; {} is the config profile
+```
+
+An overlay can change the system prompt, guardrails, tool guidance and
+skills, and narrow the bounds. It cannot raise a bound or pick another
+model. Nothing activates without you, and no restart is needed. The
+versions live in `overlays.db` next to the database.
+[ADR 0013](docs/adr/0013-refine-loop.md) explains the design.
 
 ## Config
 

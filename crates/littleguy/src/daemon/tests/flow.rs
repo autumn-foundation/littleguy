@@ -29,8 +29,8 @@ async fn open_with_mcp(db: &Path, config: &Config, servers: &[McpServer]) -> Dae
     let found = littleguy_tools::mcp::connect(servers, &vars).await;
     assert!(found.failed.is_empty(), "{:?}", found.failed);
     let extras = Extras {
-        sandbox: None,
         mcp: found.tools,
+        ..Extras::default()
     };
     Daemon::open_with(
         db,

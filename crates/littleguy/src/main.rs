@@ -264,27 +264,45 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
     let link = discord_link(&args, |var| std::env::var(var).ok());
     let uid = rustix::process::getuid().as_raw();
+    // San Mateo starts first, because the Google tools send through it.
+    let connections = match &config.san_mateo {
+        Some(section) => {
+            let key = std::env::var(oauth::KEY_VAR).with_context(|| {
+                format!(
+                    "set {}, 32 random bytes in base64, to keep OAuth connections",
+                    oauth::KEY_VAR
+                )
+            })?;
+            let started = oauth::Connections::start(
+                section,
+                config.owner.as_str(),
+                &db,
+                &key,
+                |var| std::env::var(var).ok(),
+                oauth::Hooks::default(),
+            )
+            .await?;
+            Some(started)
+        }
+        None => None,
+    };
     let sandbox = config.sandbox.as_ref().map(sandbox::runtime).transpose()?;
     let mcp = tools::mcp_tools(&config.mcp).await;
-    let extras = daemon::Extras { sandbox, mcp };
+    let google = connections
+        .as_ref()
+        .zip(config.google.as_ref())
+        .map(|(started, google)| {
+            Arc::new(started.google(&google.integration))
+                as Arc<dyn littleguy_tools::google::GoogleApi>
+        });
+    let extras = daemon::Extras {
+        sandbox,
+        mcp,
+        google,
+    };
     let mut daemon = daemon::Daemon::open_with(&db, &config, model, uid, link.is_some(), extras)?;
-    if let Some(section) = &config.san_mateo {
-        let key = std::env::var(oauth::KEY_VAR).with_context(|| {
-            format!(
-                "set {}, 32 random bytes in base64, to keep OAuth connections",
-                oauth::KEY_VAR
-            )
-        })?;
-        let connections = oauth::Connections::start(
-            section,
-            config.owner.as_str(),
-            &db,
-            &key,
-            |var| std::env::var(var).ok(),
-            oauth::Hooks::default(),
-        )
-        .await?;
-        daemon = daemon.with_connections(connections);
+    if let Some(started) = connections {
+        daemon = daemon.with_connections(started);
     }
     let listener = daemon::bind(&socket).await?;
     let stop = async {

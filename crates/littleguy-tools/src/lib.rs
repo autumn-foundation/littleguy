@@ -8,6 +8,8 @@
 //!   the agent.
 //! - [`mcp::connect`] turns the tools of each MCP server in the config into
 //!   tools of the agent.
+//! - [`google::google_tools`] read and send Gmail, and read and add Google
+//!   Calendar events, through a token proxy.
 //!
 //! The web tools read only, and label their results as untrusted input,
 //! so flow rules can fence what follows them. The file tools change only
@@ -15,6 +17,7 @@
 
 mod fetch;
 mod files;
+pub mod google;
 pub mod html;
 pub mod mcp;
 mod search;

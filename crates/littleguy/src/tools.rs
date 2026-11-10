@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use autumn_harvest::payload_codec::PayloadCodecs;
 use autumn_harvest_agent::{AgentHarness, AgentProfile, DirWorkspaceBlobs, Tool, WorkspaceStore};
-use littleguy_core::{McpServer, ToolsConfig};
+use littleguy_core::{GoogleConfig, McpServer, ToolsConfig};
+use littleguy_tools::google::GoogleApi;
 use littleguy_tools::mcp::Vars;
 use littleguy_tools::{FetchTool, SearchTool, file_tools};
 
@@ -56,6 +57,24 @@ pub async fn mcp_tools(servers: &[McpServer]) -> Vec<Arc<dyn Tool>> {
         tracing::warn!("{note}");
     }
     found.tools
+}
+
+/// The Gmail and Calendar tools of `config` on `api`. A config with a
+/// `[google]` section but no API, which only a test builds, gets none.
+pub fn google_tools(
+    config: Option<&GoogleConfig>,
+    api: Option<Arc<dyn GoogleApi>>,
+) -> Vec<Arc<dyn Tool>> {
+    match (config, api) {
+        (Some(config), Some(api)) => {
+            littleguy_tools::google::google_tools(&api, config.mail, config.calendar)
+        }
+        (Some(_), None) => {
+            tracing::warn!("the Google tools are off: San Mateo did not start");
+            Vec::new()
+        }
+        (None, _) => Vec::new(),
+    }
 }
 
 /// The tools that `config` turns on, and the workspace store they need.

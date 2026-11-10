@@ -1,6 +1,6 @@
 [package]
 name = "littleguy-tools"
-description = "The tools of the littleguy assistant: web fetch, web search, workspace files and MCP servers"
+description = "The tools of the littleguy assistant: web fetch, web search, workspace files, MCP servers, Gmail and Google Calendar"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64 = "0.23"
 autumn-harvest-agent = { version = "0.10.0", default-features = false }
 littleguy-core = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }

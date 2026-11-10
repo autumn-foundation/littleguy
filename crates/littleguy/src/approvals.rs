@@ -149,23 +149,80 @@ fn fence(text: &str) -> String {
     format!("```\n{text}\n```")
 }
 
+/// One line of a header: `name: value`, with each line break shown as a
+/// space, so the approver reads one line.
+fn line(name: &str, value: &serde_json::Value) -> String {
+    let text = match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map_or_else(|| item.to_string(), str::to_owned)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Null => String::from("(none)"),
+        other => other.to_string(),
+    };
+    let text: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    format!("{name}: {text}")
+}
+
+/// The header and the body of a mail send or an invite, or `None` for
+/// another tool.
+fn google_parts(record: &ApprovalRecord) -> Option<(String, String)> {
+    let arguments = &record.arguments;
+    let text = |key: &str| arguments[key].as_str().unwrap_or_default().to_owned();
+    match record.tool.as_str() {
+        "mail_send" => {
+            let mut header = [
+                line("To", &arguments["to"]),
+                line("Subject", &arguments["subject"]),
+            ]
+            .join("\n");
+            if !arguments["reply_to"].is_null() {
+                let _ = write!(header, "\n{}", line("In reply to", &arguments["reply_to"]));
+            }
+            Some((text("body"), header))
+        }
+        "calendar_create" => {
+            let header = [
+                line("Event", &arguments["summary"]),
+                line("Start", &arguments["start"]),
+                line("End", &arguments["end"]),
+                line("Invites", &arguments["attendees"]),
+            ]
+            .join("\n");
+            Some((text("description"), header))
+        }
+        _ => None,
+    }
+}
+
 /// What the call does, for a person: the runtime and the code of a
-/// `run_code` call, or the arguments of any other call.
+/// `run_code` call, the mail of a send, the event of an invite, or the
+/// arguments of any other call.
 #[must_use]
 pub fn describe(record: &ApprovalRecord) -> String {
     let arguments = &record.arguments;
-    let (body, header) = match (arguments["runtime"].as_str(), arguments["code"].as_str()) {
-        (Some(runtime), Some(code)) => (code.to_owned(), format!("Runtime: {runtime}")),
-        (Some(runtime), None) => (String::new(), format!("Runtime: {runtime}, no code")),
-        _ if arguments.is_null() => (
-            String::new(),
-            String::from("The arguments of this call were not recorded."),
-        ),
-        _ => (
-            serde_json::to_string_pretty(arguments).unwrap_or_default(),
-            String::from("Arguments:"),
-        ),
-    };
+    let (body, header) = google_parts(record).unwrap_or_else(|| {
+        match (arguments["runtime"].as_str(), arguments["code"].as_str()) {
+            (Some(runtime), Some(code)) => (code.to_owned(), format!("Runtime: {runtime}")),
+            (Some(runtime), None) => (String::new(), format!("Runtime: {runtime}, no code")),
+            _ if arguments.is_null() => (
+                String::new(),
+                String::from("The arguments of this call were not recorded."),
+            ),
+            _ => (
+                serde_json::to_string_pretty(arguments).unwrap_or_default(),
+                String::from("Arguments:"),
+            ),
+        }
+    });
     let mut text = header;
     if !body.is_empty() {
         let (shown, cut) = cut(&body, MAX_SHOWN_CHARS);
@@ -225,6 +282,44 @@ mod tests {
             verdict: None,
             closed: false,
         }
+    }
+
+    #[test]
+    fn a_send_and_an_invite_show_what_goes_out() {
+        let record = |tool: &str, arguments: serde_json::Value| ApprovalRecord {
+            id: 4,
+            call_id: String::from("c"),
+            tool: tool.to_owned(),
+            arguments,
+            reason: String::from("r"),
+            signal: None,
+            requester: None,
+            verdict: None,
+            closed: false,
+        };
+        let mail = describe(&record(
+            "mail_send",
+            serde_json::json!({"to": "ana@x.org", "subject": "Lunch\nBcc: x", "body": "Noon?", "reply_to": "m1"}),
+        ));
+        assert!(
+            mail.starts_with(
+                "To: ana@x.org\nSubject: Lunch Bcc: x\nIn reply to: m1\n```\nNoon?\n```"
+            ),
+            "{mail}"
+        );
+        let invite = describe(&record(
+            "calendar_create",
+            serde_json::json!({"summary": "Sync", "start": "9", "end": "10", "attendees": ["a@x.org", "b@x.org"]}),
+        ));
+        assert_eq!(
+            invite,
+            "Event: Sync\nStart: 9\nEnd: 10\nInvites: a@x.org, b@x.org"
+        );
+        let bare = describe(&record(
+            "calendar_create",
+            serde_json::json!({"summary": "S", "start": 1}),
+        ));
+        assert!(bare.contains("Start: 1\nEnd: (none)"), "{bare}");
     }
 
     #[test]

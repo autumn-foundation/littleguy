@@ -17,8 +17,8 @@ use.
 | M2.1 | A weekday morning brief that stays silent when there is nothing to say | Done (#8) |
 | M3.1 | Tools: web fetch with a public-address guard, Brave web search, persistent workspace files | Done (#9) |
 | M3.2 | A sandboxed shell, and approve and deny buttons in Discord | Done (#10) |
-| M3.3 | An MCP client and flow rules | This PR |
-| M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Planned |
+| M3.3 | An MCP client and flow rules | Done (#11) |
+| M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | This PR |
 | M5 | A web UI over the management API, Postgres mode, camel request and reply, the refine loop | Planned |
 
 Each engine gap gets a workaround here first. The engine issues are

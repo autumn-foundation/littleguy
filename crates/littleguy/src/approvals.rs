@@ -1,7 +1,8 @@
 //! How a person sees and decides a call that waits.
 //!
 //! The daemon claims the record of each wait (`littleguy-stores`). It sends
-//! the approver a Discord DM with the call and two buttons. The owner can
+//! the approver a direct message on Discord or Slack with the call and two
+//! buttons. The owner can
 //! also decide with `lg approve` and `lg deny`. A decision answers the
 //! wait with an engine signal.
 //!
@@ -12,7 +13,7 @@
 use std::fmt::Write as _;
 
 use autumn_harvest_agent::Approval;
-use littleguy_channels::{Button, ButtonStyle};
+use littleguy_channels::{Button, ButtonStyle, Service};
 use littleguy_stores::ApprovalRecord;
 
 /// The custom id prefix of the buttons.
@@ -21,11 +22,8 @@ pub const BUTTON_PREFIX: &str = "lg";
 /// The requester of a call from `lg chat`.
 pub const CLI_REQUESTER: &str = "cli";
 
-/// The prefix of a Discord requester: the DM channel follows.
-pub const DISCORD_REQUESTER: &str = "discord:";
-
 /// The most characters of the code in a notice. A notice must fit one
-/// Discord message with its frame.
+/// chat message with its frame.
 pub const MAX_SHOWN_CHARS: usize = 1_500;
 
 /// Who asked for the work that waits.
@@ -33,8 +31,8 @@ pub const MAX_SHOWN_CHARS: usize = 1_500;
 pub enum Requester {
     /// The owner, through `lg chat`. The answer goes back to `lg approve`.
     Cli,
-    /// A Discord user. The answer goes to this DM channel.
-    Discord(String),
+    /// A chat user. The answer goes to this DM channel of the service.
+    Chat(Service, String),
 }
 
 impl Requester {
@@ -43,7 +41,7 @@ impl Requester {
     pub fn encode(&self) -> String {
         match self {
             Self::Cli => String::from(CLI_REQUESTER),
-            Self::Discord(channel) => format!("{DISCORD_REQUESTER}{channel}"),
+            Self::Chat(service, channel) => format!("{service}:{channel}"),
         }
     }
 
@@ -52,10 +50,8 @@ impl Requester {
     pub fn decode(text: Option<&str>) -> Option<Self> {
         match text? {
             CLI_REQUESTER => Some(Self::Cli),
-            other => other
-                .strip_prefix(DISCORD_REQUESTER)
-                .filter(|channel| !channel.is_empty())
-                .map(|channel| Self::Discord(channel.to_owned())),
+            other => Service::split_sender(other)
+                .map(|(service, channel)| Self::Chat(service, channel.to_owned())),
         }
     }
 }
@@ -324,7 +320,11 @@ mod tests {
 
     #[test]
     fn a_requester_round_trips() {
-        for requester in [Requester::Cli, Requester::Discord(String::from("900"))] {
+        for requester in [
+            Requester::Cli,
+            Requester::Chat(Service::Discord, String::from("900")),
+            Requester::Chat(Service::Slack, String::from("D1")),
+        ] {
             assert_eq!(
                 Requester::decode(Some(&requester.encode())),
                 Some(requester)
@@ -332,6 +332,11 @@ mod tests {
         }
         assert_eq!(Requester::decode(None), None);
         assert_eq!(Requester::decode(Some("discord:")), None);
+        assert_eq!(
+            Requester::decode(Some("discord:900")),
+            Some(Requester::Chat(Service::Discord, String::from("900"))),
+            "a record from before Slack still reads"
+        );
         assert_eq!(Requester::decode(Some("mail:x")), None);
     }
 

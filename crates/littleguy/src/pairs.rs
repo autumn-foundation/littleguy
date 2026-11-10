@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use littleguy_channels::discord::is_after;
+use littleguy_channels::chat::is_after;
 use littleguy_core::{ChannelId, SenderId};
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ pub struct Entry {
     pub channel: ChannelId,
     /// The sender.
     pub sender: SenderId,
-    /// Where replies go, such as a Discord DM channel id.
+    /// Where replies go, such as a Discord or Slack DM channel id.
     pub reply_to: String,
     /// The last message whose reply went out. Empty before the first one.
     pub delivered: String,
@@ -233,6 +233,11 @@ mod tests {
         assert!(store.is_delivered(&discord(), &who, "10"));
         assert!(store.is_delivered(&discord(), &who, "9"));
         assert!(!store.is_delivered(&discord(), &who, "11"));
+        let slack = ChannelId::new("slack").unwrap();
+        let user = sender("slack:U1");
+        store.delivered(&slack, &user, "D1", "5.000020").unwrap();
+        assert!(store.is_delivered(&slack, &user, "5.000003"));
+        assert!(!store.is_delivered(&slack, &user, "5.000021"));
     }
 
     #[test]

@@ -12,12 +12,14 @@ use anyhow::{Context, Result};
 use autumn_harvest_agent::approval::approval_call_id;
 use autumn_harvest_agent::{AgentState, sqlite};
 use autumn_harvest_sqlite::RunState;
-use littleguy_channels::discord::{ButtonPress, DiscordRest};
+use littleguy_channels::{ChannelError, Service};
+use littleguy_core::SenderId;
 use littleguy_stores::{ApprovalRecord, SqliteStores, Verdict};
 use serde_json::Value;
 
 use super::Daemon;
 use crate::approvals::{self, Choice, Requester};
+use crate::chats::Chats;
 use crate::protocol::{ApprovalEntry, Response};
 
 /// The reason of a placeholder record, for a wait with no record.
@@ -37,14 +39,14 @@ fn notice_key(id: i64) -> String {
     format!("approval-notice:{id}")
 }
 
-/// Closes `record`, whose wait ended, and sends its answer to a Discord
+/// Closes `record`, whose wait ended, and sends its answer to a chat
 /// requester. `lg approve` reads the answer of a CLI requester itself.
-/// `state` reads the assistant, and `rest` sends the answer.
+/// `state` reads the assistant, and `chats` sends the answer.
 async fn finish(
     stores: &SqliteStores,
     record: &ApprovalRecord,
     state: impl Future<Output = autumn_harvest_sqlite::SqliteResult<Option<AgentState>>>,
-    rest: Option<DiscordRest>,
+    chats: &Chats,
 ) -> Result<()> {
     stores.close_approval(record.id)?;
     let outcome = match record.verdict {
@@ -53,16 +55,15 @@ async fn finish(
         None => "timed out",
     };
     tracing::info!(approval = record.id, outcome, "a request ended");
-    let Some(Requester::Discord(channel)) = Requester::decode(record.requester.as_deref()) else {
+    let Some(Requester::Chat(service, channel)) = Requester::decode(record.requester.as_deref())
+    else {
         return Ok(());
     };
     let answer = state
         .await?
         .and_then(|state| state.last_answer)
         .unwrap_or_else(|| format!("Request #{} ended without an answer.", record.id));
-    if let Some(rest) = rest
-        && let Err(error) = rest.send(&channel, &answer).await
-    {
+    if let Err(error) = chats.send(service, &channel, &answer).await {
         tracing::warn!(%error, approval = record.id, "the answer of a request did not go out");
     }
     Ok(())
@@ -70,11 +71,7 @@ async fn finish(
 
 /// Sends the notice of `record` to `approver`. Returns whether the notice
 /// is done: sent, or not needed because nobody gets one.
-async fn notify(
-    approver: Option<String>,
-    rest: Option<DiscordRest>,
-    record: &ApprovalRecord,
-) -> bool {
+async fn notify(approver: Option<SenderId>, chats: &Chats, record: &ApprovalRecord) -> bool {
     let Some(approver) = approver else {
         tracing::info!(
             approval = record.id,
@@ -82,21 +79,18 @@ async fn notify(
         );
         return true;
     };
-    // The Discord client arrives after the open. A later settle tries again.
-    let Some(rest) = rest else {
-        return false;
-    };
-    let sent = async {
-        let channel = rest.open_dm(&approver).await?;
-        rest.send_with_buttons(
-            &channel,
+    // The chat client arrives after the open. A later settle tries again.
+    let sent = chats
+        .dm(
+            &approver,
             &approvals::notice(record),
             &approvals::buttons(record.id),
         )
-        .await
-    };
-    match sent.await {
+        .await;
+    match sent {
         Ok(()) => true,
+        // The client is not there yet. The next settle tries again.
+        Err(ChannelError::Off(_)) => false,
         Err(error) => {
             tracing::warn!(%error, approval = record.id, "the approval notice did not go out");
             false
@@ -144,9 +138,9 @@ impl Daemon {
             let ended = wait.as_ref().map(|(signal, _)| signal) != record.signal.as_ref();
             if ended {
                 let state = sqlite::state(&self.rt, self.routing.assistant());
-                let rest = self.rest.get().cloned();
+                let chats = Arc::clone(&self.chats);
                 // The state query is a large future, so it lives on the heap.
-                Box::pin(finish(&stores, &record, state, rest)).await?;
+                Box::pin(finish(&stores, &record, state, &chats)).await?;
             }
         }
         let Some((signal, call)) = wait else {
@@ -167,8 +161,8 @@ impl Daemon {
             };
         let id = claim.record.id;
         let approver = self.approver.clone();
-        let rest = self.rest.get().cloned();
-        if !stores.was_sent(&notice_key(id))? && notify(approver, rest, &claim.record).await {
+        let chats = Arc::clone(&self.chats);
+        if !stores.was_sent(&notice_key(id))? && notify(approver, &chats, &claim.record).await {
             stores.mark_sent(&notice_key(id))?;
         }
         self.waiting = Some(id);
@@ -271,17 +265,21 @@ impl Daemon {
         }
     }
 
-    /// Handles one button press. Only the approver may decide. Returns the
-    /// answer for Discord, and the record to drive on after it.
-    pub(super) fn press(&mut self, press: &ButtonPress) -> (PressAnswer, Option<ApprovalRecord>) {
-        let Some((choice, id)) = approvals::parse_custom_id(&press.custom_id) else {
+    /// Handles one button press by `user`. Only the approver may decide.
+    /// Returns the answer for the chat, and the record to drive on after it.
+    pub(super) fn press(
+        &mut self,
+        user: &SenderId,
+        custom_id: &str,
+    ) -> (PressAnswer, Option<ApprovalRecord>) {
+        let Some((choice, id)) = approvals::parse_custom_id(custom_id) else {
             return (
                 PressAnswer::Private(String::from("This button is not one of mine.")),
                 None,
             );
         };
-        if self.approver.as_deref() != Some(press.user_id.as_str()) {
-            tracing::warn!(user = %press.user_id, approval = id, "a stranger pressed an approval button");
+        if self.approver.as_ref() != Some(user) {
+            tracing::warn!(%user, approval = id, "a stranger pressed an approval button");
             return (
                 PressAnswer::Private(String::from("Only the approver can decide this request.")),
                 None,
@@ -311,13 +309,12 @@ impl Daemon {
     pub(super) async fn resume_after_press(
         &mut self,
         record: &ApprovalRecord,
-        press: &ButtonPress,
+        service: Service,
+        channel: &str,
     ) {
         match self.resume(record).await {
             Ok(Response::Reply { text } | Response::NoAnswer { reason: text }) => {
-                if let Some(rest) = self.rest.get()
-                    && let Err(error) = rest.send(&press.channel_id, &text).await
-                {
+                if let Err(error) = self.chats.send(service, channel, &text).await {
                     tracing::warn!(%error, "the answer of a request did not go out");
                 }
             }
@@ -328,14 +325,14 @@ impl Daemon {
         }
     }
 
-    /// Runs the held Discord messages, one at a time, until a request
-    /// waits again.
+    /// Runs the held chat messages, one at a time, until a request waits
+    /// again.
     pub(super) async fn release_held(&mut self) {
         while self.waiting.is_none() {
-            let Some(message) = self.held.pop_front() else {
+            let Some((service, message)) = self.held.pop_front() else {
                 return;
             };
-            let outgoing = match self.discord(&message).await {
+            let outgoing = match self.chat(service, &message).await {
                 Ok(Some(outgoing)) => outgoing,
                 Ok(None) => continue,
                 Err(error) => {
@@ -343,10 +340,11 @@ impl Daemon {
                     continue;
                 }
             };
-            let Some(rest) = self.rest.get().cloned() else {
-                continue;
-            };
-            if let Err(error) = rest.send(&outgoing.channel_id, &outgoing.text).await {
+            let chats = Arc::clone(&self.chats);
+            if let Err(error) = chats
+                .send(service, &outgoing.channel_id, &outgoing.text)
+                .await
+            {
                 // The cursor stays, so the next reconnect reads it again.
                 tracing::warn!(%error, "a held reply did not go out");
                 continue;

@@ -87,6 +87,10 @@
 //! The `[discord]` section is optional. The bot token never goes in the
 //! file. It comes from `DISCORD_BOT_TOKEN` only.
 //!
+//! The `[slack]` section has the same keys, with Slack user ids such as
+//! `U012AB3CD`. The tokens come from `SLACK_BOT_TOKEN` and
+//! `SLACK_APP_TOKEN` only.
+//!
 //! Each `[[camel.route]]` is a camel route that feeds the assistant. The
 //! owner writes it, so its messages need no pairing.
 //!
@@ -97,7 +101,7 @@
 //!
 //! The `[brief]` section turns on a morning brief. At each `schedule` slot,
 //! in `timezone`, the assistant writes a short brief. It sends the brief as
-//! a Discord DM to the user `to`, and stays silent when nothing needs the
+//! a direct message to the user `to`, and stays silent when nothing needs the
 //! owner. The time zone defaults to the memory time zone.
 //!
 //! The `[tools]` section is optional. By default the assistant can read a
@@ -105,8 +109,8 @@
 //! files in its own workspace. Set a key to `false` to take a tool away.
 //!
 //! The `[approvals]` section names who decides a call that waits for a
-//! person. `approver` names the Discord user who gets approve and deny
-//! buttons. The owner can always decide with `lg approve` and `lg deny`. A
+//! person. `approver` names the chat user who gets approve and deny
+//! buttons: a Discord id, or `slack:` and a Slack id. The owner can always decide with `lg approve` and `lg deny`. A
 //! call with no decision after `timeout_secs` is denied.
 //!
 //! The `[flow]` section sets the flow rules. By default the Rule of Two is
@@ -174,6 +178,9 @@ pub enum ConfigError {
     /// A Discord user id is not a snowflake.
     #[error("`{0}` is not a Discord user id")]
     DiscordUser(String),
+    /// A Slack user id is not 2 to 32 of A-Z and 0-9, after a `U` or a `W`.
+    #[error("`{0}` is not a Slack user id")]
+    SlackUser(String),
     /// A camel route id is not 1 to 32 lowercase letters, digits or `-`.
     #[error("`{0}` is not a camel route id: use 1 to 32 of a-z, 0-9 and -")]
     CamelRouteId(String),
@@ -369,8 +376,8 @@ pub struct BriefConfig {
     pub timezone: String,
     /// The instruction that starts each brief.
     pub prompt: String,
-    /// The Discord user that gets the brief. `None` writes it to the log
-    /// only.
+    /// The chat user that gets the brief, on Discord or Slack. `None`
+    /// writes it to the log only.
     pub to: Option<SenderId>,
 }
 
@@ -405,7 +412,7 @@ fn brief(raw: RawBrief, memory_timezone: &str) -> Result<BriefConfig, ConfigErro
         schedule,
         timezone,
         prompt,
-        to: raw.to.as_deref().map(discord_sender).transpose()?,
+        to: raw.to.as_deref().map(chat_user).transpose()?,
     })
 }
 
@@ -573,7 +580,8 @@ pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3_600;
 /// Who decides a call that waits, and how long it waits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalsConfig {
-    /// The Discord user who gets the approve and deny buttons.
+    /// The chat user who gets the approve and deny buttons, on Discord or
+    /// Slack.
     pub approver: Option<SenderId>,
     /// How long a call waits for a decision. A call with no decision is
     /// denied.
@@ -605,7 +613,7 @@ fn approvals(raw: &RawApprovals) -> Result<ApprovalsConfig, ConfigError> {
         )));
     }
     Ok(ApprovalsConfig {
-        approver: raw.approver.as_deref().map(discord_sender).transpose()?,
+        approver: raw.approver.as_deref().map(chat_user).transpose()?,
         timeout_secs,
     })
 }
@@ -861,6 +869,8 @@ struct Raw {
     #[serde(default)]
     discord: RawDiscord,
     #[serde(default)]
+    slack: RawDiscord,
+    #[serde(default)]
     camel: RawCamel,
     san_mateo: Option<RawSanMateo>,
     google: Option<RawGoogle>,
@@ -1050,16 +1060,22 @@ struct RawDiscord {
     allowed: Vec<String>,
 }
 
-/// The Discord settings.
+/// The settings of one chat service: Discord or Slack.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscordConfig {
+pub struct ChatConfig {
     /// A stranger who sends a direct message gets a pairing code.
     pub pairing: bool,
-    /// The Discord user ids that may talk to the assistant from the start.
+    /// The users that may talk to the assistant from the start.
     pub allowed: Vec<SenderId>,
 }
 
-impl Default for DiscordConfig {
+/// The Discord settings.
+pub type DiscordConfig = ChatConfig;
+
+/// The Slack settings.
+pub type SlackConfig = ChatConfig;
+
+impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             pairing: true,
@@ -1083,6 +1099,37 @@ pub fn discord_sender(user_id: &str) -> Result<SenderId, ConfigError> {
     Ok(SenderId::new(format!("discord:{user_id}"))?)
 }
 
+/// The sender id of the Slack user `user_id`.
+///
+/// # Errors
+///
+/// Returns an error when `user_id` is not 2 to 32 uppercase letters and
+/// digits that start with `U` or `W`.
+pub fn slack_sender(user_id: &str) -> Result<SenderId, ConfigError> {
+    let valid = (2..=32).contains(&user_id.len())
+        && (user_id.starts_with('U') || user_id.starts_with('W'))
+        && user_id
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    if !valid {
+        return Err(ConfigError::SlackUser(user_id.to_owned()));
+    }
+    Ok(SenderId::new(format!("slack:{user_id}"))?)
+}
+
+/// The sender id of one chat user in the config. `slack:U123` names a
+/// Slack user. `discord:123` or a bare snowflake names a Discord user.
+///
+/// # Errors
+///
+/// Returns an error when the id does not fit its service.
+pub fn chat_user(text: &str) -> Result<SenderId, ConfigError> {
+    if let Some(user) = text.strip_prefix("slack:") {
+        return slack_sender(user);
+    }
+    discord_sender(text.strip_prefix("discord:").unwrap_or(text))
+}
+
 /// The checked config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -1094,6 +1141,8 @@ pub struct Config {
     pub window: u32,
     /// The Discord settings.
     pub discord: DiscordConfig,
+    /// The Slack settings.
+    pub slack: SlackConfig,
     /// The camel routes that feed the assistant.
     pub camel: Vec<CamelRoute>,
     /// The San Mateo settings, when the config has the section.
@@ -1125,6 +1174,7 @@ impl Config {
             system: String::from(DEFAULT_SYSTEM),
             window: DEFAULT_WINDOW,
             discord: DiscordConfig::default(),
+            slack: SlackConfig::default(),
             camel: Vec::new(),
             san_mateo: None,
             google: None,
@@ -1157,6 +1207,12 @@ impl Config {
             .iter()
             .map(|id| discord_sender(id))
             .collect::<Result<_, _>>()?;
+        let slack_allowed = raw
+            .slack
+            .allowed
+            .iter()
+            .map(|id| slack_sender(id))
+            .collect::<Result<_, _>>()?;
         let memory = memory(raw.memory)?;
         let san_mateo_section = raw.san_mateo.map(san_mateo).transpose()?;
         let google_section = raw
@@ -1174,6 +1230,10 @@ impl Config {
             discord: DiscordConfig {
                 pairing: raw.discord.pairing.unwrap_or(true),
                 allowed,
+            },
+            slack: SlackConfig {
+                pairing: raw.slack.pairing.unwrap_or(true),
+                allowed: slack_allowed,
             },
             camel: camel_routes(raw.camel.route)?,
             san_mateo: san_mateo_section,
@@ -1611,6 +1671,44 @@ mod tests {
         let plain = Config::parse("owner = \"m\"").unwrap();
         assert_eq!(plain.discord, DiscordConfig::default());
         assert!(plain.discord.pairing);
+    }
+
+    #[test]
+    fn the_slack_section_and_slack_users_are_read() {
+        let config = Config::parse(
+            "owner = \"m\"\n[slack]\npairing = false\nallowed = [\"U012AB3CD\"]\n\
+             [approvals]\napprover = \"slack:U012AB3CD\"\n",
+        )
+        .unwrap();
+        assert!(!config.slack.pairing);
+        assert_eq!(config.slack.allowed[0].as_str(), "slack:U012AB3CD");
+        assert_eq!(
+            config.approvals.approver.unwrap().as_str(),
+            "slack:U012AB3CD"
+        );
+        assert_eq!(
+            Config::parse("owner = \"m\"").unwrap().slack,
+            SlackConfig::default()
+        );
+        for bad in [
+            "u012",
+            "U",
+            "X012",
+            "U01-2",
+            &format!("U{}", "1".repeat(32)),
+        ] {
+            assert!(
+                matches!(slack_sender(bad), Err(ConfigError::SlackUser(_))),
+                "{bad}"
+            );
+        }
+        assert!(matches!(
+            Config::parse("owner = \"m\"\n[slack]\nallowed = [\"123\"]"),
+            Err(ConfigError::SlackUser(_))
+        ));
+        assert_eq!(chat_user("discord:42").unwrap().as_str(), "discord:42");
+        assert_eq!(chat_user("42").unwrap().as_str(), "discord:42");
+        assert!(chat_user("slack:42").is_err());
     }
 
     #[test]

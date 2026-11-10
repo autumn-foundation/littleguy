@@ -388,7 +388,14 @@ async fn discord_buttons_decide_and_held_messages_run_after() {
         stop_tx.send(()).unwrap();
     };
     let (served, ()) = tokio::join!(
-        run(daemon, listener, Links::with_discord(link), None, stop),
+        run(
+            daemon,
+            listener,
+            Links::with_discord(link),
+            None,
+            jobs(UID).1,
+            stop
+        ),
         script
     );
     served.unwrap();
@@ -511,7 +518,10 @@ async fn a_slack_approver_decides_with_a_button() {
         assert_eq!(after, ["ran: hi", "ok: hello"]);
         stop_tx.send(()).unwrap();
     };
-    let (served, ()) = tokio::join!(run(daemon, listener, links, None, stop), script);
+    let (served, ()) = tokio::join!(
+        run(daemon, listener, links, None, jobs(UID).1, stop),
+        script
+    );
     served.unwrap();
     assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
     assert!(fake.posted()[2..].iter().all(|p| p.channel == "DU43"));

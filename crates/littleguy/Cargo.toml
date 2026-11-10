@@ -18,6 +18,8 @@ autumn-harvest = "0.10"
 autumn-harvest-agent = { workspace = true }
 autumn-harvest-plugin = { version = "0.10", optional = true, default-features = false, features = ["connectors"] }
 autumn-harvest-sqlite = { workspace = true }
+autumn-web = { version = "0.10", default-features = false, features = ["maud", "htmx"] }
+maud = "0.27"
 camel-api = { version = "0.57", optional = true }
 chrono = "0.4"
 camel-builder = { version = "0.57", optional = true }
@@ -83,6 +85,7 @@ oauth = ["dep:san-mateo", "dep:san-mateo-sqlite", "dep:axum"]
 google = ["oauth", "littleguy-tools/google"]
 
 [dev-dependencies]
+autumn-web = { version = "0.10", default-features = false, features = ["maud", "htmx", "test-support"] }
 base64 = "0.23"
 reqwest = { version = "0.12", default-features = false }
 littleguy-channels = { workspace = true, features = ["testing"] }

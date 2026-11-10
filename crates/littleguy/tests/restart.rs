@@ -2,9 +2,12 @@
 //!
 //! `lg serve` runs as a child process. `lg chat` talks to it. The test kills
 //! the daemon with SIGKILL, starts a new one on the same database, and counts
-//! the offline model calls across both lives.
+//! the offline model calls across both lives. Two more tests sign in to the
+//! web pages, and stop the daemon with SIGTERM.
 
 use std::error::Error;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -19,17 +22,29 @@ struct Paths {
     socket: PathBuf,
     calls: PathBuf,
     config: PathBuf,
+    port: u16,
+}
+
+/// A port that was free a moment ago. Tests run in parallel, so each
+/// daemon needs its own port for the pages.
+fn free_port() -> TestResult<u16> {
+    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
 fn paths() -> TestResult<Paths> {
     let dir = tempfile::tempdir()?;
     let config = dir.path().join("lg.toml");
-    std::fs::write(&config, "owner = \"tester\"\n")?;
+    let port = free_port()?;
+    std::fs::write(
+        &config,
+        format!("owner = \"tester\"\n[ui]\nbind = \"127.0.0.1:{port}\"\n"),
+    )?;
     Ok(Paths {
         db: dir.path().join("lg.db"),
         socket: dir.path().join("lg.sock"),
         calls: dir.path().join("calls.log"),
         config,
+        port,
         _dir: dir,
     })
 }
@@ -138,4 +153,102 @@ fn a_second_daemon_on_the_same_database_refuses_to_start() -> TestResult {
     let stderr = String::from_utf8(output.stderr)?;
     assert!(stderr.contains("lock"), "{stderr}");
     kill(first)
+}
+
+/// One HTTP/1.1 GET to the pages, with `cookie`. Returns the head and the
+/// body.
+fn get(port: u16, path: &str, cookie: Option<&str>) -> TestResult<(String, String)> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut stream = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let cookie = cookie
+        .map(|c| format!("Cookie: {c}\r\n"))
+        .unwrap_or_default();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{cookie}Connection: close\r\n\r\n"
+    )?;
+    let mut text = String::new();
+    stream.read_to_string(&mut text)?;
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    Ok((head.to_owned(), body.to_owned()))
+}
+
+/// The `name=value` of the `Set-Cookie` line of `name` in `head`.
+fn cookie_of(head: &str, name: &str) -> Option<String> {
+    head.lines()
+        .filter_map(|line| line.strip_prefix("set-cookie: "))
+        .filter_map(|value| value.split(';').next())
+        .find(|pair| pair.starts_with(&format!("{name}=")))
+        .map(str::to_owned)
+}
+
+#[test]
+fn a_link_from_lg_ui_signs_a_browser_in() -> TestResult {
+    let paths = paths()?;
+    let daemon = serve(&paths)?;
+    let (head, _) = get(paths.port, "/", None)?;
+    assert!(head.starts_with("HTTP/1.1 401"), "{head}");
+    let output = Command::new(LG)
+        .arg("--socket")
+        .arg(&paths.socket)
+        .arg("ui")
+        .env("LG_LOG", "warn")
+        .output()?;
+    let printed = answer(&output)?;
+    let link = printed.lines().last().unwrap_or_default();
+    let base = format!("http://127.0.0.1:{}", paths.port);
+    let path = link
+        .strip_prefix(&base)
+        .ok_or("the link names another address")?;
+    let (head, _) = get(paths.port, path, None)?;
+    assert!(head.starts_with("HTTP/1.1 303"), "{head}");
+    let session = cookie_of(&head, "lg.sid").ok_or("no session cookie")?;
+    let (head, body) = get(paths.port, "/", Some(&session))?;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
+        body.contains("Approvals"),
+        "the home page lists the approvals"
+    );
+    let (again, _) = get(paths.port, path, None)?;
+    assert!(again.starts_with("HTTP/1.1 403"), "a link works once");
+    kill(daemon)
+}
+
+#[test]
+fn sigterm_stops_the_daemon_cleanly() -> TestResult {
+    let paths = paths()?;
+    let mut daemon = serve(&paths)?;
+    let hello = chat(&paths.socket, "m-1", "hello")?;
+    assert_eq!(answer(&hello)?, "littleguy (offline): you said 'hello'");
+    let status = Command::new("kill")
+        .args(["-TERM", &daemon.id().to_string()])
+        .status()?;
+    assert!(status.success());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let code = loop {
+        if let Some(code) = daemon.try_wait()? {
+            break code;
+        }
+        if Instant::now() > deadline {
+            daemon.kill()?;
+            return Err("lg serve did not stop on SIGTERM".into());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(code.success(), "{code:?}");
+    assert!(!paths.socket.exists(), "a clean stop removes the socket");
+    // The runtime closed, so a new daemon opens the database at once.
+    let next = serve(&paths)?;
+    let again = chat(&paths.socket, "m-1", "hello")?;
+    assert_eq!(
+        answer(&again)?,
+        "(already delivered) littleguy (offline): you said 'hello'"
+    );
+    kill(next)
 }

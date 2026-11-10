@@ -84,6 +84,9 @@ pub enum Request {
     },
     /// Activate the version that was active before. Only the owner may.
     OverlayRollback,
+    /// A one-time link that signs a browser in to the web pages. Only the
+    /// owner may.
+    UiLink,
 }
 
 /// One overlay version of the assistant.

@@ -222,6 +222,9 @@ pub enum ConfigError {
     /// The Google section is not valid.
     #[error("the google section is not valid: {0}")]
     Google(String),
+    /// The ui section is not valid.
+    #[error("the ui section is not valid: {0}")]
+    Ui(String),
     /// The refine section is not valid.
     #[error("the refine section is not valid: {0}")]
     Refine(String),
@@ -253,6 +256,47 @@ pub enum SanMateoError {
     /// A variable name is not an environment variable name.
     #[error("`{0}` is not an environment variable name")]
     Variable(String),
+}
+
+/// The address of the web pages when the config names none.
+pub const DEFAULT_UI_BIND: &str = "127.0.0.1:3004";
+
+/// The web pages of `lg serve`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiConfig {
+    /// The loopback address of the pages. Port 0 picks a free port.
+    pub bind: std::net::SocketAddr,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            bind: std::net::SocketAddr::from(([127, 0, 0, 1], 3004)),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUi {
+    bind: Option<String>,
+}
+
+/// Checks the ui section. The pages stay on this machine, so the address
+/// must be a loopback address.
+fn ui(raw: RawUi) -> Result<UiConfig, ConfigError> {
+    let text = raw.bind.unwrap_or_else(|| String::from(DEFAULT_UI_BIND));
+    let bind: std::net::SocketAddr = text.parse().map_err(|_| {
+        ConfigError::Ui(format!(
+            "bind `{text}` is not an address such as {DEFAULT_UI_BIND}"
+        ))
+    })?;
+    if !bind.ip().is_loopback() {
+        return Err(ConfigError::Ui(format!(
+            "bind `{text}` is not a loopback address: the pages stay on this machine"
+        )));
+    }
+    Ok(UiConfig { bind })
 }
 
 /// The transcript messages that a refine proposal reads, when the config
@@ -948,6 +992,8 @@ struct Raw {
     #[serde(default)]
     mcp: RawMcp,
     refine: Option<RawRefine>,
+    #[serde(default)]
+    ui: RawUi,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1227,6 +1273,8 @@ pub struct Config {
     pub mcp: Vec<McpServer>,
     /// The refine loop, when the config has the section.
     pub refine: Option<RefineConfig>,
+    /// The web pages.
+    pub ui: UiConfig,
 }
 
 impl Config {
@@ -1250,6 +1298,7 @@ impl Config {
             flow: FlowConfig::default(),
             mcp: Vec::new(),
             refine: None,
+            ui: UiConfig::default(),
         }
     }
 
@@ -1314,6 +1363,7 @@ impl Config {
             },
             mcp: mcp_servers(raw.mcp.server)?,
             refine: raw.refine.map(refine).transpose()?,
+            ui: ui(raw.ui)?,
         })
     }
 
@@ -1366,6 +1416,19 @@ mod tests {
         assert!(matches!(zero, Err(ConfigError::FetchMaxChars)));
         let unknown = Config::parse("owner = \"mark\"\n[tools]\nshell = true");
         assert!(unknown.is_err());
+    }
+
+    #[test]
+    fn the_ui_section_stays_on_loopback() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.ui.bind.to_string(), DEFAULT_UI_BIND);
+        let set = Config::parse("owner = \"mark\"\n[ui]\nbind = \"[::1]:0\"").unwrap();
+        assert_eq!(set.ui.bind.to_string(), "[::1]:0");
+        for bad in ["0.0.0.0:3004", "192.168.1.2:80", "localhost:3004"] {
+            let result = Config::parse(&format!("owner = \"mark\"\n[ui]\nbind = \"{bad}\""));
+            assert!(matches!(result, Err(ConfigError::Ui(_))), "{bad}");
+        }
+        assert!(Config::parse("owner = \"mark\"\n[ui]\nport = 1").is_err());
     }
 
     #[test]

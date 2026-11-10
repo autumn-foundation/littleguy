@@ -30,6 +30,13 @@ each command.
 - `cargo xtask features` builds each feature alone and none at all. Run it
   when a change touches a `#[cfg(feature = ...)]`.
 
+## Web
+
+- `lg serve` is an autumn-web app (ADR 0014). Build each page with maud and
+  htmx on autumn-web. Never add another HTTP server.
+- A page sends an owner `Request` through `daemon::Handle`. It never
+  touches the runtime or a store itself.
+
 ## Rust rules
 
 - `cargo fmt` and clippy pedantic plus nursery, with warnings denied.

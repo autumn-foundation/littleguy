@@ -182,7 +182,7 @@ mod tests {
         };
         match daemon.handle_request(UID, request).await {
             Response::Reply { text } => text,
-            other => panic!("expected a reply, got {other:?}"),
+            _ => panic!("expected a reply"),
         }
     }
 
@@ -191,16 +191,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = open(dir.path(), true);
         let before = say(&mut daemon, "m-1").await;
-        assert!(!before.contains(PIRATE), "{before}");
+        assert!(!before.contains(PIRATE), "the config prompt runs first");
 
         let proposed = daemon.handle_request(UID, Request::RefinePropose).await;
         let Response::Proposed { version, overlay } = proposed else {
-            panic!("expected a proposal, got {proposed:?}");
+            panic!("expected a proposal");
         };
         assert_eq!(version, 1);
-        assert!(overlay.contains(PIRATE), "{overlay}");
+        assert!(overlay.contains(PIRATE), "the proposal holds the overlay");
         let waiting = say(&mut daemon, "m-2").await;
-        assert!(!waiting.contains(PIRATE), "a proposal waits: {waiting}");
+        assert!(!waiting.contains(PIRATE), "a proposal waits");
 
         let active = daemon
             .handle_request(UID, Request::OverlayActivate { version: 1 })
@@ -213,7 +213,7 @@ mod tests {
             }
         );
         let after = say(&mut daemon, "m-3").await;
-        assert!(after.contains(PIRATE), "{after}");
+        assert!(after.contains(PIRATE), "the active overlay runs");
         assert!(dir.path().join(crate::refine::FILE_NAME).exists());
     }
 
@@ -228,7 +228,7 @@ mod tests {
                 .await;
             assert!(
                 matches!(stored, Response::OverlayStored { .. }),
-                "{stored:?}"
+                "the put stores a version"
             );
         }
         for version in [1, 2] {
@@ -237,7 +237,7 @@ mod tests {
                 .await;
         }
         let plain = say(&mut daemon, "m-1").await;
-        assert!(!plain.contains(PIRATE), "{plain}");
+        assert!(!plain.contains(PIRATE), "version 2 is the config prompt");
         let back = daemon.handle_request(UID, Request::OverlayRollback).await;
         assert_eq!(
             back,
@@ -247,7 +247,7 @@ mod tests {
             }
         );
         let pirate = say(&mut daemon, "m-2").await;
-        assert!(pirate.contains(PIRATE), "{pirate}");
+        assert!(pirate.contains(PIRATE), "the rollback restores version 1");
         let Response::Overlays { active, entries } =
             daemon.handle_request(UID, Request::Overlays).await
         else {
@@ -259,11 +259,14 @@ mod tests {
         let shown = daemon
             .handle_request(UID, Request::OverlayShow { version: 1 })
             .await;
-        assert!(matches!(shown, Response::Overlay { .. }), "{shown:?}");
+        assert!(matches!(shown, Response::Overlay { .. }), "version 1 shows");
         let missing = daemon
             .handle_request(UID, Request::OverlayShow { version: 7 })
             .await;
-        assert!(matches!(missing, Response::Error { .. }), "{missing:?}");
+        assert!(
+            matches!(missing, Response::Error { .. }),
+            "version 7 is missing"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -272,9 +275,12 @@ mod tests {
         let mut daemon = open(dir.path(), true);
         let response = daemon.handle_request(UID, Request::RefinePropose).await;
         let Response::Error { message } = response else {
-            panic!("expected an error, got {response:?}");
+            panic!("expected an error");
         };
-        assert!(message.contains("no transcript"), "{message}");
+        assert!(
+            message.contains("no transcript"),
+            "the error names the cause"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

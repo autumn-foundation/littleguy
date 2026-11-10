@@ -9,9 +9,10 @@
 //!
 //! With `DISCORD_BOT_TOKEN` set, `lg serve` also answers Discord direct
 //! messages. With `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` set, it answers
-//! Slack direct messages over Socket Mode. Each token comes from the
-//! environment only. Each
-//! `[[camel.route]]` of the config feeds the assistant too.
+//! Slack direct messages over Socket Mode. With `SLACK_BOT_TOKEN`,
+//! `SLACK_SIGNING_SECRET` and `[hooks]`, Slack calls the hooks instead.
+//! Each token comes from the environment only. Each `[[camel.route]]` of
+//! the config feeds the assistant too.
 //!
 //! `lg serve --model claude`, `openai` or `openrouter` talks to a hosted
 //! model. Each reads its key from the environment only, so the key never
@@ -208,6 +209,10 @@ const SLACK_BOT_VAR: &str = "SLACK_BOT_TOKEN";
 /// Mode.
 const SLACK_APP_VAR: &str = "SLACK_APP_TOKEN";
 
+/// The variable that holds the signing secret of the Slack app, for the
+/// Events API.
+const SLACK_SECRET_VAR: &str = "SLACK_SIGNING_SECRET";
+
 /// The directory of the raw Claude turns, next to the database.
 #[cfg(feature = "claude")]
 const TURN_DIR: &str = "claude-turns";
@@ -358,38 +363,85 @@ fn discord_link(
     })
 }
 
-/// The Slack client, when `key` holds both Slack tokens. One token alone
-/// is a mistake, so the log says which is missing.
+/// The Slack link of `key`. The bot token with the app token is Socket
+/// Mode. The bot token with the signing secret is the Events API, which
+/// needs the hooks. A part alone is a mistake, so the log says what is
+/// missing.
+///
+/// # Errors
+///
+/// Returns an error when `key` holds both the app token and the signing
+/// secret, since lg cannot tell which mode the owner wants.
 #[cfg(feature = "slack")]
-fn slack_link(args: &ServeArgs, key: impl Fn(&str) -> Option<String>) -> Option<SlackApi> {
+fn slack_link(
+    args: &ServeArgs,
+    key: impl Fn(&str) -> Option<String>,
+    hooks: bool,
+) -> Result<Option<daemon::SlackLink>> {
     let token = |var| key(var).filter(|token: &String| !token.trim().is_empty());
-    match (token(SLACK_BOT_VAR), token(SLACK_APP_VAR)) {
-        (Some(bot), Some(app)) => {
-            let base = args
-                .slack_api
-                .clone()
-                .unwrap_or_else(|| String::from(slack::API_BASE));
-            Some(SlackApi::new(base, bot, app))
+    let secret = key(SLACK_SECRET_VAR).and_then(littleguy_channels::SigningSecret::new);
+    let base = || {
+        args.slack_api
+            .clone()
+            .unwrap_or_else(|| String::from(slack::API_BASE))
+    };
+    match (token(SLACK_BOT_VAR), token(SLACK_APP_VAR), secret) {
+        (_, Some(_), Some(_)) => anyhow::bail!(
+            "set {SLACK_APP_VAR} for Socket Mode or {SLACK_SECRET_VAR} for the Events API, not both"
+        ),
+        (Some(bot), Some(app), None) => Ok(Some(daemon::SlackLink::Socket(SlackApi::new(
+            base(),
+            bot,
+            app,
+        )))),
+        (Some(bot), None, Some(secret)) if hooks => Ok(Some(daemon::SlackLink::Events {
+            api: SlackApi::web_only(base(), bot),
+            secret,
+        })),
+        (Some(_), None, Some(_)) => {
+            tracing::warn!(
+                "{SLACK_SECRET_VAR} needs a [hooks] section for the Events API: Slack stays off"
+            );
+            Ok(None)
         }
-        (None, None) => None,
-        (Some(_), None) => {
-            tracing::warn!("{SLACK_BOT_VAR} is set without {SLACK_APP_VAR}: Slack stays off");
-            None
+        (None, None, None) => Ok(None),
+        (Some(_), None, None) => {
+            tracing::warn!(
+                "{SLACK_BOT_VAR} is set without {SLACK_APP_VAR} or {SLACK_SECRET_VAR}: Slack stays off"
+            );
+            Ok(None)
         }
-        (None, Some(_)) => {
-            tracing::warn!("{SLACK_APP_VAR} is set without {SLACK_BOT_VAR}: Slack stays off");
-            None
+        (None, _, _) => {
+            tracing::warn!("Slack is set up without {SLACK_BOT_VAR}: Slack stays off");
+            Ok(None)
         }
     }
 }
 
 /// The chat links of `args`. A token of a service that this build leaves
-/// out turns nothing on, and the log says so.
-fn links(args: &ServeArgs, key: impl Fn(&str) -> Option<String>) -> daemon::Links {
+/// out turns nothing on, and the log says so. `hooks` says whether the
+/// hooks serve.
+///
+/// # Errors
+///
+/// Returns an error when the Slack variables ask for two modes at once.
+#[cfg_attr(
+    not(feature = "slack"),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "only the Slack variables can fail, and this build has no Slack"
+    )
+)]
+fn links(
+    args: &ServeArgs,
+    key: impl Fn(&str) -> Option<String>,
+    hooks: bool,
+) -> Result<daemon::Links> {
     let unbuilt = [
         (DISCORD_TOKEN_VAR, "discord"),
         (SLACK_BOT_VAR, "slack"),
         (SLACK_APP_VAR, "slack"),
+        (SLACK_SECRET_VAR, "slack"),
     ];
     for (var, feature) in unbuilt {
         if !features::has(feature) && key(var).is_some_and(|token| !token.trim().is_empty()) {
@@ -398,12 +450,14 @@ fn links(args: &ServeArgs, key: impl Fn(&str) -> Option<String>) -> daemon::Link
     }
     #[cfg(not(any(feature = "discord", feature = "slack")))]
     let _ = args;
-    daemon::Links {
+    #[cfg(not(feature = "slack"))]
+    let _ = hooks;
+    Ok(daemon::Links {
         #[cfg(feature = "discord")]
         discord: discord_link(args, &key),
         #[cfg(feature = "slack")]
-        slack: slack_link(args, &key),
-    }
+        slack: slack_link(args, &key, hooks)?,
+    })
 }
 
 /// Starts San Mateo for the `[san_mateo]` section of `config`, if any.
@@ -447,7 +501,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         None => env.db()?,
     };
     let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
-    let links = links(&args, |var| std::env::var(var).ok());
+    let links = links(&args, |var| std::env::var(var).ok(), config.hooks.is_some())?;
     let uid = rustix::process::getuid().as_raw();
     // San Mateo starts first, because the Google tools send through it.
     #[cfg(feature = "oauth")]
@@ -501,10 +555,20 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     } else {
         daemon
     };
+    #[cfg(feature = "slack")]
+    let slack = match &links.slack {
+        Some(daemon::SlackLink::Events { api, secret }) => Some(web::SlackHook::new(
+            secret,
+            daemon.slack_inbox(api.clone(), &handle),
+        )),
+        _ => None,
+    };
     let routes = web::Web {
         handle,
         logins,
         hooks,
+        #[cfg(feature = "slack")]
+        slack,
     };
     web::serve(routes, &plan, move |stop| {
         tokio::spawn(async move {
@@ -718,18 +782,49 @@ mod tests {
 
     #[cfg(feature = "slack")]
     #[test]
-    fn slack_runs_only_with_both_tokens() {
+    fn slack_runs_over_a_socket_or_over_the_hooks() {
+        use daemon::SlackLink;
         let args = serve_args(&["lg", "serve"]);
-        assert!(slack_link(&args, |_| None).is_none());
-        let only = |name: &'static str| move |var: &str| (var == name).then(|| String::from("t"));
-        assert!(slack_link(&args, only(SLACK_BOT_VAR)).is_none());
-        assert!(slack_link(&args, only(SLACK_APP_VAR)).is_none());
-        assert!(slack_link(&args, |_| Some(String::from(" "))).is_none());
-        let api = slack_link(&args, |_| Some(String::from("t"))).unwrap();
+        let with = |vars: &'static [&'static str]| {
+            move |var: &str| vars.contains(&var).then(|| String::from("t"))
+        };
+        let link = |vars, hooks| slack_link(&args, with(vars), hooks).unwrap();
+        assert!(link(&[], true).is_none());
+        assert!(link(&[SLACK_BOT_VAR], true).is_none());
+        assert!(link(&[SLACK_APP_VAR], true).is_none());
+        assert!(link(&[SLACK_SECRET_VAR], true).is_none());
+        assert!(slack_link(&args, with(&[SLACK_APP_VAR, SLACK_SECRET_VAR]), true).is_err());
+        assert!(
+            slack_link(&args, |_| Some(String::from(" ")), true)
+                .unwrap()
+                .is_none()
+        );
+
+        let socket = link(&[SLACK_BOT_VAR, SLACK_APP_VAR], false).unwrap();
+        let SlackLink::Socket(api) = socket else {
+            panic!("not Socket Mode");
+        };
         assert!(format!("{api:?}").contains(slack::API_BASE));
+
+        // The Events API needs the hooks, since Slack calls them.
+        assert!(link(&[SLACK_BOT_VAR, SLACK_SECRET_VAR], false).is_none());
+        let events = link(&[SLACK_BOT_VAR, SLACK_SECRET_VAR], true).unwrap();
+        assert!(matches!(events, SlackLink::Events { .. }));
+        assert!(!format!("{events:?}").contains("\"t\""));
+
+        let both = slack_link(
+            &args,
+            with(&[SLACK_BOT_VAR, SLACK_APP_VAR, SLACK_SECRET_VAR]),
+            true,
+        );
+        let error = both.err().unwrap().to_string();
+        assert!(error.contains("not both"), "{error}");
+
         let args = serve_args(&["lg", "serve", "--slack-api", "http://127.0.0.1:1/api"]);
-        let api = slack_link(&args, |_| Some(String::from("t"))).unwrap();
-        assert!(format!("{api:?}").contains("127.0.0.1:1"));
+        let socket = slack_link(&args, with(&[SLACK_BOT_VAR, SLACK_APP_VAR]), false)
+            .unwrap()
+            .unwrap();
+        assert!(format!("{socket:?}").contains("127.0.0.1:1"));
     }
 
     #[cfg(feature = "discord")]
@@ -779,7 +874,12 @@ mod tests {
     #[test]
     fn a_token_of_a_missing_service_turns_nothing_on() {
         let args = serve_args(&["lg", "serve"]);
-        let links = links(&args, |_| Some(String::from("t")));
+        let links = links(
+            &args,
+            |var| (var != SLACK_SECRET_VAR).then(|| String::from("t")),
+            false,
+        )
+        .unwrap();
         #[cfg(feature = "discord")]
         assert!(links.discord.is_some());
         #[cfg(feature = "slack")]

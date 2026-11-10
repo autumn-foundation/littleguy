@@ -19,4 +19,4 @@ pub use chat::{Button, ButtonStyle, ChannelError, DmMessage, Service, split_mess
 #[cfg(feature = "discord")]
 pub use discord::{ButtonPress, DiscordRest, GatewayEvent};
 #[cfg(feature = "slack")]
-pub use slack::{SlackApi, SlackEvent, SlackPress};
+pub use slack::{SigningSecret, SlackApi, SlackEvent, SlackPress};

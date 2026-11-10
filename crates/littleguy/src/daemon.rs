@@ -1039,9 +1039,27 @@ pub struct Links {
     /// Discord, when it is on.
     #[cfg(feature = "discord")]
     pub discord: Option<DiscordLink>,
-    /// Slack, when it is on. The client holds both tokens.
+    /// Slack, when it is on.
     #[cfg(feature = "slack")]
-    pub slack: Option<littleguy_channels::SlackApi>,
+    pub slack: Option<SlackLink>,
+}
+
+/// How Slack reaches the daemon.
+#[cfg(feature = "slack")]
+#[derive(Debug, Clone)]
+pub enum SlackLink {
+    /// Socket Mode: the daemon holds a socket open. The client holds both
+    /// tokens.
+    Socket(littleguy_channels::SlackApi),
+    /// The Events API: Slack calls the hooks, so a sleeping host wakes. The
+    /// client holds the bot token, and the hooks check each request with
+    /// the signing secret.
+    Events {
+        /// The Web API client, for the replies.
+        api: littleguy_channels::SlackApi,
+        /// The secret that signs each request from Slack.
+        secret: littleguy_channels::SigningSecret,
+    },
 }
 
 #[cfg(test)]
@@ -1056,13 +1074,13 @@ impl Links {
         }
     }
 
-    /// Slack alone, on `api`.
+    /// Slack alone, on `link`.
     #[cfg(feature = "slack")]
-    fn with_slack(api: littleguy_channels::SlackApi) -> Self {
+    fn with_slack(link: SlackLink) -> Self {
         Self {
             #[cfg(feature = "discord")]
             discord: None,
-            slack: Some(api),
+            slack: Some(link),
         }
     }
 }
@@ -1222,8 +1240,8 @@ pub async fn run(
         discord::start(&daemon, link, &tx, &mut tasks);
     }
     #[cfg(feature = "slack")]
-    if let Some(api) = links.slack {
-        slack::start(&daemon, api, &tx, &mut tasks);
+    if let Some(link) = links.slack {
+        slack::start(&daemon, link, &tx, &mut tasks);
     }
     // A build with no chat service and no camel starts no task here.
     #[cfg(not(any(feature = "discord", feature = "slack", feature = "camel")))]
@@ -1410,6 +1428,8 @@ mod refine;
 pub use discord::DiscordLink;
 #[cfg(feature = "slack")]
 mod slack;
+#[cfg(feature = "slack")]
+pub use slack::SlackInbox;
 
 #[cfg(test)]
 mod tests {
@@ -2024,7 +2044,11 @@ mod tests {
         )
         .unwrap();
         let listener = bind(&socket).await.unwrap();
-        let links = Links::with_slack(SlackApi::new(fake.api_base.clone(), BOT_TOKEN, APP_TOKEN));
+        let links = Links::with_slack(SlackLink::Socket(SlackApi::new(
+            fake.api_base.clone(),
+            BOT_TOKEN,
+            APP_TOKEN,
+        )));
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let stop = async {
             let _ = stop_rx.await;
@@ -2095,6 +2119,112 @@ mod tests {
         assert!(fake.posted().iter().all(|p| p.channel == "D555"));
         assert_eq!(model.calls(), 4);
         assert!(fake.connects() >= 2);
+    }
+
+    /// Opens the daemon at `dir` with Slack on.
+    #[cfg(feature = "slack")]
+    fn slack_daemon(dir: &Path, model: &Arc<OfflineModel>) -> Daemon {
+        let extras = Extras {
+            slack: true,
+            ..Extras::default()
+        };
+        let model = Arc::clone(model) as Arc<dyn AgentModel>;
+        let uid = rustix::process::getuid().as_raw();
+        Daemon::open_with(&dir.join("lg.db"), &config(), model, uid, false, extras).unwrap()
+    }
+
+    #[cfg(feature = "slack")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_events_api_reads_the_missed_messages_at_start() {
+        use littleguy_channels::SigningSecret;
+        use littleguy_channels::testing::slack::{BOT_TOKEN, FakeSlack, dm_event};
+
+        let fake = FakeSlack::start().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(OfflineModel::new());
+        let link = || SlackLink::Events {
+            api: SlackApi::web_only(fake.api_base.clone(), BOT_TOKEN),
+            secret: SigningSecret::new("s").unwrap(),
+        };
+        let uid = rustix::process::getuid().as_raw();
+        let message = |ts: &str, text: &str| DmMessage {
+            id: ts.to_owned(),
+            channel_id: String::from("D555"),
+            author_id: String::from("U555"),
+            content: text.to_owned(),
+        };
+
+        // The first run takes two messages over the hooks.
+        let daemon = slack_daemon(dir.path(), &model);
+        let listener = bind(&dir.path().join("lg.sock")).await.unwrap();
+        let (handle, queue) = jobs(uid);
+        let inbox = daemon.slack_inbox(
+            SlackApi::web_only(fake.api_base.clone(), BOT_TOKEN),
+            &handle,
+        );
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let stop = async {
+            let _ = stop_rx.await;
+        };
+        let script = async {
+            inbox.message(message("5001.000001", "hello")).await;
+            assert_eq!(fake.posted().len(), 1);
+            let code = code_in(&fake.posted()[0].text);
+            let paired = handle.ask(Request::Pair { code }).await.unwrap();
+            assert!(matches!(paired, Response::Paired { .. }));
+            inbox.message(message("5002.000001", "hi")).await;
+            assert_eq!(fake.posted().len(), 2);
+            // The queue runs in order, so this answer comes after the
+            // cursor moves.
+            handle.ask(Request::Pairs).await.unwrap();
+            stop_tx.send(()).unwrap();
+        };
+        let (served, ()) = tokio::join!(
+            run(
+                daemon,
+                listener,
+                Links::with_slack(link()),
+                None,
+                queue,
+                stop
+            ),
+            script
+        );
+        served.unwrap();
+        drop((handle, inbox));
+
+        // A message comes while the host sleeps, and its event is lost.
+        for (ts, text) in [("5002.000001", "hi"), ("5003.000000", "missed")] {
+            fake.add_history(dm_event(ts, "D555", "U555", text));
+        }
+        let daemon = slack_daemon(dir.path(), &model);
+        let listener = bind(&dir.path().join("lg.sock")).await.unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let stop = async {
+            let _ = stop_rx.await;
+        };
+        let script = async {
+            assert!(fake.wait_for(10, |f| f.posted().len() == 3).await);
+            stop_tx.send(()).unwrap();
+        };
+        let (served, ()) = tokio::join!(
+            run(
+                daemon,
+                listener,
+                Links::with_slack(link()),
+                None,
+                jobs(uid).1,
+                stop
+            ),
+            script
+        );
+        served.unwrap();
+        let posted = fake.posted();
+        assert_eq!(
+            posted[2].text,
+            littleguy_channels::slack::escape(&echo("missed"))
+        );
+        assert_eq!(fake.connects(), 0, "the Events API opens no socket");
     }
 
     #[test]

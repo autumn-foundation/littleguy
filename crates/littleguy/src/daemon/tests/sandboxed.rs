@@ -482,7 +482,11 @@ async fn a_slack_approver_decides_with_a_button() {
     )
     .unwrap();
     let listener = bind(&socket).await.unwrap();
-    let links = Links::with_slack(SlackApi::new(fake.api_base.clone(), BOT_TOKEN, APP_TOKEN));
+    let links = Links::with_slack(SlackLink::Socket(SlackApi::new(
+        fake.api_base.clone(),
+        BOT_TOKEN,
+        APP_TOKEN,
+    )));
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let stop = async {
         let _ = stop_rx.await;

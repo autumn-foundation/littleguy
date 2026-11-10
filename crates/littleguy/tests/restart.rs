@@ -167,6 +167,17 @@ fn get(port: u16, path: &str, cookie: Option<&str>) -> TestResult<(String, Strin
 /// Sends one HTTP/1.1 request with the header lines `extra`, each ending
 /// in CRLF. Returns the head and the body of the answer.
 fn request(port: u16, method: &str, path: &str, extra: &str) -> TestResult<(String, String)> {
+    send(port, method, path, extra, "")
+}
+
+/// Sends one request with `body`, and returns its head and its body.
+fn send(
+    port: u16,
+    method: &str,
+    path: &str,
+    extra: &str,
+    body: &str,
+) -> TestResult<(String, String)> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut stream = loop {
         match TcpStream::connect(("127.0.0.1", port)) {
@@ -177,7 +188,8 @@ fn request(port: u16, method: &str, path: &str, extra: &str) -> TestResult<(Stri
     };
     write!(
         stream,
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     )?;
     let mut text = String::new();
     stream.read_to_string(&mut text)?;
@@ -315,6 +327,64 @@ fn hooks_without_a_token_stop_the_daemon_at_start() -> TestResult {
     assert!(
         stderr.contains("LG_HOOK_TOKEN"),
         "the error names the variable"
+    );
+    assert!(!paths.db.exists(), "the database is not opened");
+    Ok(())
+}
+
+/// The signing secret of the Slack tests.
+#[cfg(feature = "slack")]
+const SLACK_SECRET: &str = "8f742231b10e8888abcd99yyyzzz85a5";
+
+#[cfg(feature = "slack")]
+#[test]
+fn slack_over_the_events_api_answers_through_lg_serve() -> TestResult {
+    let paths = hooked_paths()?;
+    let child = serve_command(&paths, &paths.socket)
+        .arg("--slack-api")
+        .arg("http://127.0.0.1:9/api")
+        .env("LG_HOOK_TOKEN", HOOK_TOKEN)
+        .env("SLACK_BOT_TOKEN", "xoxb-test")
+        .env("SLACK_SIGNING_SECRET", SLACK_SECRET)
+        .env_remove("SLACK_APP_TOKEN")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let body = r#"{"type":"url_verification","challenge":"c-42"}"#;
+    let (head, _) = send(paths.port, "POST", "/hooks/slack/events", "", body)?;
+    assert!(head.starts_with("HTTP/1.1 401"), "Slack signs each request");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let [(ts_name, ts), (sig_name, sig)] =
+        autumn_plugin_slack::testing::signed_headers(SLACK_SECRET, now, body.as_bytes());
+    let signed = format!("{ts_name}: {ts}\r\n{sig_name}: {sig}\r\n");
+    let (head, answer) = send(paths.port, "POST", "/hooks/slack/events", &signed, body)?;
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "a signed challenge answers 200"
+    );
+    assert!(answer.contains("c-42"), "the answer holds the challenge");
+    kill(child)
+}
+
+#[cfg(feature = "slack")]
+#[test]
+fn two_slack_modes_stop_the_daemon_at_start() -> TestResult {
+    let paths = hooked_paths()?;
+    let output = serve_command(&paths, &paths.socket)
+        .env("LG_HOOK_TOKEN", HOOK_TOKEN)
+        .env("SLACK_BOT_TOKEN", "xoxb-test")
+        .env("SLACK_APP_TOKEN", "xapp-test")
+        .env("SLACK_SIGNING_SECRET", SLACK_SECRET)
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(!output.status.success(), "lg serve fails");
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("not both"),
+        "the error says to pick one mode"
     );
     assert!(!paths.db.exists(), "the database is not opened");
     Ok(())

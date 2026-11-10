@@ -19,6 +19,8 @@ autumn-harvest-agent = { workspace = true }
 autumn-harvest-plugin = { version = "0.10", optional = true, default-features = false, features = ["connectors"] }
 autumn-harvest-sqlite = { workspace = true }
 autumn-web = { version = "0.10", default-features = false, features = ["maud", "htmx"] }
+autumn-plugin-slack = { version = "0.4", optional = true }
+form_urlencoded = { version = "1", optional = true }
 maud = "0.27"
 camel-api = { version = "0.57", optional = true }
 chrono = "0.4"
@@ -52,8 +54,8 @@ default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "ref
 full = ["default", "camel", "google"]
 # Discord direct messages over the gateway.
 discord = ["littleguy-channels/discord"]
-# Slack direct messages over Socket Mode.
-slack = ["littleguy-channels/slack"]
+# Slack direct messages over Socket Mode, or over the Events API as a hook.
+slack = ["littleguy-channels/slack", "dep:autumn-plugin-slack", "dep:form_urlencoded"]
 # `--model claude`: Claude over the Messages API.
 claude = ["littleguy-models/claude"]
 # `--model openai` and `--model openrouter`.

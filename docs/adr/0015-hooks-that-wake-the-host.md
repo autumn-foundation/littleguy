@@ -62,8 +62,8 @@ sequenceDiagram
   late a timer can be: a tick every 15 minutes makes a brief up to 15
   minutes late.
 - Chat over the gateway or Socket Mode still needs a host that stays
-  awake. The Slack Events API comes next, as a hook that the Slack
-  signature guards. Discord interactions cover slash commands only, so
+  awake. The Slack Events API is a hook that the Slack signature guards
+  ([ADR 0016](0016-slack-over-the-events-api.md)). Discord interactions cover slash commands only, so
   Discord direct messages keep the gateway.
 - The pages and the hooks share one bind. To use the pages and the hooks
   on one machine, bind the hooks to a loopback address.

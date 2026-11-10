@@ -3,12 +3,14 @@
 //! - `lg serve` runs the daemon. It owns the database and the assistant.
 //! - `lg chat <text>` sends one message to the daemon and prints the answer.
 //! - `lg pair <code>`, `lg pairs` and `lg unpair <sender>` manage who may
-//!   talk to the assistant on Discord.
+//!   talk to the assistant on Discord and Slack.
 //! - `lg connect <integration>`, `lg connections` and `lg disconnect` manage
 //!   the OAuth accounts that San Mateo keeps tokens for.
 //!
 //! With `DISCORD_BOT_TOKEN` set, `lg serve` also answers Discord direct
-//! messages. The token comes from the environment only. Each
+//! messages. With `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` set, it answers
+//! Slack direct messages over Socket Mode. Each token comes from the
+//! environment only. Each
 //! `[[camel.route]]` of the config feeds the assistant too.
 //!
 //! `lg serve --model claude`, `openai` or `openrouter` talks to a hosted
@@ -18,6 +20,7 @@
 mod approvals;
 mod brief;
 mod camel;
+mod chats;
 mod client;
 mod daemon;
 mod guard;
@@ -36,7 +39,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use autumn_harvest_agent::AgentModel;
 use clap::{Parser, Subcommand, ValueEnum};
-use littleguy_channels::{DiscordRest, discord};
+use littleguy_channels::{DiscordRest, SlackApi, discord, slack};
 use littleguy_core::{Config, OwnerName};
 use littleguy_models::{ClaudeModel, OfflineModel, OpenAiModel, Provider};
 
@@ -125,6 +128,13 @@ const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
 /// The variable that holds the Discord bot token.
 const DISCORD_TOKEN_VAR: &str = "DISCORD_BOT_TOKEN";
 
+/// The variable that holds the Slack bot token (`xoxb-`).
+const SLACK_BOT_VAR: &str = "SLACK_BOT_TOKEN";
+
+/// The variable that holds the Slack app-level token (`xapp-`), for Socket
+/// Mode.
+const SLACK_APP_VAR: &str = "SLACK_APP_TOKEN";
+
 /// The directory of the raw Claude turns, next to the database.
 const TURN_DIR: &str = "claude-turns";
 
@@ -157,6 +167,9 @@ struct ServeArgs {
     /// The Discord gateway URL. For tests.
     #[arg(long, env = "LG_DISCORD_GATEWAY", hide = true)]
     discord_gateway: Option<String>,
+    /// The Slack Web API base URL. For tests.
+    #[arg(long, env = "LG_SLACK_API", hide = true)]
+    slack_api: Option<String>,
     /// Append one line per offline model call to this file. For tests.
     #[arg(long, env = "LG_OFFLINE_CALL_LOG", hide = true)]
     offline_call_log: Option<PathBuf>,
@@ -255,6 +268,30 @@ fn discord_link(
     })
 }
 
+/// The Slack client, when `key` holds both Slack tokens. One token alone
+/// is a mistake, so the log says which is missing.
+fn slack_link(args: &ServeArgs, key: impl Fn(&str) -> Option<String>) -> Option<SlackApi> {
+    let token = |var| key(var).filter(|token: &String| !token.trim().is_empty());
+    match (token(SLACK_BOT_VAR), token(SLACK_APP_VAR)) {
+        (Some(bot), Some(app)) => {
+            let base = args
+                .slack_api
+                .clone()
+                .unwrap_or_else(|| String::from(slack::API_BASE));
+            Some(SlackApi::new(base, bot, app))
+        }
+        (None, None) => None,
+        (Some(_), None) => {
+            tracing::warn!("{SLACK_BOT_VAR} is set without {SLACK_APP_VAR}: Slack stays off");
+            None
+        }
+        (None, Some(_)) => {
+            tracing::warn!("{SLACK_APP_VAR} is set without {SLACK_BOT_VAR}: Slack stays off");
+            None
+        }
+    }
+}
+
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let config = load_config(args.config.as_deref(), env)?;
     let db = match args.db.clone() {
@@ -262,7 +299,10 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         None => env.db()?,
     };
     let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
-    let link = discord_link(&args, |var| std::env::var(var).ok());
+    let links = daemon::Links {
+        discord: discord_link(&args, |var| std::env::var(var).ok()),
+        slack: slack_link(&args, |var| std::env::var(var).ok()),
+    };
     let uid = rustix::process::getuid().as_raw();
     // San Mateo starts first, because the Google tools send through it.
     let connections = match &config.san_mateo {
@@ -299,8 +339,10 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         sandbox,
         mcp,
         google,
+        slack: links.slack.is_some(),
     };
-    let mut daemon = daemon::Daemon::open_with(&db, &config, model, uid, link.is_some(), extras)?;
+    let discord = links.discord.is_some();
+    let mut daemon = daemon::Daemon::open_with(&db, &config, model, uid, discord, extras)?;
     if let Some(started) = connections {
         daemon = daemon.with_connections(started);
     }
@@ -316,7 +358,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     } else {
         Some(camel::Camel::start(daemon.camel_mapper(&config), &db).await?)
     };
-    daemon::run(daemon, listener, link, camel, stop).await?;
+    daemon::run(daemon, listener, links, camel, stop).await?;
     // The socket file goes with the daemon. A crash leaves it, and the next
     // start replaces it.
     let _ = std::fs::remove_file(&socket);
@@ -466,6 +508,21 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("--model-name"));
+    }
+
+    #[test]
+    fn slack_runs_only_with_both_tokens() {
+        let args = serve_args(&["lg", "serve"]);
+        assert!(slack_link(&args, |_| None).is_none());
+        let only = |name: &'static str| move |var: &str| (var == name).then(|| String::from("t"));
+        assert!(slack_link(&args, only(SLACK_BOT_VAR)).is_none());
+        assert!(slack_link(&args, only(SLACK_APP_VAR)).is_none());
+        assert!(slack_link(&args, |_| Some(String::from(" "))).is_none());
+        let api = slack_link(&args, |_| Some(String::from("t"))).unwrap();
+        assert!(format!("{api:?}").contains(slack::API_BASE));
+        let args = serve_args(&["lg", "serve", "--slack-api", "http://127.0.0.1:1/api"]);
+        let api = slack_link(&args, |_| Some(String::from("t"))).unwrap();
+        assert!(format!("{api:?}").contains("127.0.0.1:1"));
     }
 
     #[test]

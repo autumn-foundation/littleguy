@@ -385,7 +385,19 @@ async fn discord_buttons_decide_and_held_messages_run_after() {
         assert_eq!(fake.callbacks()[3].kind, 4);
         stop_tx.send(()).unwrap();
     };
-    let (served, ()) = tokio::join!(run(daemon, listener, Some(link), None, stop), script);
+    let (served, ()) = tokio::join!(
+        run(
+            daemon,
+            listener,
+            Links {
+                discord: Some(link),
+                ..Links::default()
+            },
+            None,
+            stop
+        ),
+        script
+    );
     served.unwrap();
     assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
     assert!(fake.sent()[2..].iter().all(|s| s.channel_id == "dm43"));
@@ -405,19 +417,15 @@ async fn a_cli_request_decided_in_discord_answers_the_approver() {
     assert_eq!(waiting, Response::Waiting { approval: 1 });
     assert_eq!(fake.sent()[0].buttons, ["lg:approve:1", "lg:deny:1"]);
 
-    let press = ButtonPress {
-        interaction_id: String::from("i-1"),
-        token: String::from("t"),
-        user_id: String::from("42"),
-        custom_id: String::from("lg:deny:1"),
-        channel_id: String::from("dm42"),
-    };
-    let (answer, record) = daemon.press(&press);
+    let approver = littleguy_core::discord_sender("42").unwrap();
+    let (answer, record) = daemon.press(&approver, "lg:deny:1");
     assert_eq!(
         answer,
         gate::PressAnswer::Update(String::from("Denied request #1."))
     );
-    daemon.resume_after_press(&record.unwrap(), &press).await;
+    daemon
+        .resume_after_press(&record.unwrap(), Service::Discord, "dm42")
+        .await;
     let last = fake.sent().pop().unwrap();
     assert_eq!(last.channel_id, "dm42");
     assert_ne!(last.content, "ran: hi");
@@ -433,4 +441,84 @@ fn the_process_backend_opens_with_the_development_policy() {
         runtime.policy().network,
         autumn_harvest::sandbox::NetworkPolicy::Deny
     );
+}
+
+/// The approval flow over Slack: the notice, a stranger's press, the
+/// approver's press, and the held message that runs after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slack_approver_decides_with_a_button() {
+    use littleguy_channels::testing::slack::{APP_TOKEN, BOT_TOKEN, FakeSlack};
+    use littleguy_core::slack_sender;
+
+    let fake = FakeSlack::start().await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("lg.sock");
+    let uid = rustix::process::getuid().as_raw();
+    let mut config = sandbox_config(None, 3600);
+    config.approvals.approver = Some(slack_sender("U42").unwrap());
+    config.slack.allowed = vec![slack_sender("U42").unwrap(), slack_sender("U43").unwrap()];
+    let backend = Arc::new(CountingBackend::default());
+    let runtime = crate::sandbox::runtime_on(
+        Arc::clone(&backend) as Arc<dyn SandboxBackend>,
+        config.sandbox.as_ref().unwrap(),
+    )
+    .unwrap();
+    let extras = Extras {
+        sandbox: Some(runtime),
+        slack: true,
+        ..Extras::default()
+    };
+    let daemon = Daemon::open_with(
+        &dir.path().join("lg.db"),
+        &config,
+        Arc::new(MemoryModel::default()),
+        uid,
+        false,
+        extras,
+    )
+    .unwrap();
+    let listener = bind(&socket).await.unwrap();
+    let links = Links {
+        slack: Some(SlackApi::new(fake.api_base.clone(), BOT_TOKEN, APP_TOKEN)),
+        ..Links::default()
+    };
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let stop = async {
+        let _ = stop_rx.await;
+    };
+    let script = async {
+        assert!(fake.wait_for(10, |f| f.connects() == 1).await);
+        // User U43 asks for code. The approver U42 gets the notice.
+        fake.push_dm("7001.000000", "DU43", "U43", "run echo hi");
+        assert!(fake.wait_for(10, |f| f.posted().len() == 2).await);
+        let posted = fake.posted();
+        let notice = posted.iter().find(|p| p.channel == "DU42").unwrap();
+        assert!(notice.text.contains("echo hi"), "{}", notice.text);
+        assert_eq!(notice.buttons, ["lg:approve:1", "lg:deny:1"]);
+        let told = posted.iter().find(|p| p.channel == "DU43").unwrap();
+        assert_eq!(told.text, crate::approvals::waiting_text(1));
+
+        // A message that arrives now waits for the decision.
+        fake.push_dm("7002.000000", "DU43", "U43", "hello");
+        // The requester is not the approver, so a press by U43 changes nothing.
+        fake.push_press("U43", "lg:approve:1", "1001.000000");
+        assert!(fake.wait_for(10, |f| f.answers().len() == 1).await);
+        assert_eq!(fake.answers()[0].kind, "ephemeral");
+        assert_eq!(backend.runs.load(Ordering::SeqCst), 0);
+        assert_eq!(fake.posted().len(), 2);
+
+        fake.push_press("U42", "lg:approve:1", "1001.000000");
+        assert!(fake.wait_for(10, |f| f.posted().len() == 4).await);
+        let answers = fake.answers();
+        assert_eq!(answers[1].kind, "update");
+        assert_eq!(answers[1].target, "1001.000000");
+        assert!(answers[1].text.contains("Approved request #1"));
+        let after: Vec<String> = fake.posted()[2..].iter().map(|p| p.text.clone()).collect();
+        assert_eq!(after, ["ran: hi", "ok: hello"]);
+        stop_tx.send(()).unwrap();
+    };
+    let (served, ()) = tokio::join!(run(daemon, listener, links, None, stop), script);
+    served.unwrap();
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
+    assert!(fake.posted()[2..].iter().all(|p| p.channel == "DU43"));
 }

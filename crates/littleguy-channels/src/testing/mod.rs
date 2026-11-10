@@ -1,4 +1,5 @@
 //! A fake Discord for tests: a REST server and a gateway on localhost.
+//! The [`slack`] module holds a fake Slack.
 //!
 //! The REST server records each message that the bot sends and serves the
 //! history that a test puts in. The gateway says hello, takes the identify,
@@ -14,6 +15,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+
+pub mod slack;
+
+pub use slack::FakeSlack;
 
 /// One message that the bot sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,14 +217,17 @@ async fn serve_rest(listener: TcpListener, fake: FakeDiscord) {
     }
 }
 
-/// Reads one request and writes one answer, then closes.
-async fn answer(mut socket: TcpStream, fake: &FakeDiscord) -> std::io::Result<()> {
+/// Reads one HTTP request: its head and its body. `None` when the peer
+/// closed first.
+pub(crate) async fn read_request(
+    socket: &mut TcpStream,
+) -> std::io::Result<Option<(String, Vec<u8>)>> {
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 4096];
     let split = loop {
         let n = socket.read(&mut chunk).await?;
         if n == 0 {
-            return Ok(());
+            return Ok(None);
         }
         bytes.extend_from_slice(&chunk[..n]);
         if let Some(at) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -243,6 +251,30 @@ async fn answer(mut socket: TcpStream, fake: &FakeDiscord) -> std::io::Result<()
         }
         body.extend_from_slice(&chunk[..n]);
     }
+    Ok(Some((head, body)))
+}
+
+/// Writes one JSON answer with `status`, then closes.
+pub(crate) async fn write_json(
+    socket: &mut TcpStream,
+    status: u16,
+    reply: &Value,
+    headers: &str,
+) -> std::io::Result<()> {
+    let text = reply.to_string();
+    let response = format!(
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{headers}connection: close\r\n\r\n{text}",
+        text.len()
+    );
+    socket.write_all(response.as_bytes()).await?;
+    socket.shutdown().await
+}
+
+/// Reads one request and writes one answer, then closes.
+async fn answer(mut socket: TcpStream, fake: &FakeDiscord) -> std::io::Result<()> {
+    let Some((head, body)) = read_request(&mut socket).await? else {
+        return Ok(());
+    };
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let line = head.lines().next().unwrap_or_default();
     let mut parts = line.split(' ');
@@ -265,13 +297,7 @@ async fn answer(mut socket: TcpStream, fake: &FakeDiscord) -> std::io::Result<()
         (401, json!({"message": "401: Unauthorized"}))
     };
     fake.touch();
-    let text = reply.to_string();
-    let response = format!(
-        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{text}",
-        text.len()
-    );
-    socket.write_all(response.as_bytes()).await?;
-    socket.shutdown().await
+    write_json(&mut socket, status, &reply, "").await
 }
 
 fn route(fake: &FakeDiscord, method: &str, target: &str, body: &Value) -> (u16, Value) {

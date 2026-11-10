@@ -16,11 +16,11 @@
 //! the engine keeps it out of the transcript and delivers nothing.
 //!
 //! Any other answer goes to [`BriefDelivery`] through the recorded
-//! `agent_deliver` activity. The delivery sends it as a Discord DM to
-//! `brief.to`, and keeps the report key in `memory.db`. The engine delivers
+//! `agent_deliver` activity. The delivery sends it as a direct message to
+//! `brief.to`, on Discord or Slack, and keeps the report key in `memory.db`. The engine delivers
 //! at least once, so the key check makes one DM per brief.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -32,9 +32,11 @@ use autumn_harvest_agent::{
     Report, ReportSource,
 };
 use chrono::{DateTime, Utc};
-use littleguy_channels::discord::DiscordRest;
-use littleguy_core::BriefConfig;
+use littleguy_channels::ChannelError;
+use littleguy_core::{BriefConfig, SenderId};
 use littleguy_stores::SqliteStores;
+
+use crate::chats::Chats;
 
 /// The prefix of the op key that arms one slot.
 pub const KEY_PREFIX: &str = "brief:";
@@ -151,38 +153,34 @@ fn interval(now: DateTime<Utc>, slot: DateTime<Utc>) -> Duration {
     Duration::from_secs(millis.div_ceil(1_000).max(MIN_CUSTOM_HEARTBEAT_SECS))
 }
 
-/// Sends each brief as a Discord DM to the owner, once.
+/// Sends each brief as a direct message to the owner, once.
 ///
 /// It ignores every report that is not a heartbeat, because the channels
 /// send those answers themselves.
 pub struct BriefDelivery {
     stores: Arc<SqliteStores>,
-    rest: Arc<OnceLock<DiscordRest>>,
-    to: Option<String>,
+    chats: Arc<Chats>,
+    to: Option<SenderId>,
 }
 
 impl std::fmt::Debug for BriefDelivery {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BriefDelivery")
-            .field("discord", &self.rest.get().is_some())
+            .field("to", &self.to)
             .finish_non_exhaustive()
     }
 }
 
 impl BriefDelivery {
-    /// A delivery to `config.to`. The REST client arrives later in `rest`,
-    /// when the Discord channel starts.
+    /// A delivery to `config.to`. The chat client arrives later in
+    /// `chats`, when its channel starts.
     #[must_use]
-    pub fn new(
-        config: &BriefConfig,
-        stores: Arc<SqliteStores>,
-        rest: Arc<OnceLock<DiscordRest>>,
-    ) -> Self {
-        let to = config
-            .to
-            .as_ref()
-            .and_then(|sender| sender.as_str().strip_prefix("discord:").map(str::to_owned));
-        Self { stores, rest, to }
+    pub fn new(config: &BriefConfig, stores: Arc<SqliteStores>, chats: Arc<Chats>) -> Self {
+        Self {
+            stores,
+            chats,
+            to: config.to.clone(),
+        }
     }
 
     async fn send(&self, report: &Report) -> Result<(), AgentError> {
@@ -195,20 +193,14 @@ impl BriefDelivery {
             "a morning brief is ready"
         );
         tracing::debug!(text = %report.text, "the morning brief");
-        match (&self.to, self.rest.get()) {
-            (Some(user), Some(rest)) => {
-                let channel = rest
-                    .open_dm(user)
-                    .await
-                    .map_err(|error| transport(&error))?;
-                rest.send(&channel, &report.text)
-                    .await
-                    .map_err(|error| transport(&error))?;
+        if let Some(user) = &self.to {
+            match self.chats.dm(user, &report.text, &[]).await {
+                Ok(()) => {}
+                Err(ChannelError::Off(service)) => {
+                    tracing::warn!(%service, "the brief names a user of a service that is off");
+                }
+                Err(error) => return Err(transport(&error)),
             }
-            (Some(_), None) => {
-                tracing::warn!("the brief names a Discord user, but Discord is off");
-            }
-            (None, _) => {}
         }
         self.stores.mark_sent(&key)
     }
@@ -225,11 +217,11 @@ impl Delivery for BriefDelivery {
     }
 }
 
-/// A failed Discord call can pass, so the engine retries it.
-fn transport(error: &littleguy_channels::discord::ChannelError) -> AgentError {
+/// A failed chat call can pass, so the engine retries it.
+fn transport(error: &ChannelError) -> AgentError {
     AgentError::new(
         ErrorKind::Transport,
-        format!("the brief did not reach Discord: {error}"),
+        format!("the brief did not reach its chat: {error}"),
     )
 }
 

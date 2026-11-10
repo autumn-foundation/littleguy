@@ -20,8 +20,10 @@ use std::time::Duration;
 
 use autumn_plugin_discord::gateway::{EventHandler, GATEWAY_URL, GatewayClient};
 use serde_json::{Value, json};
-use thiserror::Error;
 use tokio::sync::mpsc;
+
+use crate::chat::{BACKOFF, http_client, next_backoff};
+pub use crate::chat::{Button, ButtonStyle, ChannelError, DmMessage, split_message};
 
 /// The REST API base of Discord.
 pub const API_BASE: &str = "https://discord.com/api/v10";
@@ -41,41 +43,6 @@ pub const HISTORY_PAGE: usize = 100;
 
 /// The longest wait that a rate limit may ask for before the one retry.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(10);
-
-/// The first and the longest pause between two gateway connects.
-const BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
-
-/// Why a Discord call failed.
-#[derive(Debug, Error)]
-pub enum ChannelError {
-    /// The request did not reach Discord, or the answer was lost.
-    #[error("discord request failed: {0}")]
-    Transport(String),
-    /// Discord answered with an error status.
-    #[error("discord answered HTTP {status}: {body}")]
-    Http {
-        /// The HTTP status.
-        status: u16,
-        /// The start of the body.
-        body: String,
-    },
-    /// The answer is not what the API documents.
-    #[error("discord sent an answer that does not parse: {0}")]
-    Decode(String),
-}
-
-/// One direct message to the bot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DmMessage {
-    /// The message snowflake.
-    pub id: String,
-    /// The DM channel snowflake. A reply goes here.
-    pub channel_id: String,
-    /// The author's user snowflake.
-    pub author_id: String,
-    /// The text.
-    pub content: String,
-}
 
 /// One press of a message button.
 #[derive(Clone, PartialEq, Eq)]
@@ -128,34 +95,13 @@ pub fn parse_press(data: &Value) -> Option<ButtonPress> {
     })
 }
 
-/// The look of a button.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ButtonStyle {
-    /// Green.
-    Success,
-    /// Red.
-    Danger,
-}
-
-/// One button of a message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Button {
-    /// The id that a press carries back. At most 100 characters.
-    pub custom_id: String,
-    /// The label.
-    pub label: String,
-    /// The look.
-    pub style: ButtonStyle,
-}
-
-impl Button {
-    fn to_json(&self) -> Value {
-        let style = match self.style {
-            ButtonStyle::Success => 3,
-            ButtonStyle::Danger => 4,
-        };
-        json!({"type": 2, "style": style, "label": self.label, "custom_id": self.custom_id})
-    }
+/// The Discord component of `button`.
+fn button_json(button: &Button) -> Value {
+    let style = match button.style {
+        ButtonStyle::Success => 3,
+        ButtonStyle::Danger => 4,
+    };
+    json!({"type": 2, "style": style, "label": button.label, "custom_id": button.custom_id})
 }
 
 /// One event of the gateway that the daemon acts on.
@@ -205,35 +151,6 @@ pub fn is_after(a: &str, b: &str) -> bool {
     }
 }
 
-/// Splits `text` into messages of at most `max` characters.
-///
-/// A cut falls at the last line break of a piece when it has one, so code
-/// blocks and lists stay readable. A piece with no line break is cut at the
-/// limit.
-#[must_use]
-pub fn split_message(text: &str, max: usize) -> Vec<String> {
-    let max = max.max(1);
-    let mut pieces = Vec::new();
-    let mut rest = text;
-    while rest.chars().count() > max {
-        let limit = rest
-            .char_indices()
-            .nth(max)
-            .map_or(rest.len(), |(at, _)| at);
-        let head = &rest[..limit];
-        let cut = head
-            .rfind('\n')
-            .filter(|at| *at > 0)
-            .map_or(limit, |at| at + 1);
-        pieces.push(rest[..cut].trim_end_matches('\n').to_owned());
-        rest = &rest[cut..];
-    }
-    if !rest.is_empty() || pieces.is_empty() {
-        pieces.push(rest.to_owned());
-    }
-    pieces
-}
-
 /// The REST calls that littleguy makes.
 #[derive(Clone)]
 pub struct DiscordRest {
@@ -256,16 +173,10 @@ impl DiscordRest {
     /// A client for the bot `token` against `base`, such as [`API_BASE`].
     #[must_use]
     pub fn new(base: impl Into<String>, token: impl Into<String>) -> Self {
-        // Reqwest panics without a provider. An `Err` means that one is installed.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_default();
         Self {
             base: base.into().trim_end_matches('/').to_owned(),
             token: token.into(),
-            client,
+            client: http_client(),
         }
     }
 
@@ -302,7 +213,7 @@ impl DiscordRest {
         for (index, piece) in pieces.into_iter().enumerate() {
             let mut body = json!({"content": piece, "allowed_mentions": {"parse": []}});
             if index == last && !buttons.is_empty() {
-                let row: Vec<Value> = buttons.iter().map(Button::to_json).collect();
+                let row: Vec<Value> = buttons.iter().map(button_json).collect();
                 body["components"] = json!([{"type": 1, "components": row}]);
             }
             self.call(reqwest::Method::POST, &path, Some(&body)).await?;
@@ -489,11 +400,6 @@ impl EventHandler for Forward {
             let _ = self.0.send(event);
         }
     }
-}
-
-/// The next pause of the supervisor.
-fn next_backoff(current: Duration) -> Duration {
-    (current * 2).min(BACKOFF.1)
 }
 
 /// Runs the gateway at `url` until `events` closes, and connects again after
@@ -684,13 +590,13 @@ mod tests {
             label: String::from("Approve"),
             style: ButtonStyle::Success,
         };
-        assert_eq!(approve.to_json()["style"], 3);
-        assert_eq!(approve.to_json()["type"], 2);
+        assert_eq!(button_json(&approve)["style"], 3);
+        assert_eq!(button_json(&approve)["type"], 2);
         let deny = Button {
             style: ButtonStyle::Danger,
             ..approve
         };
-        assert_eq!(deny.to_json()["style"], 4);
+        assert_eq!(button_json(&deny)["style"], 4);
     }
 
     #[test]

@@ -4,34 +4,38 @@
 //! lock file next to the database, so a second daemon fails to open it. The
 //! kernel drops the lock when the holder dies, so a crash strands nothing.
 //!
-//! One task owns the runtime. The socket and the Discord channel hand each
-//! message to it over a channel, so ops run one at a time, in arrival order.
+//! One task owns the runtime. The socket and the chat channels, Discord and
+//! Slack, hand each message to it over a channel, so ops run one at a time,
+//! in arrival order.
 //! A tick drives the assistant once a second, so a durable timer fires
 //! without a message.
 //!
-//! A Discord reply goes out once. The message id is the idempotency key of
+//! A chat reply goes out once. The message id is the idempotency key of
 //! its op, so a message that arrives twice runs once. The pairing store
 //! keeps the last message whose reply went out. After a reconnect, the
 //! daemon reads the history after that cursor, so a message sent while it
 //! was down still gets its answer.
 //!
 //! A `run_code` call waits for a person ([`crate::approvals`]). While it
-//! waits, the daemon takes no new op. It holds each new Discord message and
+//! waits, the daemon takes no new op. It holds each new chat message and
 //! runs it after the decision. `lg chat` gets a busy answer instead.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use autumn_harvest_agent::{AgentHarness, AgentId, AgentModel, AgentOp, AgentProfile, sqlite};
 use autumn_harvest_sqlite::SqliteRuntime;
 use chrono::{DateTime, Utc};
-use littleguy_channels::discord::{ButtonPress, DiscordRest, DmMessage, GatewayEvent, run_gateway};
+use littleguy_channels::discord::{ButtonPress, DiscordRest, GatewayEvent, run_gateway};
+use littleguy_channels::slack::{SlackEvent, SlackPress, run_socket};
+use littleguy_channels::{ChannelError, DmMessage, Service, SlackApi};
 use littleguy_core::{
     ASSISTANT_KIND, ChannelId, ChannelRule, Config, Inbound, MessageId, PairingCode, Pending,
     PendingPairings, Route, Routing, SenderId, discord_sender, pairing::PAIRING_TTL_SECS, route,
+    slack_sender,
 };
 use littleguy_stores::SqliteStores;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -41,6 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::approvals::Requester;
 use crate::brief::{BriefDelivery, Calendar};
 use crate::camel::Camel;
+use crate::chats::Chats;
 use crate::oauth::Connections;
 use crate::pairs::{Entry, PairStore};
 use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response};
@@ -48,11 +53,41 @@ use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response};
 /// The channel id of the local socket.
 pub const CLI_CHANNEL: &str = "cli";
 
-/// The channel id of Discord.
-pub const DISCORD_CHANNEL: &str = "discord";
+/// The sender id of `user` on `service`.
+///
+/// # Errors
+///
+/// Returns an error when `user` is not a user id of the service.
+pub fn chat_sender(service: Service, user: &str) -> Result<SenderId> {
+    Ok(match service {
+        Service::Discord => discord_sender(user)?,
+        Service::Slack => slack_sender(user)?,
+    })
+}
 
-/// The prefix of the message id of a Discord message.
-const DISCORD_MESSAGE_PREFIX: &str = "discord:";
+/// The message id of one chat message, the idempotency key of its op. A
+/// Discord snowflake is unique on its own. A Slack `ts` is unique in its
+/// channel only, so the channel goes in the key.
+///
+/// # Errors
+///
+/// Returns an error when the key is not a valid message id.
+pub fn chat_message_id(service: Service, message: &DmMessage) -> Result<MessageId> {
+    let key = match service {
+        Service::Discord => format!("{service}:{}", message.id),
+        Service::Slack => format!("{service}:{}:{}", message.channel_id, message.id),
+    };
+    Ok(MessageId::new(key)?)
+}
+
+/// The delivery cursor in a chat message id: the part after its last `:`.
+fn cursor_of(message_id: &MessageId) -> String {
+    message_id
+        .as_str()
+        .rsplit_once(':')
+        .map(|(_, cursor)| cursor.to_owned())
+        .unwrap_or_default()
+}
 
 /// How often the daemon drives the assistant without a message.
 pub const TICK: Duration = Duration::from_secs(1);
@@ -69,9 +104,9 @@ pub fn cli_sender(uid: u32) -> Result<SenderId> {
 /// The routing table of a daemon run by `owner_uid`.
 ///
 /// The user who runs the daemon is the one allowed sender on the local
-/// socket, which offers no pairing. With `discord`, the Discord channel
-/// allows the senders of the config file and of the pairing store. Each
-/// camel route of the config is an allowed sender of the camel channel.
+/// socket, which offers no pairing. Each chat service in `chats` allows the
+/// senders of the config file and of the pairing store. Each camel route of
+/// the config is an allowed sender of the camel channel.
 ///
 /// # Errors
 ///
@@ -80,7 +115,7 @@ pub fn routing(
     config: &Config,
     owner_uid: u32,
     store: &PairStore,
-    discord: bool,
+    chats: &[Service],
 ) -> Result<Routing> {
     let cli = ChannelRule {
         enabled: true,
@@ -90,22 +125,17 @@ pub fn routing(
     let mut table = Routing::new(&config.owner)
         .with_context(|| format!("`{}` is not a valid agent name", config.owner))?
         .channel(ChannelId::new(CLI_CHANNEL)?, cli);
-    if discord {
-        let channel = ChannelId::new(DISCORD_CHANNEL)?;
+    for service in chats {
+        let channel = ChannelId::new(service.name())?;
+        let settings = chat_config(config, *service);
         let paired = store
             .entries()
             .filter(|e| e.paired && e.channel == channel)
             .map(|e| e.sender.clone());
         let rule = ChannelRule {
             enabled: true,
-            pairing: config.discord.pairing,
-            allowed: config
-                .discord
-                .allowed
-                .iter()
-                .cloned()
-                .chain(paired)
-                .collect(),
+            pairing: settings.pairing,
+            allowed: settings.allowed.iter().cloned().chain(paired).collect(),
         };
         table = table.channel(channel, rule);
     }
@@ -118,6 +148,14 @@ pub fn routing(
         table = table.channel(ChannelId::new(crate::camel::CAMEL_CHANNEL)?, rule);
     }
     Ok(table)
+}
+
+/// The config section of `service`.
+const fn chat_config(config: &Config, service: Service) -> &littleguy_core::ChatConfig {
+    match service {
+        Service::Discord => &config.discord,
+        Service::Slack => &config.slack,
+    }
 }
 
 /// The harness of the assistant. With `memory`, the assistant keeps notes
@@ -190,7 +228,7 @@ pub fn pairing_text(code: Option<&str>) -> String {
     )
 }
 
-/// One reply for the Discord channel to send.
+/// One reply for a chat channel to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outgoing {
     /// The DM channel.
@@ -222,6 +260,8 @@ pub struct Extras {
     pub mcp: Vec<Arc<dyn autumn_harvest_agent::Tool>>,
     /// The Google API of the owner, for the `[google]` tools.
     pub google: Option<Arc<dyn littleguy_tools::google::GoogleApi>>,
+    /// The Slack channel takes messages.
+    pub slack: bool,
 }
 
 /// The daemon state: the runtime, the routing table and the pairings.
@@ -234,16 +274,16 @@ pub struct Daemon {
     store: PairStore,
     connections: Option<Connections>,
     brief: Option<Calendar>,
-    rest: Arc<OnceLock<DiscordRest>>,
+    chats: Arc<Chats>,
     clock: Clock,
     /// The store of the calls that wait, when a call can wait.
     approvals: Option<Arc<SqliteStores>>,
-    /// The Discord user id of the approver.
-    approver: Option<String>,
+    /// The chat user who decides, such as `slack:U1`.
+    approver: Option<SenderId>,
     /// The request that the assistant waits on.
     waiting: Option<i64>,
-    /// The Discord messages that arrived while a request waited.
-    held: VecDeque<DmMessage>,
+    /// The chat messages that arrived while a request waited.
+    held: VecDeque<(Service, DmMessage)>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
@@ -260,7 +300,7 @@ impl std::fmt::Debug for Daemon {
 
 impl Daemon {
     /// Opens the database at `db` and registers the assistant. With
-    /// `discord`, the Discord channel takes messages. It starts no MCP
+    /// `discord`, the Discord channel takes messages. Slack stays off. It starts no MCP
     /// server. A test seam: `lg serve` calls [`Self::open_with`].
     ///
     /// # Errors
@@ -288,8 +328,9 @@ impl Daemon {
         Self::open_with(db, config, model, owner_uid, discord, extras)
     }
 
-    /// [`Self::open`] with `extras`: the sandbox runtime and the MCP tools.
-    /// The sandbox runtime counts only with a `[sandbox]` section.
+    /// [`Self::open`] with `extras`: the sandbox runtime, the MCP tools, the
+    /// Google API and Slack. The sandbox runtime counts only with a
+    /// `[sandbox]` section.
     ///
     /// # Errors
     ///
@@ -331,7 +372,11 @@ impl Daemon {
         } else {
             None
         };
-        let rest = Arc::new(OnceLock::new());
+        let chats = Arc::new(Chats::default());
+        let services: Vec<Service> = [(Service::Discord, discord), (Service::Slack, extras.slack)]
+            .into_iter()
+            .filter_map(|(service, on)| on.then_some(service))
+            .collect();
         let delivery = config
             .brief
             .as_ref()
@@ -340,7 +385,7 @@ impl Daemon {
                 Arc::new(BriefDelivery::new(
                     settings,
                     Arc::clone(stores),
-                    Arc::clone(&rest),
+                    Arc::clone(&chats),
                 ))
             });
         let approvals = stores.clone().filter(|_| asks);
@@ -351,15 +396,14 @@ impl Daemon {
             sandbox: runtime,
             google: google_on,
         });
-        let approver = config
-            .approvals
-            .approver
+        let approver = config.approvals.approver.clone();
+        let approver_on = approver
             .as_ref()
-            .and_then(|sender| sender.as_str().strip_prefix("discord:"))
-            .map(str::to_owned);
-        if approver.is_some() && !discord {
+            .and_then(|sender| Service::split_sender(sender.as_str()))
+            .is_some_and(|(service, _)| services.contains(&service));
+        if approver.is_some() && !approver_on {
             tracing::warn!(
-                "approvals.approver is set, but Discord is off: decide with `lg approve`"
+                "approvals.approver is set, but its chat is off: decide with `lg approve`"
             );
         }
         let memory = stores
@@ -378,15 +422,21 @@ impl Daemon {
             None => None,
         };
         Ok(Self {
-            routing: routing(config, owner_uid, &store, discord)?,
+            routing: routing(config, owner_uid, &store, &services)?,
             rt,
             owner_uid,
-            config_allowed: config.discord.allowed.iter().cloned().collect(),
+            config_allowed: config
+                .discord
+                .allowed
+                .iter()
+                .chain(&config.slack.allowed)
+                .cloned()
+                .collect(),
             pending: PendingPairings::default(),
             store,
             connections: None,
             brief,
-            rest,
+            chats,
             clock: Arc::new(Utc::now),
             approvals,
             approver,
@@ -405,10 +455,14 @@ impl Daemon {
         self
     }
 
-    /// Gives the brief its Discord client. The first client stays.
+    /// Gives the chats their Discord client. The first client stays.
     pub fn discord_rest(&self, rest: DiscordRest) {
-        // A second call keeps the first client, which is the same bot.
-        let _ = self.rest.set(rest);
+        self.chats.set_discord(rest);
+    }
+
+    /// Gives the chats their Slack client. The first client stays.
+    pub fn slack_api(&self, api: SlackApi) {
+        self.chats.set_slack(api);
     }
 
     /// Keeps OAuth connections with `connections`.
@@ -553,11 +607,10 @@ impl Daemon {
             });
         }
         let run = sqlite::drive(&mut self.rt, &id).await?;
-        let requester = if inbound.channel.as_str() == DISCORD_CHANNEL {
-            Requester::Discord(reply_to.to_owned())
-        } else {
-            Requester::Cli
-        };
+        let requester = Service::from_name(inbound.channel.as_str())
+            .map_or(Requester::Cli, |service| {
+                Requester::Chat(service, reply_to.to_owned())
+            });
         if let Some(approval) = self.settle(run.as_ref(), Some(&requester)).await? {
             return Ok(Response::Waiting { approval });
         }
@@ -581,30 +634,47 @@ impl Daemon {
         ))
     }
 
-    /// Handles one Discord direct message. Returns the reply to send, if
-    /// any. A message whose reply went out already gets none.
+    /// Handles one Discord direct message, as [`Self::chat`] does.
     ///
     /// # Errors
     ///
-    /// Returns an error when the author id is not a snowflake, or the
-    /// runtime fails.
+    /// As [`Self::chat`].
+    #[cfg(test)]
     pub async fn discord(&mut self, message: &DmMessage) -> Result<Option<Outgoing>> {
-        let channel = ChannelId::new(DISCORD_CHANNEL)?;
-        let sender = discord_sender(&message.author_id)?;
+        self.chat(Service::Discord, message).await
+    }
+
+    /// Handles one direct message on `service`. Returns the reply to send,
+    /// if any. A message whose reply went out already gets none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the author id is not a user id of the service,
+    /// or the runtime fails.
+    pub async fn chat(
+        &mut self,
+        service: Service,
+        message: &DmMessage,
+    ) -> Result<Option<Outgoing>> {
+        let channel = ChannelId::new(service.name())?;
+        let sender = chat_sender(service, &message.author_id)?;
         if self.store.is_delivered(&channel, &sender, &message.id) {
             return Ok(None);
         }
         // A request waits, so the message runs after the decision.
         if self.waiting.is_some() {
-            if !self.held.iter().any(|held| held.id == message.id) {
-                self.held.push_back(message.clone());
+            let known = self.held.iter().any(|(held, m)| {
+                *held == service && m.id == message.id && m.channel_id == message.channel_id
+            });
+            if !known {
+                self.held.push_back((service, message.clone()));
             }
             return Ok(None);
         }
         let inbound = Inbound {
             channel,
             sender: sender.clone(),
-            message_id: MessageId::new(format!("{DISCORD_MESSAGE_PREFIX}{}", message.id))?,
+            message_id: chat_message_id(service, message)?,
             text: message.content.clone(),
         };
         let response = self.handle(&inbound, &message.channel_id).await?;
@@ -628,20 +698,25 @@ impl Daemon {
         }))
     }
 
-    /// Records that the reply to `message_id` went out.
+    /// Records that the reply to `message_id` went out. The service is the
+    /// one that `sender` names.
     ///
     /// # Errors
     ///
-    /// Returns an error when the pairing store does not save.
+    /// Returns an error when `sender` names no chat service, or the pairing
+    /// store does not save.
     pub fn delivered(&mut self, sender: &SenderId, reply_to: &str, message_id: &str) -> Result<()> {
-        let channel = ChannelId::new(DISCORD_CHANNEL)?;
+        let (service, _) = Service::split_sender(sender.as_str())
+            .with_context(|| format!("`{sender}` is not a chat user"))?;
+        let channel = ChannelId::new(service.name())?;
         self.store.delivered(&channel, sender, reply_to, message_id)
     }
 
-    /// The cursor of each allowed Discord sender with a known DM channel.
+    /// The cursor of each allowed sender of `service` with a known DM
+    /// channel.
     #[must_use]
-    pub fn cursors(&self) -> Vec<Cursor> {
-        let Ok(channel) = ChannelId::new(DISCORD_CHANNEL) else {
+    pub fn cursors(&self, service: Service) -> Vec<Cursor> {
+        let Ok(channel) = ChannelId::new(service.name()) else {
             return Vec::new();
         };
         let allowed: BTreeSet<&SenderId> = self.routing.allowed(&channel).collect();
@@ -671,12 +746,7 @@ impl Daemon {
         if !self.routing.allow(&pending.channel, pending.sender.clone()) {
             bail!("the channel {} takes no senders", pending.channel);
         }
-        let delivered = pending
-            .message_id
-            .as_str()
-            .strip_prefix(DISCORD_MESSAGE_PREFIX)
-            .unwrap_or_default()
-            .to_owned();
+        let delivered = cursor_of(&pending.message_id);
         self.store.put(Entry {
             channel: pending.channel,
             sender: pending.sender.clone(),
@@ -693,7 +763,8 @@ impl Daemon {
     /// The allowed senders of every channel.
     fn pairs(&self) -> Response {
         let mut entries = Vec::new();
-        for channel in [CLI_CHANNEL, DISCORD_CHANNEL] {
+        let channels = std::iter::once(CLI_CHANNEL).chain(Service::ALL.map(Service::name));
+        for channel in channels {
             let Ok(id) = ChannelId::new(channel) else {
                 continue;
             };
@@ -715,13 +786,16 @@ impl Daemon {
         Response::Pairs { entries }
     }
 
-    /// Takes a paired Discord sender off the channel. A sender that the
-    /// config file allows stays allowed.
+    /// Takes a paired chat sender off its channel. A sender that the config
+    /// file allows stays allowed.
     fn unpair(&mut self, sender: &str) -> Result<Response> {
         let Ok(sender) = SenderId::new(sender) else {
             return Ok(Response::Unpaired { removed: false });
         };
-        let channel = ChannelId::new(DISCORD_CHANNEL)?;
+        let Some((service, _)) = Service::split_sender(sender.as_str()) else {
+            return Ok(Response::Unpaired { removed: false });
+        };
+        let channel = ChannelId::new(service.name())?;
         let removed = self.store.unpair(&channel, &sender)?;
         if removed && !self.config_allowed.contains(&sender) {
             self.routing.revoke(&channel, &sender);
@@ -859,24 +933,37 @@ enum Job {
         request: Request,
         reply: oneshot::Sender<Response>,
     },
-    /// A Discord direct message.
-    Discord {
+    /// A direct message on a chat service.
+    Chat {
+        service: Service,
         message: DmMessage,
         reply: oneshot::Sender<Option<Outgoing>>,
     },
-    /// A Discord reply went out.
+    /// A chat reply went out.
     Delivered {
         sender: SenderId,
         reply_to: String,
         message_id: String,
     },
-    /// The cursors to read the missed history from.
-    Cursors { reply: oneshot::Sender<Vec<Cursor>> },
+    /// The cursors of `service` to read the missed history from.
+    Cursors {
+        service: Service,
+        reply: oneshot::Sender<Vec<Cursor>>,
+    },
     /// A press of an approval button.
     Press {
-        press: ButtonPress,
+        press: Press,
         reply: oneshot::Sender<gate::PressAnswer>,
     },
+}
+
+/// One button press, as each chat service gives it.
+#[derive(Debug, Clone)]
+struct Press {
+    service: Service,
+    user_id: String,
+    custom_id: String,
+    channel_id: String,
 }
 
 /// What the daemon needs to run the Discord channel. Its `Debug` form
@@ -900,6 +987,15 @@ impl std::fmt::Debug for DiscordLink {
     }
 }
 
+/// The chat channels that [`run`] starts.
+#[derive(Debug, Clone, Default)]
+pub struct Links {
+    /// Discord, when it is on.
+    pub discord: Option<DiscordLink>,
+    /// Slack, when it is on. The client holds both tokens.
+    pub slack: Option<SlackApi>,
+}
+
 /// Runs one job on the runtime.
 async fn run_job(daemon: &mut Daemon, job: Job) {
     match job {
@@ -913,9 +1009,13 @@ async fn run_job(daemon: &mut Daemon, job: Job) {
             let _ = reply.send(response);
             daemon.release_held().await;
         }
-        Job::Discord { message, reply } => {
-            let outgoing = daemon.discord(&message).await.unwrap_or_else(|error| {
-                tracing::error!(error = %format!("{error:#}"), "a discord message failed");
+        Job::Chat {
+            service,
+            message,
+            reply,
+        } => {
+            let outgoing = daemon.chat(service, &message).await.unwrap_or_else(|error| {
+                tracing::error!(error = %format!("{error:#}"), %service, "a chat message failed");
                 None
             });
             let _ = reply.send(outgoing);
@@ -929,15 +1029,25 @@ async fn run_job(daemon: &mut Daemon, job: Job) {
                 tracing::error!(error = %format!("{error:#}"), "the delivery cursor did not save");
             }
         }
-        Job::Cursors { reply } => {
-            let _ = reply.send(daemon.cursors());
+        Job::Cursors { service, reply } => {
+            let _ = reply.send(daemon.cursors(service));
         }
         Job::Press { press, reply } => {
-            // The answer goes first: Discord waits three seconds for it.
-            let (answer, decided) = daemon.press(&press);
+            // The answer goes first: the chat waits three seconds for it.
+            let (answer, decided) = match chat_sender(press.service, &press.user_id) {
+                Ok(user) => daemon.press(&user, &press.custom_id),
+                Err(_) => (
+                    gate::PressAnswer::Private(String::from(
+                        "Only the approver can decide this request.",
+                    )),
+                    None,
+                ),
+            };
             let _ = reply.send(answer);
             if let Some(record) = decided {
-                daemon.resume_after_press(&record, &press).await;
+                daemon
+                    .resume_after_press(&record, press.service, &press.channel_id)
+                    .await;
             }
             daemon.release_held().await;
         }
@@ -952,7 +1062,7 @@ async fn run_job(daemon: &mut Daemon, job: Job) {
 pub async fn run(
     mut daemon: Daemon,
     listener: UnixListener,
-    discord: Option<DiscordLink>,
+    links: Links,
     camel: Option<Camel>,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
@@ -960,7 +1070,7 @@ pub async fn run(
     // Without camel routes, the sender drops at once and the arm sleeps.
     let (camel_tx, mut camel_rx) = mpsc::channel::<crate::camel::Apply>(4);
     let mut tasks = vec![tokio::spawn(accept_loop(listener, tx.clone()))];
-    if let Some(link) = discord {
+    if let Some(link) = links.discord {
         daemon.discord_rest(link.rest.clone());
         let (events_tx, events) = mpsc::unbounded_channel();
         tasks.push(tokio::spawn(run_gateway(
@@ -968,7 +1078,20 @@ pub async fn run(
             link.gateway_url.clone(),
             events_tx,
         )));
-        tasks.push(tokio::spawn(discord_loop(link.rest, events, tx.clone())));
+        let chats = Arc::clone(&daemon.chats);
+        tasks.push(tokio::spawn(discord_loop(
+            link.rest,
+            chats,
+            events,
+            tx.clone(),
+        )));
+    }
+    if let Some(api) = links.slack {
+        daemon.slack_api(api.clone());
+        let (events_tx, events) = mpsc::unbounded_channel();
+        tasks.push(tokio::spawn(run_socket(api.clone(), events_tx)));
+        let chats = Arc::clone(&daemon.chats);
+        tasks.push(tokio::spawn(slack_loop(api, chats, events, tx.clone())));
     }
     if let Some(camel) = &camel {
         tasks.push(tokio::spawn(crate::camel::pump(camel.inbound(), camel_tx)));
@@ -1007,26 +1130,65 @@ pub async fn run(
     Ok(())
 }
 
+/// Asks the daemon for the cursors of `service`.
+async fn cursors(jobs: &mpsc::Sender<Job>, service: Service) -> Option<Vec<Cursor>> {
+    let (reply, cursors) = oneshot::channel();
+    jobs.send(Job::Cursors { service, reply }).await.ok()?;
+    Some(cursors.await.unwrap_or_default())
+}
+
 /// Turns gateway events into jobs, and sends each reply.
 async fn discord_loop(
     rest: DiscordRest,
+    chats: Arc<Chats>,
     mut events: mpsc::UnboundedReceiver<GatewayEvent>,
     jobs: mpsc::Sender<Job>,
 ) {
+    let service = Service::Discord;
     while let Some(event) = events.recv().await {
         match event {
-            GatewayEvent::Message(message) => deliver(&rest, &jobs, message).await,
-            GatewayEvent::Press(press) => answer_press(&rest, &jobs, press).await,
+            GatewayEvent::Message(message) => deliver(&chats, &jobs, service, message).await,
+            GatewayEvent::Press(press) => answer_discord_press(&rest, &jobs, press).await,
             GatewayEvent::Ready => {
-                let (reply, cursors) = oneshot::channel();
-                if jobs.send(Job::Cursors { reply }).await.is_err() {
+                let Some(cursors) = cursors(&jobs, service).await else {
                     return;
-                }
-                for cursor in cursors.await.unwrap_or_default() {
+                };
+                for cursor in cursors {
                     match rest.messages_after(&cursor.channel_id, &cursor.after).await {
                         Ok(missed) => {
                             for message in missed {
-                                deliver(&rest, &jobs, message).await;
+                                deliver(&chats, &jobs, service, message).await;
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "reading missed messages failed"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Turns Socket Mode events into jobs, and sends each reply.
+async fn slack_loop(
+    api: SlackApi,
+    chats: Arc<Chats>,
+    mut events: mpsc::UnboundedReceiver<SlackEvent>,
+    jobs: mpsc::Sender<Job>,
+) {
+    let service = Service::Slack;
+    while let Some(event) = events.recv().await {
+        match event {
+            SlackEvent::Message(message) => deliver(&chats, &jobs, service, message).await,
+            SlackEvent::Press(press) => answer_slack_press(&api, &jobs, press).await,
+            SlackEvent::Ready => {
+                let Some(cursors) = cursors(&jobs, service).await else {
+                    return;
+                };
+                for cursor in cursors {
+                    match api.messages_after(&cursor.channel_id, &cursor.after).await {
+                        Ok(missed) => {
+                            for message in missed {
+                                deliver(&chats, &jobs, service, message).await;
                             }
                         }
                         Err(error) => tracing::warn!(%error, "reading missed messages failed"),
@@ -1039,16 +1201,24 @@ async fn discord_loop(
 
 /// Runs one message and sends its reply. A failed send moves no cursor, so
 /// the history read after the next reconnect tries it again.
-async fn deliver(rest: &DiscordRest, jobs: &mpsc::Sender<Job>, message: DmMessage) {
+async fn deliver(chats: &Chats, jobs: &mpsc::Sender<Job>, service: Service, message: DmMessage) {
     let (reply, answer) = oneshot::channel();
-    if jobs.send(Job::Discord { message, reply }).await.is_err() {
+    let job = Job::Chat {
+        service,
+        message,
+        reply,
+    };
+    if jobs.send(job).await.is_err() {
         return;
     }
     let Ok(Some(outgoing)) = answer.await else {
         return;
     };
-    if let Err(error) = rest.send(&outgoing.channel_id, &outgoing.text).await {
-        tracing::warn!(%error, "a discord reply did not go out");
+    if let Err(error) = chats
+        .send(service, &outgoing.channel_id, &outgoing.text)
+        .await
+    {
+        tracing::warn!(%error, %service, "a chat reply did not go out");
         return;
     }
     if let Some(sender) = outgoing.track {
@@ -1062,20 +1232,44 @@ async fn deliver(rest: &DiscordRest, jobs: &mpsc::Sender<Job>, message: DmMessag
     }
 }
 
-/// Hands one button press to the daemon, and sends its answer.
-async fn answer_press(rest: &DiscordRest, jobs: &mpsc::Sender<Job>, press: ButtonPress) {
+/// Hands one press to the daemon, and returns its answer.
+async fn decide_press(jobs: &mpsc::Sender<Job>, press: Press) -> Option<gate::PressAnswer> {
     let (reply, answer) = oneshot::channel();
-    let job = Job::Press {
-        press: press.clone(),
-        reply,
+    jobs.send(Job::Press { press, reply }).await.ok()?;
+    answer.await.ok()
+}
+
+/// Hands one Discord button press to the daemon, and sends its answer.
+async fn answer_discord_press(rest: &DiscordRest, jobs: &mpsc::Sender<Job>, press: ButtonPress) {
+    let job = Press {
+        service: Service::Discord,
+        user_id: press.user_id.clone(),
+        custom_id: press.custom_id.clone(),
+        channel_id: press.channel_id.clone(),
     };
-    if jobs.send(job).await.is_err() {
-        return;
+    let result = match decide_press(jobs, job).await {
+        Some(gate::PressAnswer::Update(text)) => rest.update_pressed(&press, &text).await,
+        Some(gate::PressAnswer::Private(text)) => rest.answer_privately(&press, &text).await,
+        None => return,
+    };
+    if let Err(error) = result {
+        tracing::warn!(%error, "the answer to a button press did not go out");
     }
-    let result = match answer.await {
-        Ok(gate::PressAnswer::Update(text)) => rest.update_pressed(&press, &text).await,
-        Ok(gate::PressAnswer::Private(text)) => rest.answer_privately(&press, &text).await,
-        Err(_) => return,
+}
+
+/// Hands one Slack button press to the daemon, and sends its answer. The
+/// socket acknowledged the press already, so this answer has no deadline.
+async fn answer_slack_press(api: &SlackApi, jobs: &mpsc::Sender<Job>, press: SlackPress) {
+    let job = Press {
+        service: Service::Slack,
+        user_id: press.user_id.clone(),
+        custom_id: press.custom_id.clone(),
+        channel_id: press.channel_id.clone(),
+    };
+    let result: Result<(), ChannelError> = match decide_press(jobs, job).await {
+        Some(gate::PressAnswer::Update(text)) => api.update_pressed(&press, &text).await,
+        Some(gate::PressAnswer::Private(text)) => api.answer_privately(&press, &text).await,
+        None => return,
     };
     if let Err(error) = result {
         tracing::warn!(%error, "the answer to a button press did not go out");
@@ -1293,7 +1487,7 @@ mod tests {
             (reply, bad_json, too_long)
         };
         let (served, (reply, bad_json, too_long)) =
-            tokio::join!(run(daemon, listener, None, None, stop), client);
+            tokio::join!(run(daemon, listener, Links::default(), None, stop), client);
         served.unwrap();
         assert_eq!(
             reply,
@@ -1530,7 +1724,7 @@ mod tests {
         let model = Arc::new(OfflineModel::new());
         let mut daemon = discord_open(&db, &config(), Arc::clone(&model));
         assert_eq!(
-            daemon.cursors(),
+            daemon.cursors(Service::Discord),
             vec![Cursor {
                 channel_id: String::from("dm222"),
                 after: String::from("2001")
@@ -1557,7 +1751,10 @@ mod tests {
         config.discord.allowed.push(discord_sender("333").unwrap());
         let model = Arc::new(OfflineModel::new());
         let mut daemon = discord_open(&dir.path().join("lg.db"), &config, Arc::clone(&model));
-        assert!(daemon.cursors().is_empty(), "no DM channel is known yet");
+        assert!(
+            daemon.cursors(Service::Discord).is_empty(),
+            "no DM channel is known yet"
+        );
 
         let first = daemon
             .discord(&dm("3001", "333", "one"))
@@ -1585,7 +1782,7 @@ mod tests {
             None
         );
         assert_eq!(
-            daemon.cursors(),
+            daemon.cursors(Service::Discord),
             vec![Cursor {
                 channel_id: String::from("dm333"),
                 after: String::from("3001")
@@ -1702,7 +1899,19 @@ mod tests {
             assert!(fake.wait_for(10, |f| f.sent().len() == 5).await);
             stop_tx.send(()).unwrap();
         };
-        let (served, ()) = tokio::join!(run(daemon, listener, Some(link), None, stop), script);
+        let (served, ()) = tokio::join!(
+            run(
+                daemon,
+                listener,
+                Links {
+                    discord: Some(link),
+                    ..Links::default()
+                },
+                None,
+                stop
+            ),
+            script
+        );
         served.unwrap();
         let sent: Vec<String> = fake.sent().into_iter().map(|s| s.content).collect();
         assert_eq!(
@@ -1712,6 +1921,126 @@ mod tests {
         assert!(fake.sent().iter().all(|s| s.channel_id == "dm555"));
         assert_eq!(model.calls(), 4);
         assert!(fake.connects() >= 2);
+    }
+
+    /// The whole Slack path: a stranger pairs over the socket, then a
+    /// message gets one answer, and a missed message is read back once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slack_pairs_answers_and_backfills_once() {
+        use littleguy_channels::testing::slack::{APP_TOKEN, BOT_TOKEN, FakeSlack, dm_event};
+
+        let fake = FakeSlack::start().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lg.sock");
+        let uid = rustix::process::getuid().as_raw();
+        let model = Arc::new(OfflineModel::new());
+        let extras = Extras {
+            slack: true,
+            ..Extras::default()
+        };
+        let daemon = Daemon::open_with(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            uid,
+            false,
+            extras,
+        )
+        .unwrap();
+        let listener = bind(&socket).await.unwrap();
+        let links = Links {
+            slack: Some(SlackApi::new(fake.api_base.clone(), BOT_TOKEN, APP_TOKEN)),
+            ..Links::default()
+        };
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let stop = async {
+            let _ = stop_rx.await;
+        };
+        let script =
+            async {
+                assert!(fake.wait_for(10, |f| f.connects() == 1).await);
+                fake.push_dm("5001.000001", "D555", "U555", "hello");
+                assert!(fake.wait_for(10, |f| f.posted().len() == 1).await);
+                let code = code_in(&fake.posted()[0].text);
+                let paired = crate::client::send(&socket, &Request::Pair { code })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    paired,
+                    Response::Paired {
+                        sender: String::from("slack:U555")
+                    }
+                );
+                let pairs = crate::client::send(&socket, &Request::Pairs).await.unwrap();
+                let Response::Pairs { entries } = pairs else {
+                    panic!("not a list of pairs");
+                };
+                assert!(entries.iter().any(|e| e.channel == "slack"
+                    && e.sender == "slack:U555"
+                    && e.source == "paired"));
+
+                fake.push_dm("5002.000001", "D555", "U555", "hi");
+                assert!(fake.wait_for(10, |f| f.posted().len() == 2).await);
+
+                // The daemon misses two messages while it is away.
+                for (ts, text) in [
+                    ("5001.000001", "hello"),
+                    ("5002.000001", "hi"),
+                    ("5002.000002", "missed"),
+                    ("5003.000000", "also"),
+                ] {
+                    fake.add_history(dm_event(ts, "D555", "U555", text));
+                }
+                fake.drop_connection();
+                assert!(fake.wait_for(10, |f| f.posted().len() == 4).await);
+                // A live copy of a backfilled message runs nothing new.
+                fake.push_dm("5003.000000", "D555", "U555", "also");
+                fake.push_dm("5004.000000", "D555", "U555", "last");
+                assert!(fake.wait_for(10, |f| f.posted().len() == 5).await);
+                let unpaired = crate::client::send(
+                    &socket,
+                    &Request::Unpair {
+                        sender: String::from("slack:U555"),
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(unpaired, Response::Unpaired { removed: true });
+                stop_tx.send(()).unwrap();
+            };
+        let (served, ()) = tokio::join!(run(daemon, listener, links, None, stop), script);
+        served.unwrap();
+        let posted: Vec<String> = fake.posted().into_iter().map(|p| p.text).collect();
+        assert_eq!(
+            posted[1..],
+            [echo("hi"), echo("missed"), echo("also"), echo("last")]
+                .map(|text| littleguy_channels::slack::escape(&text))
+        );
+        assert!(fake.posted().iter().all(|p| p.channel == "D555"));
+        assert_eq!(model.calls(), 4);
+        assert!(fake.connects() >= 2);
+    }
+
+    #[test]
+    fn a_chat_message_has_a_key_and_a_cursor() {
+        let message = DmMessage {
+            id: String::from("5.000001"),
+            channel_id: String::from("D1"),
+            author_id: String::from("U1"),
+            content: String::from("x"),
+        };
+        let slack = chat_message_id(Service::Slack, &message).unwrap();
+        assert_eq!(slack.as_str(), "slack:D1:5.000001");
+        assert_eq!(cursor_of(&slack), "5.000001");
+        let discord = chat_message_id(Service::Discord, &message).unwrap();
+        assert_eq!(cursor_of(&discord), "5.000001");
+        assert_eq!(cursor_of(&MessageId::new("plain").unwrap()), "");
+        assert_eq!(
+            chat_sender(Service::Slack, "U1").unwrap().as_str(),
+            "slack:U1"
+        );
+        assert!(chat_sender(Service::Slack, "42").is_err());
+        assert!(chat_sender(Service::Discord, "U1").is_err());
     }
 
     fn camel_config(dir: &Path, noop: bool) -> Config {
@@ -1764,7 +2093,10 @@ mod tests {
             stop_tx.send(()).unwrap();
             held
         };
-        let (served, held) = tokio::join!(run(daemon, listener, None, Some(camel), stop), watch);
+        let (served, held) = tokio::join!(
+            run(daemon, listener, Links::default(), Some(camel), stop),
+            watch
+        );
         served.unwrap();
         held
     }
@@ -2331,6 +2663,38 @@ mod tests {
         tick_until(&mut daemon, || fake.sent().len() == 2).await;
         assert_eq!(fake.sent().len(), 2);
         assert_eq!(model.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_brief_to_a_slack_user_goes_to_slack() {
+        use littleguy_channels::testing::FakeDiscord;
+        use littleguy_channels::testing::slack::{APP_TOKEN, BOT_TOKEN, FakeSlack};
+
+        let discord = FakeDiscord::start().await.unwrap();
+        let slack = FakeSlack::start().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-09T07:00:00Z");
+        let config = brief_config("Morning <team>.", Some("slack:U555"));
+        let mut daemon = brief_daemon(&dir.path().join("lg.db"), &config, &model, &clock, &discord);
+        daemon.tick().await.unwrap();
+        clock.set("2026-11-09T08:00:01Z");
+        // Slack is off at first, so the brief logs and stays unsent.
+        tick_until(&mut daemon, || {
+            model.calls.load(std::sync::atomic::Ordering::SeqCst) == 1
+        })
+        .await;
+        assert_eq!(
+            slack.posted(),
+            [] as [littleguy_channels::testing::slack::Posted; 0]
+        );
+        daemon.slack_api(SlackApi::new(slack.api_base.clone(), BOT_TOKEN, APP_TOKEN));
+        clock.set("2026-11-10T08:00:01Z");
+        tick_until(&mut daemon, || slack.posted().len() == 1).await;
+        let posted = slack.posted();
+        assert_eq!(posted[0].channel, "DU555");
+        assert_eq!(posted[0].text, "ok: Morning &lt;team&gt;.");
+        assert_eq!(discord.sent(), [] as [littleguy_channels::testing::Sent; 0]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

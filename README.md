@@ -76,6 +76,46 @@ Each Discord message runs once, and its reply goes out once. After a
 reconnect, the daemon reads the direct messages it missed and answers each
 one. [ADR 0002](docs/adr/0002-pairing-and-delivery.md) explains how.
 
+## Slack
+
+littleguy talks to Slack over Socket Mode, so the machine needs no public
+URL. Create a Slack app, then:
+
+1. Turn on **Socket Mode**, and make an app-level token with the
+   `connections:write` scope. It starts with `xapp-`.
+2. Under **OAuth & Permissions**, add the bot scopes `chat:write`,
+   `im:history` and `im:write`, and install the app. The bot token starts
+   with `xoxb-`.
+3. Under **Event Subscriptions**, subscribe the bot to `message.im`.
+4. Under **App Home**, let users send messages from the Messages tab.
+5. Turn on **Interactivity**. Socket Mode needs no request URL.
+
+```sh
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_APP_TOKEN=xapp-...
+cargo run --bin lg -- serve
+```
+
+Both tokens come from the environment only. With one of them missing, the
+log says so and Slack stays off. Pairing works as on Discord, with Slack
+user ids:
+
+```toml
+[slack]
+pairing = true            # strangers get a code; false drops them
+allowed = ["U012AB3CD"]   # Slack user ids allowed from the start
+```
+
+```sh
+lg pair ABCD-1234         # paired slack:U012AB3CD
+lg unpair slack:U012AB3CD
+```
+
+Each Slack message runs once, and its reply goes out once, as on Discord.
+Every reply escapes `&`, `<` and `>`, so no answer can mention `@channel`
+or a person. Discord and Slack can run in one daemon.
+[ADR 0011](docs/adr/0011-slack-over-socket-mode.md) explains the design.
+
 ## Camel routes
 
 littleguy runs [harvest-camel](https://github.com/autumn-foundation/harvest-camel)
@@ -124,21 +164,21 @@ design.
 
 A `[brief]` section turns on a short brief on weekday mornings. At each
 slot the assistant reads its notes and the recent conversation, and lists
-what needs you today. It sends the list as a Discord DM. When nothing needs
+what needs you today. It sends the list as a direct message. When nothing needs
 you, it answers `HEARTBEAT_OK`, and you get no message.
 
 ```toml
 [brief]
 schedule = "30 7 * * 1-5"       # cron; the default is 07:30, Monday to Friday
 timezone = "Europe/London"      # IANA name; the default is the memory time zone
-to = "123456789012345678"       # your Discord user id; without it, the log only
+to = "123456789012345678"       # your Discord user id, or "slack:U012AB3CD"; without it, the log only
 # prompt = "..."                # the instruction of each brief
 ```
 
 The brief is read-only: it calls no tool that acts, and it writes no note.
 Each slot sends at most one DM, also across a restart. A slot that passes
 while `lg serve` is down runs once, at the next start. The brief needs the
-Discord channel to reach you. [ADR 0006](docs/adr/0006-morning-brief.md)
+Discord or Slack channel to reach you. [ADR 0006](docs/adr/0006-morning-brief.md)
 explains the design.
 
 ## Tools
@@ -178,7 +218,7 @@ backend = "firecracker"         # or "process", for development only
 network = false                 # the code gets no network
 
 [approvals]
-approver = "123456789012345678" # the Discord user who gets the buttons
+approver = "123456789012345678" # the Discord user who gets the buttons, or "slack:U012AB3CD"
 timeout_secs = 3600             # no decision by then denies the call
 
 [sandbox.firecracker]
@@ -191,8 +231,8 @@ gid = 990
 netns = "/run/netns/littleguy"              # optional, an empty namespace
 ```
 
-When the assistant wants to run code, the approver gets a Discord DM with
-the code and **Approve** and **Deny** buttons. The owner can also decide
+When the assistant wants to run code, the approver gets a direct message on
+Discord or Slack with the code and **Approve** and **Deny** buttons. The owner can also decide
 from the shell:
 
 ```sh
@@ -346,6 +386,7 @@ from = "file:/home/mark/lg-inbox?delete=true"
 | `--db` | `LG_DB` | `<data home>/littleguy/lg.db` |
 | `--config` | `LG_CONFIG` | `<config home>/littleguy/lg.toml` |
 | none | `DISCORD_BOT_TOKEN` | unset: no Discord |
+| none | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | unset: no Slack |
 | none | `LG_SAN_MATEO_KEY` | required with `[san_mateo]` |
 
 `<data home>` is `$XDG_DATA_HOME`, or `~/.local/share`. `<config home>` is
@@ -357,7 +398,7 @@ The socket has mode 0600. The daemon also reads the peer credentials of each
 connection. Only the user who runs the daemon reaches the assistant from the
 socket, and only that user may pair, list or unpair.
 
-On Discord, a sender reaches the assistant when the config file allows them
+On Discord and Slack, a sender reaches the assistant when the config file allows them
 or a pairing code added them. Anyone else gets a code, or nothing when
 `pairing = false`. The routing kernel makes each decision, and
 `formal/verus/src/route.rs` proves it. On the camel channel, only the routes
@@ -369,7 +410,7 @@ when a code is live and when a new one is issued.
 | Path | What it holds |
 |---|---|
 | `crates/littleguy-core` | Ids, config, the routing kernel and pairing codes. No I/O. |
-| `crates/littleguy-channels` | Discord: the gateway supervisor, REST calls, and a fake Discord for tests. |
+| `crates/littleguy-channels` | Discord and Slack: the gateway supervisor, the Socket Mode client, their REST calls, and a fake of each for tests. |
 | `crates/littleguy-models` | `AgentModel` implementations: the offline model, Claude, and OpenAI or OpenRouter. |
 | `crates/littleguy-tools` | The tools: web fetch with its address guard, web search, the workspace files, the MCP client, and Gmail and Calendar. |
 | `crates/littleguy-stores` | The SQLite memory store and episode store, until the engine has its own, and the calls that wait for approval. |

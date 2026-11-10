@@ -20,8 +20,9 @@ use.
 | M3.2 | A sandboxed shell, and approve and deny buttons in Discord | Done (#10) |
 | M3.3 | An MCP client and flow rules | Done (#11) |
 | M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Done (#12) |
-| M5.1 | The refine loop: profile overlays that the model proposes and the owner activates, `lg refine` | This PR |
-| M5 | A web UI over the management API, Postgres mode, camel request and reply | Planned |
+| M5.1 | The refine loop: profile overlays that the model proposes and the owner activates, `lg refine` | Done (#15) |
+| M5.2 | `lg serve` as an autumn-web app, with maud and htmx pages on loopback and `lg ui` sign-in links | This PR |
+| M5 | Postgres mode, camel request and reply, and `HarvestPlugin` once autumn-harvest #2641 lands | Planned |
 
 Each engine gap gets a workaround here first. The engine issues are
 autumn-harvest #2603 (approval notices), #2604 (durable episode and

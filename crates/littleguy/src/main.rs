@@ -42,6 +42,7 @@ mod protocol;
 mod refine;
 mod sandbox;
 mod tools;
+mod web;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -122,6 +123,8 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Print a one-time link that signs a browser in to the web pages.
+    Ui,
     /// Propose, list and activate profile overlays of the assistant.
     #[command(subcommand)]
     Refine(RefineCommand),
@@ -478,17 +481,21 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         None => daemon,
     };
     let listener = daemon::bind(&socket).await?;
-    let stop = async {
-        // A failed signal handler leaves only a kill to stop the daemon.
-        if tokio::signal::ctrl_c().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    };
     #[cfg(feature = "camel")]
     let camel = camel(&config, daemon.camel_mapper(&config), &db).await?;
     #[cfg(not(feature = "camel"))]
     let camel: Option<camel::Camel> = None;
-    daemon::run(daemon, listener, links, camel, stop).await?;
+    let (handle, jobs) = daemon::jobs(uid);
+    let logins = web::Logins::new(web::base_url(&config.ui));
+    let daemon = daemon.with_logins(logins.clone());
+    let pages = web::Web { handle, logins };
+    web::serve(pages, &config.ui, move |stop| {
+        tokio::spawn(async move {
+            let stopped = async move { stop.notified().await };
+            daemon::run(daemon, listener, links, camel, jobs, stopped).await
+        })
+    })
+    .await?;
     // The socket file goes with the daemon. A crash leaves it, and the next
     // start replaces it.
     let _ = std::fs::remove_file(&socket);
@@ -537,6 +544,7 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Approve { id } => ask(&socket, &Request::Approve { id }).await,
         Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
         Command::Refine(command) => ask(&socket, &command.request()?).await,
+        Command::Ui => ask(&socket, &Request::UiLink).await,
     }
 }
 

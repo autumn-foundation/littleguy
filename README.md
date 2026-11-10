@@ -386,6 +386,22 @@ data, so after a read the Rule of Two also holds each draft. Tokens stay in
 San Mateo, and no tool sees one.
 [ADR 0010](docs/adr/0010-mail-and-calendar.md) explains the design.
 
+## Web pages
+
+`lg serve` is an autumn-web app. Its pages show the chat, the calls that
+wait for approval, who can talk to the assistant, the refine overlays and
+the OAuth connections. They serve on a loopback address only:
+
+```toml
+[ui]
+bind = "127.0.0.1:3004"   # the default; a loopback address is required
+```
+
+To sign a browser in, run `lg ui` and open the link that it prints. The
+link works once, for five minutes. Each action needs the session and the
+CSRF token. [ADR 0014](docs/adr/0014-autumn-web-app.md) explains the
+design.
+
 ## Refine loop
 
 The assistant can propose changes to its own profile. Add a `[refine]`

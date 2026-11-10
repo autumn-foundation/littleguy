@@ -296,6 +296,8 @@ pub struct Daemon {
     waiting: Option<i64>,
     /// The chat messages that arrived while a request waited.
     held: VecDeque<(Service, DmMessage)>,
+    /// The sign-in links of the web pages, once they serve.
+    logins: Option<crate::web::Logins>,
     /// The overlay store and the proposer, with a `[refine]` section.
     #[cfg(feature = "refine")]
     refine: Option<Box<crate::refine::Refine>>,
@@ -458,6 +460,7 @@ impl Daemon {
             approver,
             waiting,
             held: VecDeque::new(),
+            logins: None,
             #[cfg(feature = "refine")]
             refine,
         })
@@ -478,6 +481,13 @@ impl Daemon {
     #[must_use]
     pub fn with_connections(mut self, connections: Connections) -> Self {
         self.connections = Some(connections);
+        self
+    }
+
+    /// Hands out sign-in links of the web pages with `logins`.
+    #[must_use]
+    pub fn with_logins(mut self, logins: crate::web::Logins) -> Self {
+        self.logins = Some(logins);
         self
     }
 
@@ -559,6 +569,14 @@ impl Daemon {
                 self.decide_and_resume(id, crate::approvals::Choice::Deny(reason))
                     .await
             }
+            Request::UiLink => Ok(self.logins.as_ref().map_or_else(
+                || Response::Error {
+                    message: String::from("the web pages do not serve in this daemon"),
+                },
+                |logins| Response::ConnectLink {
+                    link: logins.link(),
+                },
+            )),
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
             Request::Unpair { sender } => self.unpair(&sender),
@@ -1045,6 +1063,56 @@ impl Links {
     }
 }
 
+/// The queue of the job loop, before [`run`] takes it.
+#[derive(Debug)]
+pub struct Jobs {
+    tx: mpsc::Sender<Job>,
+    rx: mpsc::Receiver<Job>,
+}
+
+/// A client of the job loop inside this process, such as the web pages.
+///
+/// Each request goes through [`Daemon::handle_request`] as the owner, so the
+/// pages can do what `lg` can do, and no more.
+#[derive(Debug, Clone)]
+pub struct Handle {
+    tx: mpsc::Sender<Job>,
+    uid: u32,
+}
+
+impl Handle {
+    /// Sends `request` as the owner and waits for the answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the daemon stops before it answers.
+    pub async fn ask(&self, request: Request) -> Result<Response> {
+        let (reply, answer) = oneshot::channel();
+        self.tx
+            .send(Job::Socket {
+                uid: self.uid,
+                request,
+                reply,
+            })
+            .await
+            .context("the daemon is stopping")?;
+        answer.await.context("the daemon dropped the request")
+    }
+}
+
+/// A job queue, and a handle on it that speaks as `owner_uid`.
+#[must_use]
+pub fn jobs(owner_uid: u32) -> (Handle, Jobs) {
+    let (tx, rx) = mpsc::channel::<Job>(64);
+    (
+        Handle {
+            tx: tx.clone(),
+            uid: owner_uid,
+        },
+        Jobs { tx, rx },
+    )
+}
+
 /// Runs one job on the runtime.
 async fn run_job(daemon: &mut Daemon, job: Job) {
     match job {
@@ -1115,9 +1183,10 @@ pub async fn run(
     listener: UnixListener,
     links: Links,
     camel: Option<Camel>,
+    jobs: Jobs,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
-    let (tx, mut rx) = mpsc::channel::<Job>(64);
+    let Jobs { tx, mut rx } = jobs;
     let mut tasks = vec![tokio::spawn(accept_loop(listener, tx.clone()))];
     #[cfg(feature = "discord")]
     if let Some(link) = links.discord {
@@ -1462,8 +1531,10 @@ mod tests {
             stop_tx.send(()).unwrap();
             (reply, bad_json, too_long)
         };
-        let (served, (reply, bad_json, too_long)) =
-            tokio::join!(run(daemon, listener, Links::default(), None, stop), client);
+        let (served, (reply, bad_json, too_long)) = tokio::join!(
+            run(daemon, listener, Links::default(), None, jobs(UID).1, stop),
+            client
+        );
         served.unwrap();
         assert_eq!(
             reply,
@@ -1877,7 +1948,14 @@ mod tests {
             stop_tx.send(()).unwrap();
         };
         let (served, ()) = tokio::join!(
-            run(daemon, listener, Links::with_discord(link), None, stop),
+            run(
+                daemon,
+                listener,
+                Links::with_discord(link),
+                None,
+                jobs(UID).1,
+                stop
+            ),
             script
         );
         served.unwrap();
@@ -1974,7 +2052,10 @@ mod tests {
                 assert_eq!(unpaired, Response::Unpaired { removed: true });
                 stop_tx.send(()).unwrap();
             };
-        let (served, ()) = tokio::join!(run(daemon, listener, links, None, stop), script);
+        let (served, ()) = tokio::join!(
+            run(daemon, listener, links, None, jobs(UID).1, stop),
+            script
+        );
         served.unwrap();
         let posted: Vec<String> = fake.posted().into_iter().map(|p| p.text).collect();
         assert_eq!(
@@ -2062,7 +2143,14 @@ mod tests {
             held
         };
         let (served, held) = tokio::join!(
-            run(daemon, listener, Links::default(), Some(camel), stop),
+            run(
+                daemon,
+                listener,
+                Links::default(),
+                Some(camel),
+                jobs(UID).1,
+                stop
+            ),
             watch
         );
         served.unwrap();

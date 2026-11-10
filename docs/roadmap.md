@@ -21,8 +21,10 @@ use.
 | M3.3 | An MCP client and flow rules | Done (#11) |
 | M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Done (#12) |
 | M5.1 | The refine loop: profile overlays that the model proposes and the owner activates, `lg refine` | Done (#15) |
-| M5.2 | `lg serve` as an autumn-web app, with maud and htmx pages on loopback and `lg ui` sign-in links | This PR |
-| M5 | Postgres mode, camel request and reply, and `HarvestPlugin` once autumn-harvest #2641 lands | Planned |
+| M5.2 | `lg serve` as an autumn-web app, with maud and htmx pages on loopback and `lg ui` sign-in links | Done (#16) |
+| M5.3 | Hooks that wake a sleeping host: `[hooks]` and `POST /hooks/tick`, after a Fly Sprite spike | This PR |
+| M5.4 | Slack over the Events API, as a hook, for a host that sleeps | Planned |
+| M5 | A fleet of littleguys on the autumn-web fleet seams, Postgres mode, camel request and reply, and `HarvestPlugin` once autumn-harvest #2641 lands | Planned |
 
 Each engine gap gets a workaround here first. The engine issues are
 autumn-harvest #2603 (approval notices), #2604 (durable episode and

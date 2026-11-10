@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use autumn_web::test::{TestApp, TestClient};
-use littleguy_core::{Config, OwnerName, UiConfig};
+use littleguy_core::{Config, HooksConfig, OwnerName, UiConfig};
 use littleguy_models::OfflineModel;
 use tokio::sync::Notify;
 
@@ -12,6 +12,9 @@ use crate::daemon::{self, Daemon, Links};
 use crate::protocol::{Request, Response};
 
 const UID: u32 = 1000;
+
+/// A hook token for the tests.
+const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 /// A daemon that runs its job loop until the test ends, and the pages over
 /// it.
@@ -40,8 +43,8 @@ fn config(refine: bool) -> Config {
 async fn rig(config: &Config) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("lg.db");
-    let ui = UiConfig::default();
-    let logins = Logins::new(base_url(&ui));
+    let plan = Plan::of(config);
+    let logins = Logins::new(base_url(plan.bind));
     let daemon = Daemon::open(&db, config, Arc::new(OfflineModel::new()), UID, false)
         .unwrap()
         .with_logins(logins.clone());
@@ -53,13 +56,17 @@ async fn rig(config: &Config) -> Rig {
         let until = async move { stopped.notified().await };
         daemon::run(daemon, listener, Links::default(), None, jobs, until).await
     });
+    let hooks = plan
+        .hooks
+        .then(|| HookToken::new("T", Some(TOKEN.to_owned())).unwrap());
     let web = Web {
         handle: handle.clone(),
         logins: logins.clone(),
+        hooks,
     };
     let client = TestApp::new()
-        .config(settings(&ui))
-        .routes(pages::routes())
+        .config(settings(&plan))
+        .routes(routes(&plan))
         .state_initializer(move |state| state.insert_extension(web))
         .build();
     Rig {
@@ -75,7 +82,7 @@ async fn rig(config: &Config) -> Rig {
 /// the home page.
 async fn sign_in(rig: &Rig) -> String {
     let link = rig.logins.link();
-    let path = link.trim_start_matches(&base_url(&UiConfig::default()));
+    let path = &link[link.find("/login").unwrap()..];
     rig.client.get(path).send().await.assert_status(303);
     let home = rig.client.get("/").send().await;
     home.assert_status(200);
@@ -103,7 +110,7 @@ async fn a_sign_in_link_works_once() {
         .await
         .assert_status(403);
     let link = rig.logins.link();
-    let path = link.trim_start_matches(&base_url(&UiConfig::default()));
+    let path = link.trim_start_matches(&base_url(UiConfig::default().bind));
     let first = rig.client.get(path).send().await;
     first.assert_status(303);
     first.assert_header("location", "/");
@@ -298,7 +305,12 @@ fn the_settings_keep_the_pages_local_and_guarded() {
     let ui = UiConfig {
         bind: "[::1]:4000".parse().unwrap(),
     };
-    let settings = settings(&ui);
+    let plan = Plan {
+        bind: ui.bind,
+        pages: true,
+        hooks: false,
+    };
+    let settings = settings(&plan);
     assert_eq!(settings.server.host, "::1");
     assert_eq!(settings.server.port, 4000);
     assert!(settings.security.csrf.enabled);
@@ -307,7 +319,8 @@ fn the_settings_keep_the_pages_local_and_guarded() {
     assert!(settings.session.http_only);
     assert_eq!(settings.session.same_site, "Strict");
     assert_eq!(settings.session.cookie_name, COOKIE);
-    assert_eq!(base_url(&ui), "http://[::1]:4000");
+    assert_eq!(settings.security.csrf.exempt_paths, ["/hooks"]);
+    assert_eq!(base_url(ui.bind), "http://[::1]:4000");
 }
 
 #[tokio::test]
@@ -315,4 +328,86 @@ async fn a_stopped_daemon_answers_with_an_error() {
     let (handle, jobs) = daemon::jobs(UID);
     drop(jobs);
     assert!(handle.ask(Request::Pairs).await.is_err());
+}
+
+/// A config with a `[hooks]` section at `bind`.
+fn hooked(bind: &str) -> Config {
+    let mut config = config(false);
+    config.hooks = Some(HooksConfig {
+        bind: bind.parse().unwrap(),
+        ..HooksConfig::default()
+    });
+    config
+}
+
+#[test]
+fn the_plan_serves_pages_only_on_loopback() {
+    let plain = Plan::of(&config(false));
+    assert_eq!(plain.bind, UiConfig::default().bind);
+    assert!(plain.pages && !plain.hooks);
+    let public = Plan::of(&hooked("0.0.0.0:8080"));
+    assert_eq!(public.bind.to_string(), "0.0.0.0:8080");
+    assert!(!public.pages && public.hooks);
+    let local = Plan::of(&hooked("127.0.0.1:8080"));
+    assert!(local.pages && local.hooks);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_public_hook_ticks_with_its_token_and_serves_no_pages() {
+    let rig = rig(&hooked("0.0.0.0:8080")).await;
+    rig.client.get("/").send().await.assert_status(404);
+    rig.client
+        .get("/login?token=x")
+        .send()
+        .await
+        .assert_status(404);
+    rig.client
+        .post("/hooks/tick")
+        .send()
+        .await
+        .assert_status(401);
+    rig.client
+        .post("/hooks/tick")
+        .header("Authorization", "Bearer wrong")
+        .send()
+        .await
+        .assert_status(401);
+    let ticked = rig
+        .client
+        .post("/hooks/tick")
+        .header("Authorization", &format!("Bearer {TOKEN}"))
+        .send()
+        .await;
+    ticked.assert_status(200);
+    ticked.assert_body_contains("ticked");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loopback_hook_serves_the_pages_too() {
+    let rig = rig(&hooked("127.0.0.1:0")).await;
+    sign_in(&rig).await;
+    rig.client
+        .post("/hooks/tick")
+        .header("Authorization", &format!("Bearer {TOKEN}"))
+        .send()
+        .await
+        .assert_status(200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_hooks_the_tick_route_does_not_exist() {
+    let rig = rig(&config(false)).await;
+    rig.client
+        .post("/hooks/tick")
+        .header("Authorization", &format!("Bearer {TOKEN}"))
+        .send()
+        .await
+        .assert_status(404);
+}
+
+#[tokio::test]
+async fn a_tick_of_a_stopped_daemon_is_an_error() {
+    let (handle, jobs) = daemon::jobs(UID);
+    drop(jobs);
+    assert!(handle.tick().await.is_err());
 }

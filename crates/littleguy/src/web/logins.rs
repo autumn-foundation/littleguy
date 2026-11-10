@@ -76,7 +76,7 @@ impl Logins {
 
 /// Whether `a` and `b` are equal, in a time that does not depend on where
 /// they differ.
-fn same(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0_u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 

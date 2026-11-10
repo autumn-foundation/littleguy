@@ -1018,6 +1018,10 @@ enum Job {
         press: Press,
         reply: oneshot::Sender<gate::PressAnswer>,
     },
+    /// A tick from outside, such as a hook that wakes a sleeping host. The
+    /// answer comes once the runs block, so the caller holds the host
+    /// awake while they work.
+    Tick { reply: oneshot::Sender<bool> },
 }
 
 /// One button press, as each chat service gives it.
@@ -1098,6 +1102,21 @@ impl Handle {
             .context("the daemon is stopping")?;
         answer.await.context("the daemon dropped the request")
     }
+
+    /// Ticks the daemon now, as its own timer does, and waits until the
+    /// runs block. Returns whether the tick worked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the daemon stops before it answers.
+    pub async fn tick(&self) -> Result<bool> {
+        let (reply, answer) = oneshot::channel();
+        self.tx
+            .send(Job::Tick { reply })
+            .await
+            .context("the daemon is stopping")?;
+        answer.await.context("the daemon dropped the tick")
+    }
 }
 
 /// A job queue, and a handle on it that speaks as `owner_uid`.
@@ -1169,6 +1188,16 @@ async fn run_job(daemon: &mut Daemon, job: Job) {
                     .await;
             }
             daemon.release_held().await;
+        }
+        Job::Tick { reply } => {
+            let worked = match daemon.tick().await {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(error = %format!("{error:#}"), "a hook tick failed");
+                    false
+                }
+            };
+            let _ = reply.send(worked);
         }
     }
 }

@@ -158,6 +158,15 @@ fn a_second_daemon_on_the_same_database_refuses_to_start() -> TestResult {
 /// One HTTP/1.1 GET to the pages, with `cookie`. Returns the head and the
 /// body.
 fn get(port: u16, path: &str, cookie: Option<&str>) -> TestResult<(String, String)> {
+    let cookie = cookie
+        .map(|c| format!("Cookie: {c}\r\n"))
+        .unwrap_or_default();
+    request(port, "GET", path, &cookie)
+}
+
+/// Sends one HTTP/1.1 request with the header lines `extra`, each ending
+/// in CRLF. Returns the head and the body of the answer.
+fn request(port: u16, method: &str, path: &str, extra: &str) -> TestResult<(String, String)> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut stream = loop {
         match TcpStream::connect(("127.0.0.1", port)) {
@@ -166,12 +175,9 @@ fn get(port: u16, path: &str, cookie: Option<&str>) -> TestResult<(String, Strin
             Err(error) => return Err(error.into()),
         }
     };
-    let cookie = cookie
-        .map(|c| format!("Cookie: {c}\r\n"))
-        .unwrap_or_default();
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{cookie}Connection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{extra}Content-Length: 0\r\nConnection: close\r\n\r\n"
     )?;
     let mut text = String::new();
     stream.read_to_string(&mut text)?;
@@ -251,4 +257,65 @@ fn sigterm_stops_the_daemon_cleanly() -> TestResult {
         "(already delivered) littleguy (offline): you said 'hello'"
     );
     kill(next)
+}
+
+/// A hook token for the tests.
+const HOOK_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+/// Paths whose config adds `[hooks]` on all addresses at a free port.
+fn hooked_paths() -> TestResult<Paths> {
+    let paths = paths()?;
+    let config = std::fs::read_to_string(&paths.config)?;
+    std::fs::write(
+        &paths.config,
+        format!("{config}[hooks]\nbind = \"0.0.0.0:{}\"\n", paths.port),
+    )?;
+    Ok(paths)
+}
+
+#[test]
+fn a_public_hook_ticks_the_daemon_with_its_token() -> TestResult {
+    let paths = hooked_paths()?;
+    let child = serve_command(&paths, &paths.socket)
+        .env("LG_HOOK_TOKEN", HOOK_TOKEN)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let (head, _) = request(paths.port, "POST", "/hooks/tick", "")?;
+    assert!(head.starts_with("HTTP/1.1 401"), "a hook needs its token");
+    let bearer = format!("Authorization: Bearer {HOOK_TOKEN}\r\n");
+    let (head, body) = request(paths.port, "POST", "/hooks/tick", &bearer)?;
+    assert!(head.starts_with("HTTP/1.1 200"), "the tick answers 200");
+    assert!(body.contains("ticked"), "the tick says it ticked");
+    let (head, _) = get(paths.port, "/", None)?;
+    assert!(
+        head.starts_with("HTTP/1.1 404"),
+        "a public address serves no pages"
+    );
+    let output = Command::new(LG)
+        .arg("--socket")
+        .arg(&paths.socket)
+        .arg("ui")
+        .env("LG_LOG", "warn")
+        .output()?;
+    assert!(!output.status.success(), "lg ui refuses without the pages");
+    kill(child)
+}
+
+#[test]
+fn hooks_without_a_token_stop_the_daemon_at_start() -> TestResult {
+    let paths = hooked_paths()?;
+    let output = serve_command(&paths, &paths.socket)
+        .env_remove("LG_HOOK_TOKEN")
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(!output.status.success(), "lg serve fails");
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(
+        stderr.contains("LG_HOOK_TOKEN"),
+        "the error names the variable"
+    );
+    assert!(!paths.db.exists(), "the database is not opened");
+    Ok(())
 }

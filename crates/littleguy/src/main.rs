@@ -474,6 +474,14 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let discord = links.discord.is_some();
     #[cfg(not(feature = "discord"))]
     let discord = false;
+    // The hook token is read first, so a missing one fails before the
+    // daemon opens its database.
+    let plan = web::Plan::of(&config);
+    let hooks = config
+        .hooks
+        .as_ref()
+        .map(|hooks| web::HookToken::new(&hooks.token_env, std::env::var(&hooks.token_env).ok()))
+        .transpose()?;
     let daemon = daemon::Daemon::open_with(&db, &config, model, uid, discord, extras)?;
     #[cfg(feature = "oauth")]
     let daemon = match connections {
@@ -486,10 +494,19 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     #[cfg(not(feature = "camel"))]
     let camel: Option<camel::Camel> = None;
     let (handle, jobs) = daemon::jobs(uid);
-    let logins = web::Logins::new(web::base_url(&config.ui));
-    let daemon = daemon.with_logins(logins.clone());
-    let pages = web::Web { handle, logins };
-    web::serve(pages, &config.ui, move |stop| {
+    let logins = web::Logins::new(web::base_url(plan.bind));
+    // A daemon whose pages do not serve refuses `lg ui`.
+    let daemon = if plan.pages {
+        daemon.with_logins(logins.clone())
+    } else {
+        daemon
+    };
+    let routes = web::Web {
+        handle,
+        logins,
+        hooks,
+    };
+    web::serve(routes, &plan, move |stop| {
         tokio::spawn(async move {
             let stopped = async move { stop.notified().await };
             daemon::run(daemon, listener, links, camel, jobs, stopped).await

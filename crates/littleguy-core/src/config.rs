@@ -225,6 +225,9 @@ pub enum ConfigError {
     /// The ui section is not valid.
     #[error("the ui section is not valid: {0}")]
     Ui(String),
+    /// The hooks section is not valid.
+    #[error("the hooks section is not valid: {0}")]
+    Hooks(String),
     /// The refine section is not valid.
     #[error("the refine section is not valid: {0}")]
     Refine(String),
@@ -297,6 +300,61 @@ fn ui(raw: RawUi) -> Result<UiConfig, ConfigError> {
         )));
     }
     Ok(UiConfig { bind })
+}
+
+/// The address of the hooks when the config names none. A Sprite routes
+/// its URL to port 8080.
+pub const DEFAULT_HOOKS_BIND: &str = "0.0.0.0:8080";
+
+/// The variable that holds the hook token when the config names none.
+pub const DEFAULT_HOOKS_TOKEN_ENV: &str = "LG_HOOK_TOKEN";
+
+/// The inbound hooks of `lg serve`: the routes that wake a sleeping host.
+///
+/// With this section, the app serves on `bind` instead of the ui address.
+/// The bind can be public. The pages then do not serve, because a public
+/// address is no place for them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HooksConfig {
+    /// The address of the app. Port 0 picks a free port.
+    pub bind: std::net::SocketAddr,
+    /// The environment variable that holds the bearer token of the hooks.
+    pub token_env: String,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            bind: std::net::SocketAddr::from(([0, 0, 0, 0], 8080)),
+            token_env: String::from(DEFAULT_HOOKS_TOKEN_ENV),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHooks {
+    bind: Option<String>,
+    token_env: Option<String>,
+}
+
+/// Checks the hooks section.
+fn hooks(raw: RawHooks) -> Result<HooksConfig, ConfigError> {
+    let text = raw.bind.unwrap_or_else(|| String::from(DEFAULT_HOOKS_BIND));
+    let bind = text.parse().map_err(|_| {
+        ConfigError::Hooks(format!(
+            "bind `{text}` is not an address such as {DEFAULT_HOOKS_BIND}"
+        ))
+    })?;
+    let token_env = raw
+        .token_env
+        .unwrap_or_else(|| String::from(DEFAULT_HOOKS_TOKEN_ENV));
+    if !is_variable(&token_env) {
+        return Err(ConfigError::Hooks(format!(
+            "token_env `{token_env}` is not an environment variable name"
+        )));
+    }
+    Ok(HooksConfig { bind, token_env })
 }
 
 /// The transcript messages that a refine proposal reads, when the config
@@ -994,6 +1052,7 @@ struct Raw {
     refine: Option<RawRefine>,
     #[serde(default)]
     ui: RawUi,
+    hooks: Option<RawHooks>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1275,6 +1334,8 @@ pub struct Config {
     pub refine: Option<RefineConfig>,
     /// The web pages.
     pub ui: UiConfig,
+    /// The inbound hooks, when the config has the section.
+    pub hooks: Option<HooksConfig>,
 }
 
 impl Config {
@@ -1299,6 +1360,7 @@ impl Config {
             mcp: Vec::new(),
             refine: None,
             ui: UiConfig::default(),
+            hooks: None,
         }
     }
 
@@ -1364,6 +1426,7 @@ impl Config {
             mcp: mcp_servers(raw.mcp.server)?,
             refine: raw.refine.map(refine).transpose()?,
             ui: ui(raw.ui)?,
+            hooks: raw.hooks.map(hooks).transpose()?,
         })
     }
 
@@ -1429,6 +1492,26 @@ mod tests {
             assert!(matches!(result, Err(ConfigError::Ui(_))), "{bad}");
         }
         assert!(Config::parse("owner = \"mark\"\n[ui]\nport = 1").is_err());
+    }
+
+    #[test]
+    fn the_hooks_section_takes_any_address_and_a_token_variable() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.hooks, None);
+        let bare = Config::parse("owner = \"mark\"\n[hooks]").unwrap();
+        assert_eq!(bare.hooks, Some(HooksConfig::default()));
+        assert_eq!(HooksConfig::default().bind.to_string(), DEFAULT_HOOKS_BIND);
+        let set = Config::parse(
+            "owner = \"mark\"\n[hooks]\nbind = \"[::]:9000\"\ntoken_env = \"MY_TOKEN\"",
+        )
+        .unwrap();
+        let hooks = set.hooks.unwrap();
+        assert_eq!(hooks.bind.to_string(), "[::]:9000");
+        assert_eq!(hooks.token_env, "MY_TOKEN");
+        for bad in ["bind = \"nowhere\"", "token_env = \"lower\"", "port = 1"] {
+            let result = Config::parse(&format!("owner = \"mark\"\n[hooks]\n{bad}"));
+            assert!(result.is_err(), "{bad}");
+        }
     }
 
     #[test]

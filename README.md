@@ -402,6 +402,23 @@ link works once, for five minutes. Each action needs the session and the
 CSRF token. [ADR 0014](docs/adr/0014-autumn-web-app.md) explains the
 design.
 
+## Hooks
+
+A host that sleeps, such as a Fly Sprite, fires no timer while it is
+paused, and an outbound socket does not keep it awake. A hook wakes it:
+
+```toml
+[hooks]
+bind = "0.0.0.0:8080"        # the default; a public address is allowed
+token_env = "LG_HOOK_TOKEN"  # the default; at least 32 characters
+```
+
+`POST /hooks/tick` with `Authorization: Bearer $LG_HOOK_TOKEN` runs the
+due timers and answers once the runs block, so the host stays awake while
+they work. Call it from a cron. With `[hooks]`, the app serves on the
+hooks address, and the pages serve only when that address is loopback.
+[ADR 0015](docs/adr/0015-hooks-that-wake-the-host.md) explains the design.
+
 ## Refine loop
 
 The assistant can propose changes to its own profile. Add a `[refine]`
@@ -454,6 +471,7 @@ from = "file:/home/mark/lg-inbox?delete=true"
 | none | `DISCORD_BOT_TOKEN` | unset: no Discord |
 | none | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | unset: no Slack |
 | none | `LG_SAN_MATEO_KEY` | required with `[san_mateo]` |
+| none | `LG_HOOK_TOKEN` | required with `[hooks]` |
 
 `<data home>` is `$XDG_DATA_HOME`, or `~/.local/share`. `<config home>` is
 `$XDG_CONFIG_HOME`, or `~/.config`.

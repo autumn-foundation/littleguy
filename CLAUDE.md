@@ -36,6 +36,8 @@ each command.
   htmx on autumn-web. Never add another HTTP server.
 - A page sends an owner `Request` through `daemon::Handle`. It never
   touches the runtime or a store itself.
+- The pages serve only on a loopback address. A route on a public bind is
+  a hook: a bearer token or a signature guards it (ADR 0015).
 
 ## Rust rules
 

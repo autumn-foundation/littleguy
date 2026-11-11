@@ -128,6 +128,8 @@ enum Command {
     },
     /// Print a one-time link that signs a browser in to the web pages.
     Ui,
+    /// Read the config file again. Most sections apply at once.
+    Reload,
     /// Propose, list and activate profile overlays of the assistant.
     #[command(subcommand)]
     Refine(RefineCommand),
@@ -277,6 +279,14 @@ fn load_config(explicit: Option<&Path>, env: &Env) -> Result<Config> {
     }
     let user = std::env::var("USER").context("set USER, or write a config with `owner`")?;
     Ok(Config::for_owner(OwnerName::new(user)?))
+}
+
+/// The config file that a reload reads: the explicit one, or the default
+/// path, even before it exists.
+fn config_file(explicit: Option<&Path>, env: &Env) -> Option<PathBuf> {
+    explicit
+        .map(Path::to_path_buf)
+        .or_else(|| env.config().ok())
 }
 
 /// The model that `args` names. `key` reads one environment variable.
@@ -550,6 +560,11 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         .map(|hooks| web::HookToken::new(&hooks.token_env, std::env::var(&hooks.token_env).ok()))
         .transpose()?;
     let daemon = daemon::Daemon::open_with(&db, &config, model, uid, discord, extras)?;
+    // The daemon watches its config file, and `lg reload` reads it too.
+    let daemon = match config_file(args.config.as_deref(), env) {
+        Some(file) => daemon.with_config_file(file),
+        None => daemon,
+    };
     #[cfg(feature = "oauth")]
     let daemon = match connections {
         Some(started) => daemon.with_connections(started),
@@ -644,6 +659,7 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
         Command::Refine(command) => ask(&socket, &command.request()?).await,
         Command::Ui => ask(&socket, &Request::UiLink).await,
+        Command::Reload => ask(&socket, &Request::Reload).await,
     }
 }
 

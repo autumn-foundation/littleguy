@@ -7,6 +7,7 @@ pub mod addr;
 pub mod config;
 pub mod ids;
 pub mod pairing;
+pub mod reload;
 pub mod route;
 
 pub use config::{

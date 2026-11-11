@@ -14,7 +14,8 @@
 //! signal comes from a stable message id, so a redelivery runs once.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -25,7 +26,7 @@ use autumn_harvest_plugin::connector::{
     SourceBinding,
 };
 use autumn_harvest_sqlite::SqliteAuthStore;
-use camel_api::{Exchange, Value};
+use camel_api::{Exchange, RuntimeCommand, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_direct::DirectComponent;
 use camel_component_file::FileComponent;
@@ -189,11 +190,42 @@ impl Mapper {
     }
 }
 
-/// The connector binding of every route.
+/// The connector binding of every route. A reload replaces the mapper
+/// behind `mapper`.
 #[must_use]
-pub fn binding(mapper: Mapper) -> SourceBinding {
+pub fn binding(mapper: Arc<RwLock<Mapper>>) -> SourceBinding {
     SourceBinding::signals_with_start(BINDING, STREAM, AGENT_WORKFLOW_NAME, ENTITY_OP_SIGNAL)
-        .map_raw(move |ctx| mapper.map(ctx))
+        .map_raw(move |ctx| {
+            mapper
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .map(ctx)
+        })
+}
+
+/// The camel route of the config route `config`.
+fn definition(config: &CamelRoute) -> Result<camel_core::route::RouteDefinition> {
+    let definition = RouteBuilder::from(&config.from)
+        .route_id(camel_route_id(&config.id))
+        .set_header(ROUTE_HEADER, Value::String(config.id.clone()))
+        .set_header_fn(ID_HEADER, message_id_of)
+        .to(format!("harvest:{STREAM}?idHeader={ID_HEADER}"))
+        .build()
+        .with_context(|| format!("building camel route `{}`", config.id))?;
+    check_route(&definition).with_context(|| format!("camel route `{}`", config.id))?;
+    Ok(definition)
+}
+
+/// Checks that each route of `routes` builds, before a reload changes
+/// anything.
+///
+/// # Errors
+///
+/// Returns the error of the first route that does not build.
+pub fn check_routes(routes: &[CamelRoute]) -> Result<()> {
+    routes
+        .iter()
+        .try_for_each(|config| definition(config).map(drop))
 }
 
 /// The senders of the camel channel.
@@ -222,6 +254,8 @@ pub struct Camel {
     context: CamelContext,
     source: Arc<CamelSource>,
     inbound: Arc<SqliteInbound>,
+    mapper: Arc<RwLock<Mapper>>,
+    routes: Vec<CamelRoute>,
 }
 
 impl std::fmt::Debug for Camel {
@@ -242,13 +276,16 @@ impl Camel {
     /// letter store does not open.
     pub async fn start(mapper: Mapper, db: &Path) -> Result<Self> {
         let routes = mapper.routes.clone();
+        let mapper = Arc::new(RwLock::new(mapper));
         let (source, component) = HarvestBridge::new(STREAM);
         let store = SqliteAuthStore::open(db)
             .with_context(|| format!("opening the dead letters in {}", db.display()))?;
-        let inbound =
-            SqliteInbound::new(binding(mapper), Arc::clone(&source) as Arc<dyn EventSource>)
-                .context("the camel binding")?
-                .with_dead_letter_sink(Arc::new(SqliteDeadLetters::new(Arc::new(store))));
+        let inbound = SqliteInbound::new(
+            binding(Arc::clone(&mapper)),
+            Arc::clone(&source) as Arc<dyn EventSource>,
+        )
+        .context("the camel binding")?
+        .with_dead_letter_sink(Arc::new(SqliteDeadLetters::new(Arc::new(store))));
         let mut context = CamelContext::builder()
             .build()
             .await
@@ -258,16 +295,8 @@ impl Camel {
         context.register_component(DirectComponent::new());
         context.register_component(component);
         for config in &routes {
-            let definition = RouteBuilder::from(&config.from)
-                .route_id(camel_route_id(&config.id))
-                .set_header(ROUTE_HEADER, Value::String(config.id.clone()))
-                .set_header_fn(ID_HEADER, message_id_of)
-                .to(format!("harvest:{STREAM}?idHeader={ID_HEADER}"))
-                .build()
-                .with_context(|| format!("building camel route `{}`", config.id))?;
-            check_route(&definition).with_context(|| format!("camel route `{}`", config.id))?;
             context
-                .add_route_definition(definition)
+                .add_route_definition(definition(config)?)
                 .await
                 .with_context(|| format!("adding camel route `{}`", config.id))?;
         }
@@ -277,7 +306,75 @@ impl Camel {
             context,
             source,
             inbound: Arc::new(inbound),
+            mapper,
+            routes,
         })
+    }
+
+    /// Runs the routes of `mapper` in place of the routes that run. A route
+    /// that is gone or changed stops first. Then the new mapper takes the
+    /// messages, and each new or changed route starts. A route that did not
+    /// change runs on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a route does not stop, build or start.
+    pub async fn reload(&mut self, mapper: Mapper) -> Result<()> {
+        let next = mapper.routes.clone();
+        let runtime = self.context.runtime();
+        let gone: Vec<CamelRoute> = self
+            .routes
+            .iter()
+            .filter(|route| !next.contains(route))
+            .cloned()
+            .collect();
+        for config in &gone {
+            let route_id = camel_route_id(&config.id);
+            for command in [
+                RuntimeCommand::StopRoute {
+                    route_id: route_id.clone(),
+                    command_id: command_id(),
+                    causation_id: None,
+                },
+                RuntimeCommand::RemoveRoute {
+                    route_id: route_id.clone(),
+                    command_id: command_id(),
+                    causation_id: None,
+                },
+            ] {
+                runtime
+                    .execute(command)
+                    .await
+                    .with_context(|| format!("stopping camel route `{}`", config.id))?;
+            }
+            self.routes.retain(|route| route != config);
+        }
+        *self.mapper.write().unwrap_or_else(PoisonError::into_inner) = mapper;
+        let added: Vec<CamelRoute> = next
+            .iter()
+            .filter(|route| !self.routes.contains(route))
+            .cloned()
+            .collect();
+        for config in &added {
+            self.context
+                .add_route_definition(definition(config)?)
+                .await
+                .with_context(|| format!("adding camel route `{}`", config.id))?;
+            runtime
+                .execute(RuntimeCommand::StartRoute {
+                    route_id: camel_route_id(&config.id),
+                    command_id: command_id(),
+                    causation_id: None,
+                })
+                .await
+                .with_context(|| format!("starting camel route `{}`", config.id))?;
+            // A later failure leaves this route in the list, so the next
+            // reload does not add it twice.
+            self.routes.push(config.clone());
+        }
+        self.routes = next;
+        tracing::info!(routes = self.routes.len(), "camel routes reloaded");
+        Ok(())
     }
 
     /// The bridge, for the loop that receives and settles.
@@ -294,6 +391,12 @@ impl Camel {
         }
         self.source.close().await;
     }
+}
+
+/// A fresh id for one command of the camel runtime.
+fn command_id() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!("lg-reload-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Receives batches, has the runtime task apply them, and settles them.

@@ -133,8 +133,35 @@ pub fn render(response: &Response) -> (String, bool) {
             },
             true,
         ),
+        Response::Reloaded {
+            applied,
+            restart,
+            profile,
+        } => (render_reload(applied, restart, profile), true),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// The sections a reload applied, and the sections that wait.
+fn render_reload(applied: &[String], restart: &[String], profile: &[String]) -> String {
+    let mut lines = vec![if applied.is_empty() && profile.is_empty() {
+        String::from("the config changed nothing that runs")
+    } else {
+        format!("applied: {}", applied.join(", "))
+    }];
+    if !profile.is_empty() {
+        lines.push(format!(
+            "stored, but the assistant keeps its profile until autumn-harvest reads it again (#2658): {}",
+            profile.join(", ")
+        ));
+    }
+    if !restart.is_empty() {
+        lines.push(format!(
+            "at the next start of `lg serve`: {}",
+            restart.join(", ")
+        ));
+    }
+    lines.join("\n")
 }
 
 /// One line per overlay version, oldest first, and the active one.

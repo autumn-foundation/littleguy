@@ -531,6 +531,28 @@ from = "file:/home/mark/lg-inbox?delete=true"
 `<data home>` is `$XDG_DATA_HOME`, or `~/.local/share`. `<config home>` is
 `$XDG_CONFIG_HOME`, or `~/.config`.
 
+### Reload
+
+The daemon watches the config file and reads it again within 2 s of a
+save. `lg reload` does the same at once and prints what changed:
+
+```sh
+lg reload
+# applied: camel, discord
+# at the next start of `lg serve`: ui
+```
+
+A new camel route starts, and a removed one stops. The chat allow lists,
+the memory and brief schedules, the approvals, the flow rules and the
+refine policy apply at once. `owner`, `san_mateo`, `google`, `sandbox`,
+`mcp`, `ui`, `hooks` and `fleet` wait for the next start. A file that does
+not parse, or a route that does not build, changes nothing.
+
+`system`, `window` and `tools` are stored, but the running assistant keeps
+the profile it started with. autumn-harvest reads the profile once per run
+(autumn-harvest #2658). Use `lg refine` to change the prompt live.
+[ADR 0018](docs/adr/0018-reload-the-config.md) explains the design.
+
 ## Who can talk to it
 
 The socket has mode 0600. The daemon also reads the peer credentials of each

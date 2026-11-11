@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 11] = [
+pub const ALL: [Feature; 12] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -68,6 +68,10 @@ pub const ALL: [Feature; 11] = [
         name: "google",
         on: cfg!(feature = "google"),
     },
+    Feature {
+        name: "fleet",
+        on: cfg!(feature = "fleet"),
+    },
 ];
 
 /// Whether this build has the feature `name`.
@@ -95,6 +99,7 @@ pub fn check(config: &Config) -> Result<()> {
         (!config.mcp.is_empty(), "[[mcp.server]]", "mcp"),
         (config.sandbox.is_some(), "[sandbox]", "sandbox"),
         (config.refine.is_some(), "[refine]", "refine"),
+        (config.fleet.is_some(), "[fleet]", "fleet"),
     ];
     let problems: Vec<String> = needs
         .into_iter()

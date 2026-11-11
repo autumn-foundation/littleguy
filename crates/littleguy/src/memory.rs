@@ -7,7 +7,10 @@
 //! the `memory` block.
 //!
 //! The notes and the log live in `memory.db` beside `lg.db`
-//! (`littleguy-stores`), so the runtime stays the one writer of `lg.db`. An
+//! (`littleguy-stores`), so the runtime stays the one writer of `lg.db`.
+//! With a `[fleet]`, they live in the tenant database of the owner instead
+//! (ADR 0017). The first start on a fleet moves the rows of `memory.db`
+//! into it. An
 //! engine schedule in `lg.db` starts the pass each night. The daemon tick
 //! fires it, so a pass runs only while the daemon runs. After a gap the
 //! schedule fires once, then counts on from then.
@@ -37,16 +40,46 @@ pub fn path_for(db: &Path) -> PathBuf {
         .join(MEMORY_FILE)
 }
 
-/// Opens the memory store beside `db`.
+/// The name that `memory.db` takes once its rows moved into a tenant
+/// database. The file stays, so an owner can go back.
+pub const IMPORTED_FILE: &str = "memory.db.imported";
+
+/// Opens the memory store: in the `tenant` database of a fleet, or beside
+/// `db`.
+///
+/// On a fleet, the rows of `memory.db` move into an empty tenant database
+/// once. The old file then takes the name [`IMPORTED_FILE`].
 ///
 /// # Errors
 ///
-/// Returns an error when the file does not open.
-pub fn open(db: &Path) -> Result<Arc<SqliteStores>> {
-    let path = path_for(db);
-    Ok(Arc::new(
-        SqliteStores::open(&path).with_context(|| format!("opening {}", path.display()))?,
-    ))
+/// Returns an error when a file does not open, or the move fails.
+pub fn open(db: &Path, tenant: Option<&Path>) -> Result<Arc<SqliteStores>> {
+    let Some(tenant) = tenant else {
+        let path = path_for(db);
+        return Ok(Arc::new(
+            SqliteStores::open(&path).with_context(|| format!("opening {}", path.display()))?,
+        ));
+    };
+    let stores = SqliteStores::open_shared(tenant)
+        .with_context(|| format!("opening the stores in {}", tenant.display()))?;
+    let old = path_for(db);
+    if old.exists() {
+        if stores
+            .import(&old)
+            .with_context(|| format!("moving {} into the tenant database", old.display()))?
+        {
+            let imported = old.with_file_name(IMPORTED_FILE);
+            std::fs::rename(&old, &imported)
+                .with_context(|| format!("renaming {}", old.display()))?;
+            tracing::info!(from = %old.display(), "the memory moved into the tenant database");
+        } else {
+            tracing::warn!(
+                file = %old.display(),
+                "the tenant database holds a memory already, so this file stays unread"
+            );
+        }
+    }
+    Ok(Arc::new(stores))
 }
 
 /// Gives the harness the stores, and the agents of `db` a directory, so the
@@ -94,4 +127,45 @@ pub fn schedule(rt: &mut SqliteRuntime, config: &MemoryConfig) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tenant file in WAL mode that another connection keeps open, as
+    /// the fleet does.
+    fn tenant(path: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row("PRAGMA journal_mode = wal", [], |_| Ok(()))
+            .unwrap();
+        conn.execute_batch("CREATE TABLE keeper (x INTEGER)")
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn the_first_open_on_a_fleet_moves_memory_db_into_the_tenant() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        open(&db, None).unwrap().mark_sent("brief:1").unwrap();
+        let file = dir.path().join("mark.db");
+        let keeper = tenant(&file);
+
+        let stores = open(&db, Some(&file)).unwrap();
+        assert!(stores.was_sent("brief:1").unwrap());
+        assert!(!path_for(&db).exists());
+        assert!(dir.path().join(IMPORTED_FILE).exists());
+
+        // A later open finds no memory.db, and keeps the rows.
+        drop(stores);
+        assert!(open(&db, Some(&file)).unwrap().was_sent("brief:1").unwrap());
+
+        // A memory.db that comes back stays unread beside a full tenant.
+        open(&db, None).unwrap().mark_sent("brief:2").unwrap();
+        let stores = open(&db, Some(&file)).unwrap();
+        assert!(!stores.was_sent("brief:2").unwrap());
+        assert!(path_for(&db).exists());
+        drop(keeper);
+    }
 }

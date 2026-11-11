@@ -231,6 +231,9 @@ pub enum ConfigError {
     /// The refine section is not valid.
     #[error("the refine section is not valid: {0}")]
     Refine(String),
+    /// The fleet section is not valid.
+    #[error("the fleet section is not valid: {0}")]
+    Fleet(String),
     /// A camel route reads from a component that littleguy does not run.
     #[error("camel route `{id}` reads from `{from}`: use one of {}", CAMEL_SCHEMES.join(", "))]
     CamelScheme {
@@ -355,6 +358,141 @@ fn hooks(raw: RawHooks) -> Result<HooksConfig, ConfigError> {
         )));
     }
     Ok(HooksConfig { bind, token_env })
+}
+
+/// The RPO of the tenant database when the config names none, in seconds.
+pub const DEFAULT_FLEET_RPO_SECS: u64 = 30;
+
+/// The variable of the replica key id when the config names none.
+pub const DEFAULT_REPLICA_KEY_ID_ENV: &str = "LG_REPLICA_ACCESS_KEY_ID";
+
+/// The variable of the replica secret key when the config names none.
+pub const DEFAULT_REPLICA_SECRET_ENV: &str = "LG_REPLICA_SECRET_ACCESS_KEY";
+
+/// The tenant database of the owner on an autumn-web fleet (ADR 0017).
+///
+/// The memory, the episode log and the approvals live in it, and the fleet
+/// ships its WAL to the replica. A new volume restores the file from the
+/// replica when `restore_missing` is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetConfig {
+    /// The directory of the fleet. `None` puts it in `fleet` beside the
+    /// database.
+    pub root: Option<std::path::PathBuf>,
+    /// Whether a missing tenant file comes back from the replica at start.
+    pub restore_missing: bool,
+    /// How much time of writes a lost volume can lose, in seconds.
+    pub rpo_secs: u64,
+    /// Where the fleet ships the tenant database.
+    pub replica: Replica,
+}
+
+/// Where the fleet ships the tenant database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Replica {
+    /// A directory, such as a mounted volume. Good for a test.
+    Path(std::path::PathBuf),
+    /// A bucket of an S3-compatible store, such as R2, S3 or Tigris.
+    S3(S3Replica),
+}
+
+/// A bucket of an S3-compatible store. The keys come from the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3Replica {
+    /// The bucket name.
+    pub bucket: String,
+    /// The region. R2 takes `auto`.
+    pub region: Option<String>,
+    /// The endpoint of a store that is not AWS.
+    pub endpoint: Option<String>,
+    /// The variable that holds the access key id.
+    pub access_key_id_env: String,
+    /// The variable that holds the secret access key.
+    pub secret_access_key_env: String,
+    /// Whether the bucket goes in the path of the URL, not the host.
+    pub force_path_style: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFleet {
+    root: Option<String>,
+    restore_missing: Option<bool>,
+    rpo_secs: Option<u64>,
+    replica: Option<RawReplica>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawReplica {
+    path: Option<String>,
+    s3: Option<RawS3>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawS3 {
+    bucket: String,
+    region: Option<String>,
+    endpoint: Option<String>,
+    access_key_id_env: Option<String>,
+    secret_access_key_env: Option<String>,
+    force_path_style: Option<bool>,
+}
+
+/// Checks the fleet section.
+fn fleet(raw: RawFleet) -> Result<FleetConfig, ConfigError> {
+    let bad = |text: &str| Err(ConfigError::Fleet(text.to_owned()));
+    let replica = match raw.replica {
+        None => return bad("it needs a [fleet.replica] with a path or an s3 table"),
+        Some(RawReplica {
+            path: Some(path),
+            s3: None,
+        }) if !path.trim().is_empty() => Replica::Path(path.trim().into()),
+        Some(RawReplica {
+            path: None,
+            s3: Some(s3),
+        }) => Replica::S3(s3_replica(s3)?),
+        Some(_) => return bad("[fleet.replica] takes a path or an s3 table, not both"),
+    };
+    let rpo_secs = raw.rpo_secs.unwrap_or(DEFAULT_FLEET_RPO_SECS);
+    if rpo_secs == 0 {
+        return bad("rpo_secs must be 1 or more");
+    }
+    Ok(FleetConfig {
+        root: raw
+            .root
+            .filter(|root| !root.trim().is_empty())
+            .map(Into::into),
+        restore_missing: raw.restore_missing.unwrap_or(false),
+        rpo_secs,
+        replica,
+    })
+}
+
+/// Checks the s3 table of the replica.
+fn s3_replica(raw: RawS3) -> Result<S3Replica, ConfigError> {
+    if raw.bucket.trim().is_empty() {
+        return Err(ConfigError::Fleet(String::from("the s3 bucket is empty")));
+    }
+    let variable = |name: Option<String>, default: &str| {
+        let name = name.unwrap_or_else(|| default.to_owned());
+        if is_variable(&name) {
+            Ok(name)
+        } else {
+            Err(ConfigError::Fleet(format!(
+                "`{name}` is not an environment variable name"
+            )))
+        }
+    };
+    Ok(S3Replica {
+        bucket: raw.bucket.trim().to_owned(),
+        region: raw.region,
+        endpoint: raw.endpoint,
+        access_key_id_env: variable(raw.access_key_id_env, DEFAULT_REPLICA_KEY_ID_ENV)?,
+        secret_access_key_env: variable(raw.secret_access_key_env, DEFAULT_REPLICA_SECRET_ENV)?,
+        force_path_style: raw.force_path_style.unwrap_or(false),
+    })
 }
 
 /// The transcript messages that a refine proposal reads, when the config
@@ -1053,6 +1191,7 @@ struct Raw {
     #[serde(default)]
     ui: RawUi,
     hooks: Option<RawHooks>,
+    fleet: Option<RawFleet>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1336,6 +1475,8 @@ pub struct Config {
     pub ui: UiConfig,
     /// The inbound hooks, when the config has the section.
     pub hooks: Option<HooksConfig>,
+    /// The tenant database on a fleet, when the config has the section.
+    pub fleet: Option<FleetConfig>,
 }
 
 impl Config {
@@ -1361,6 +1502,7 @@ impl Config {
             refine: None,
             ui: UiConfig::default(),
             hooks: None,
+            fleet: None,
         }
     }
 
@@ -1427,6 +1569,7 @@ impl Config {
             refine: raw.refine.map(refine).transpose()?,
             ui: ui(raw.ui)?,
             hooks: raw.hooks.map(hooks).transpose()?,
+            fleet: raw.fleet.map(fleet).transpose()?,
         })
     }
 
@@ -1492,6 +1635,51 @@ mod tests {
             assert!(matches!(result, Err(ConfigError::Ui(_))), "{bad}");
         }
         assert!(Config::parse("owner = \"mark\"\n[ui]\nport = 1").is_err());
+    }
+
+    #[test]
+    fn the_fleet_section_needs_one_replica() {
+        let path = Config::parse(
+            "owner = \"mark\"\n[fleet]\nroot = \"/data/fleet\"\n[fleet.replica]\npath = \"/mnt/replica\"",
+        )
+        .unwrap()
+        .fleet
+        .unwrap();
+        assert_eq!(path.root, Some("/data/fleet".into()));
+        assert_eq!(path.replica, Replica::Path("/mnt/replica".into()));
+        assert_eq!(path.rpo_secs, DEFAULT_FLEET_RPO_SECS);
+        assert!(!path.restore_missing);
+
+        let s3 = Config::parse(
+            "owner = \"mark\"\n[fleet]\nrestore_missing = true\nrpo_secs = 10\n[fleet.replica.s3]\nbucket = \"lg\"\nregion = \"auto\"\nendpoint = \"https://r2.example\"\nforce_path_style = true",
+        )
+        .unwrap()
+        .fleet
+        .unwrap();
+        assert!(s3.restore_missing);
+        assert_eq!(s3.rpo_secs, 10);
+        assert_eq!(s3.root, None);
+        let Replica::S3(bucket) = s3.replica else {
+            panic!("an s3 replica");
+        };
+        assert_eq!(bucket.bucket, "lg");
+        assert_eq!(bucket.region.as_deref(), Some("auto"));
+        assert_eq!(bucket.access_key_id_env, DEFAULT_REPLICA_KEY_ID_ENV);
+        assert_eq!(bucket.secret_access_key_env, DEFAULT_REPLICA_SECRET_ENV);
+        assert!(bucket.force_path_style);
+
+        for bad in [
+            "[fleet]",
+            "[fleet]\nrpo_secs = 0\n[fleet.replica]\npath = \"/r\"",
+            "[fleet.replica]\npath = \" \"",
+            "[fleet.replica]\npath = \"/r\"\n[fleet.replica.s3]\nbucket = \"b\"",
+            "[fleet.replica.s3]\nbucket = \" \"",
+            "[fleet.replica.s3]\nbucket = \"b\"\naccess_key_id_env = \"not a name\"",
+            "[fleet]\nnope = 1\n[fleet.replica]\npath = \"/r\"",
+        ] {
+            let text = format!("owner = \"mark\"\n{bad}");
+            assert!(Config::parse(&text).is_err(), "{bad} parsed");
+        }
     }
 
     #[test]

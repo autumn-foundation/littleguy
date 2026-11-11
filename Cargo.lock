@@ -3639,6 +3639,7 @@ dependencies = [
  "littleguy-tools",
  "maud",
  "reqwest 0.12.28",
+ "rusqlite",
  "rustix",
  "san-mateo",
  "san-mateo-sqlite",

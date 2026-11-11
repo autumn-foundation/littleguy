@@ -32,6 +32,8 @@ mod chats;
 mod client;
 mod daemon;
 mod features;
+#[cfg(feature = "fleet")]
+mod fleet;
 mod guard;
 mod memory;
 #[cfg(feature = "oauth")]
@@ -507,6 +509,13 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     #[cfg(feature = "oauth")]
     let connections = connections(&config, &db).await?;
     let sandbox = config.sandbox.as_ref().map(sandbox::runtime).transpose()?;
+    // The tenant database opens before the daemon, which keeps its stores
+    // there.
+    #[cfg(feature = "fleet")]
+    let tenant = match &config.fleet {
+        Some(fleet) => Some(fleet::Tenant::open(fleet, &db, &config.owner).await?),
+        None => None,
+    };
     let mcp = tools::mcp_tools(&config.mcp).await;
     let extras = daemon::Extras {
         sandbox,
@@ -523,6 +532,10 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         slack: links.slack.is_some(),
         #[cfg(not(feature = "slack"))]
         slack: false,
+        #[cfg(feature = "fleet")]
+        tenant: tenant.as_ref().map(|tenant| tenant.path().to_path_buf()),
+        #[cfg(not(feature = "fleet"))]
+        tenant: None,
     };
     #[cfg(feature = "discord")]
     let discord = links.discord.is_some();
@@ -577,6 +590,11 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         })
     })
     .await?;
+    // The daemon has stopped, so the replicator ships the last writes.
+    #[cfg(feature = "fleet")]
+    if let Some(tenant) = tenant {
+        tenant.close().await;
+    }
     // The socket file goes with the daemon. A crash leaves it, and the next
     // start replaces it.
     let _ = std::fs::remove_file(&socket);

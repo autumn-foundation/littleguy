@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn the_gate_watches_the_labels_of_ask_rules() {
         let dir = tempfile::tempdir().unwrap();
-        let stores = crate::memory::open(&dir.path().join("lg.db")).unwrap();
+        let stores = crate::memory::open(&dir.path().join("lg.db"), None).unwrap();
         let gate = ApprovalGate::new(Arc::clone(&stores), false, false, &FlowRules::rule_of_two());
         let web = tool("web", ToolEffect::ReadOnly, &[UNTRUSTED_INPUT]);
         let note = tool("note", ToolEffect::Internal, &[]);

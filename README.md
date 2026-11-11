@@ -195,7 +195,8 @@ consolidate = "0 3 * * *"       # cron, in the time zone below
 timezone = "Europe/London"      # IANA name; the default is UTC
 ```
 
-The notes and the log live in `memory.db`, next to `lg.db`. The pass runs
+The notes and the log live in `memory.db`, next to `lg.db`, or in the
+tenant database of a [fleet](#fleet). The pass runs
 only while `lg serve` runs. After a night off it runs once, at the next
 start. [ADR 0005](docs/adr/0005-memory-and-consolidation.md) explains the
 design.
@@ -441,6 +442,36 @@ With `SLACK_SIGNING_SECRET`, Slack calls its own two hooks, and the Slack
 signature guards them.
 [ADR 0015](docs/adr/0015-hooks-that-wake-the-host.md) explains the design.
 
+## Fleet
+
+A host can lose its volume. With the `fleet` feature and a `[fleet]`
+section, the memory, the episode log and the approvals live in a tenant
+database, `<owner>.db`, and the replicator of autumn-web ships its WAL to a
+replica:
+
+```toml
+[fleet]
+root = "/data/fleet"       # the default is `fleet` next to the database
+restore_missing = true     # a new volume restores the file from the replica
+rpo_secs = 30              # the default; it ships every 15 s
+
+[fleet.replica.s3]         # or: [fleet.replica] path = "/mnt/replica"
+bucket = "littleguy"
+region = "auto"
+endpoint = "https://<account>.r2.cloudflarestorage.com"
+force_path_style = true
+# access_key_id_env = "LG_REPLICA_ACCESS_KEY_ID"          # the defaults
+# secret_access_key_env = "LG_REPLICA_SECRET_ACCESS_KEY"
+```
+
+Any S3-compatible store fits: R2, S3 or Tigris. The first start moves the
+rows of `memory.db` into the tenant database and renames the old file
+`memory.db.imported`. Serve one owner from one host only: nothing fences a
+second host yet. The refine overlays, the OAuth connections and `lg.db`
+stay on the volume for now.
+[ADR 0017](docs/adr/0017-the-tenant-database-on-a-fleet.md) explains the
+design.
+
 ## Refine loop
 
 The assistant can propose changes to its own profile. Add a `[refine]`
@@ -495,6 +526,7 @@ from = "file:/home/mark/lg-inbox?delete=true"
 | none | `SLACK_SIGNING_SECRET` | unset: Slack over Socket Mode, if at all |
 | none | `LG_SAN_MATEO_KEY` | required with `[san_mateo]` |
 | none | `LG_HOOK_TOKEN` | required with `[hooks]` |
+| none | `LG_REPLICA_ACCESS_KEY_ID`, `LG_REPLICA_SECRET_ACCESS_KEY` | required with `[fleet.replica.s3]` |
 
 `<data home>` is `$XDG_DATA_HOME`, or `~/.local/share`. `<config home>` is
 `$XDG_CONFIG_HOME`, or `~/.config`.

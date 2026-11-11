@@ -47,11 +47,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tokio-util = { version = "0.7", optional = true }
 
 [features]
 default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine"]
 # Every integration.
-full = ["default", "camel", "google"]
+full = ["default", "camel", "google", "fleet"]
 # Discord direct messages over the gateway.
 discord = ["littleguy-channels/discord"]
 # Slack direct messages over Socket Mode, or over the Events API as a hook.
@@ -85,11 +86,16 @@ camel = [
 oauth = ["dep:san-mateo", "dep:san-mateo-sqlite", "dep:axum"]
 # `[google]`: the Gmail and Google Calendar tools. Needs `oauth`.
 google = ["oauth", "littleguy-tools/google"]
+# `[fleet]`: the memory, the episodes and the approvals in a tenant database,
+# replicated to a directory or an S3-compatible store by autumn-web. The
+# replication of autumn-web needs a database backend, so it takes `postgres`.
+fleet = ["autumn-web/postgres", "autumn-web/http-client", "dep:tokio-util"]
 
 [dev-dependencies]
 autumn-web = { version = "0.10", default-features = false, features = ["maud", "htmx", "test-support"] }
 base64 = "0.23"
 reqwest = { version = "0.12", default-features = false }
+rusqlite = { version = "0.40", features = ["bundled"] }
 littleguy-channels = { workspace = true, features = ["testing"] }
 littleguy-tools = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }

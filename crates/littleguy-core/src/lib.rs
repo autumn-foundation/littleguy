@@ -11,10 +11,10 @@ pub mod route;
 
 pub use config::{
     ApprovalsConfig, BriefConfig, CamelRoute, ChatConfig, Config, ConfigError, DiscordConfig,
-    FirecrackerConfig, FlowConfig, FlowRecheck, GoogleConfig, HooksConfig, Integration, McpServer,
-    McpTransport, MemoryConfig, RefineConfig, RefineDimension, SanMateoConfig, SanMateoError,
-    SandboxBackend, SandboxConfig, SlackConfig, ToolsConfig, UiConfig, chat_user, discord_sender,
-    slack_sender,
+    FirecrackerConfig, FleetConfig, FlowConfig, FlowRecheck, GoogleConfig, HooksConfig,
+    Integration, McpServer, McpTransport, MemoryConfig, RefineConfig, RefineDimension, Replica,
+    S3Replica, SanMateoConfig, SanMateoError, SandboxBackend, SandboxConfig, SlackConfig,
+    ToolsConfig, UiConfig, chat_user, discord_sender, slack_sender,
 };
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
 pub use pairing::{PairingCode, Pending, PendingPairings};

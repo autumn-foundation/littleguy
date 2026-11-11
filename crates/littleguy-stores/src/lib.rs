@@ -22,7 +22,7 @@
 //! ([`approvals`]).
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
 use autumn_harvest_agent::episode::{
@@ -31,7 +31,7 @@ use autumn_harvest_agent::episode::{
 use autumn_harvest_agent::memory::{EditKey, MemoryBlock, MemoryOp, MemoryScope, MemoryStore};
 use autumn_harvest_agent::model::BoxFuture;
 use autumn_harvest_agent::{AgentError, ErrorKind};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub mod approvals;
 
@@ -96,12 +96,31 @@ pub enum StoreError {
     },
 }
 
+/// The tables of the stores, in the order an import copies them.
+const TABLES: [&str; 6] = [
+    "memory_scopes",
+    "memory_edits",
+    "episode_logs",
+    "sent_reports",
+    "episode_clears",
+    "approvals",
+];
+
+/// Where the stores get a connection.
+enum Source {
+    /// One connection for the life of the stores.
+    Held(Connection),
+    /// A file that another part keeps open and checkpoints. Each call opens
+    /// its own connection, and closes it before it returns.
+    Shared(PathBuf),
+}
+
 /// The memory and the episode log of every agent, in one SQLite file.
 ///
 /// Its `Debug` output shows no entry and no episode, because both can hold
 /// personal data.
 pub struct SqliteStores {
-    conn: Mutex<Connection>,
+    source: Mutex<Source>,
     template: Vec<MemoryBlock>,
 }
 
@@ -132,18 +151,101 @@ impl SqliteStores {
         Self::with_connection(Connection::open_in_memory()?)
     }
 
-    fn with_connection(conn: Connection) -> Result<Self, StoreError> {
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if found > SCHEMA_VERSION {
-            return Err(StoreError::Schema { found });
-        }
-        conn.execute_batch(SCHEMA)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    /// Opens the stores in the file at `path`, which another part keeps
+    /// open in WAL mode. The fleet of autumn-web does that for the tenant
+    /// database (ADR 0017).
+    ///
+    /// The fleet replicates the file, so only its replicator may checkpoint
+    /// the WAL. Each call opens a connection with the checkpoint off, and
+    /// closes it at once. A connection that is not the last one open does
+    /// not checkpoint at its close.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file does not exist or does not open, or
+    /// holds a newer schema.
+    pub fn open_shared(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref().to_path_buf();
+        prepare(&shared_connection(&path)?)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            source: Mutex::new(Source::Shared(path)),
             template: MemoryBlock::defaults(),
         })
+    }
+
+    /// Creates the shared file at `path` in WAL mode with the tables, when
+    /// it does not exist. A file that exists keeps its journal mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file does not open, or holds a newer
+    /// schema.
+    pub fn create_shared(path: impl AsRef<Path>) -> Result<(), StoreError> {
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+        let mode: String = conn.query_row("PRAGMA journal_mode = wal", [], |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            return Err(StoreError::Sqlite(rusqlite::Error::InvalidQuery));
+        }
+        prepare(&conn)
+    }
+
+    fn with_connection(conn: Connection) -> Result<Self, StoreError> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        prepare(&conn)?;
+        Ok(Self {
+            source: Mutex::new(Source::Held(conn)),
+            template: MemoryBlock::defaults(),
+        })
+    }
+
+    /// Copies each row of the stores in the file at `old` into these
+    /// stores, when these hold no row yet. Returns whether it copied.
+    ///
+    /// The daemon calls it once, when the memory moves from `memory.db`
+    /// into a tenant database. The copy runs in one transaction, so a crash
+    /// leaves the stores empty, and the next start copies again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `old` does not open, holds a newer schema, or
+    /// the copy fails.
+    pub fn import(&self, old: &Path) -> Result<bool, StoreError> {
+        // The open brings an older file up to the current schema.
+        drop(Self::open(old)?);
+        self.connected(|conn| {
+            let empty = TABLES.iter().try_fold(true, |empty, table| {
+                let rows: i64 =
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
+                Ok::<_, rusqlite::Error>(empty && rows == 0)
+            })?;
+            if !empty {
+                return Ok(false);
+            }
+            conn.execute("ATTACH DATABASE ?1 AS old", params![old.to_string_lossy()])?;
+            let copied = copy_tables(conn);
+            conn.execute("DETACH DATABASE old", [])?;
+            copied?;
+            Ok(true)
+        })
+    }
+
+    /// Runs `f` on a connection of the stores.
+    fn connected<T, E: From<rusqlite::Error>>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut source = self.source.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *source {
+            Source::Held(conn) => f(conn),
+            Source::Shared(path) => {
+                let mut conn = shared_connection(path)?;
+                f(&mut conn)
+            }
+        }
     }
 
     /// Runs `f` in one immediate transaction, and commits when it succeeds.
@@ -151,20 +253,18 @@ impl SqliteStores {
         &self,
         f: impl FnOnce(&Transaction<'_>) -> Result<T, Failure>,
     ) -> Result<T, AgentError> {
-        let mut conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        let run = || -> Result<T, Failure> {
+        self.connected(|conn| {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let value = f(&tx)?;
             tx.commit()?;
             Ok(value)
-        };
-        run().map_err(Failure::into_agent)
+        })
+        .map_err(Failure::into_agent)
     }
 
     /// Runs `f` on the connection, for a read.
     fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Failure>) -> Result<T, AgentError> {
-        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        f(&conn).map_err(Failure::into_agent)
+        self.connected(|conn| f(conn)).map_err(Failure::into_agent)
     }
 
     /// Whether a delivery sent the report with `key`.
@@ -421,6 +521,51 @@ fn encode(value: &impl serde::Serialize) -> Result<String, Failure> {
 
 fn decode<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Failure> {
     serde_json::from_str(text).map_err(Failure::Json)
+}
+
+/// How long a call waits for the lock of another writer.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A connection to the shared file at `path`, with the checkpoint off. It
+/// never creates the file: the part that keeps it open does.
+fn shared_connection(path: &Path) -> rusqlite::Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    Ok(conn)
+}
+
+/// Checks the schema version of `conn`, and creates the tables.
+fn prepare(conn: &Connection) -> Result<(), StoreError> {
+    let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if found > SCHEMA_VERSION {
+        return Err(StoreError::Schema { found });
+    }
+    conn.execute_batch(SCHEMA)?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Copies each table of the attached database `old` into `main`, by the
+/// column names. An older file gained its columns at the end, so the
+/// column order of the two files can differ.
+fn copy_tables(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    for table in TABLES {
+        let columns = {
+            let mut statement = tx.prepare(&format!("PRAGMA old.table_info({table})"))?;
+            let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+            names.collect::<rusqlite::Result<Vec<_>>>()?.join(", ")
+        };
+        tx.execute(
+            &format!("INSERT INTO main.{table} ({columns}) SELECT {columns} FROM old.{table}"),
+            [],
+        )?;
+    }
+    tx.commit()
 }
 
 /// A failure inside one store call.

@@ -11,6 +11,8 @@
 pub mod hooks;
 pub mod logins;
 mod pages;
+#[cfg(feature = "slack")]
+pub mod slack;
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -27,6 +29,8 @@ use tokio::task::JoinHandle;
 
 pub use hooks::HookToken;
 pub use logins::Logins;
+#[cfg(feature = "slack")]
+pub use slack::SlackHook;
 
 use crate::daemon::Handle;
 
@@ -42,6 +46,9 @@ pub struct Web {
     pub logins: Logins,
     /// The bearer token of the hooks, when the hooks serve.
     pub hooks: Option<HookToken>,
+    /// The Slack hooks, when Slack runs over the Events API.
+    #[cfg(feature = "slack")]
+    pub slack: Option<SlackHook>,
 }
 
 /// Where the app serves, and what.
@@ -143,6 +150,8 @@ pub fn routes(plan: &Plan) -> Vec<autumn_web::Route> {
     }
     if plan.hooks {
         routes.extend(hooks::routes());
+        #[cfg(feature = "slack")]
+        routes.extend(slack::routes());
     }
     routes
 }

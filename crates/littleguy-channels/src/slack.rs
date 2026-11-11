@@ -216,6 +216,32 @@ impl std::fmt::Debug for SlackApi {
     }
 }
 
+/// The signing secret of a Slack app, for the Events API. Slack signs each
+/// request with it. Its `Debug` output hides the value.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SigningSecret(String);
+
+impl SigningSecret {
+    /// The secret in `value`, or `None` when it is blank.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into();
+        (!value.trim().is_empty()).then_some(Self(value))
+    }
+
+    /// The secret itself, for the signature check alone.
+    #[must_use]
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SigningSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SigningSecret(..)")
+    }
+}
+
 /// Which token a call sends.
 #[derive(Clone, Copy)]
 enum Token {
@@ -240,6 +266,13 @@ impl SlackApi {
             app_token: app_token.into(),
             client: http_client(),
         }
+    }
+
+    /// A client against `base` with the bot token alone, for the Events
+    /// API. It has no app-level token, so it cannot open Socket Mode.
+    #[must_use]
+    pub fn web_only(base: impl Into<String>, bot_token: impl Into<String>) -> Self {
+        Self::new(base, bot_token, String::new())
     }
 
     /// Sends `text` to `channel`, split into pieces that Slack takes.
@@ -568,6 +601,15 @@ mod tests {
 
     fn dm(ts: &str, text: &str) -> Value {
         json!({"type": "message", "channel": "D1", "channel_type": "im", "user": "U1", "text": text, "ts": ts})
+    }
+
+    #[test]
+    fn a_signing_secret_is_never_blank_and_never_printed() {
+        assert_eq!(SigningSecret::new(""), None);
+        assert_eq!(SigningSecret::new("  "), None);
+        let secret = SigningSecret::new("s3cret").unwrap();
+        assert_eq!(secret.expose(), "s3cret");
+        assert_eq!(format!("{secret:?}"), "SigningSecret(..)");
     }
 
     #[test]

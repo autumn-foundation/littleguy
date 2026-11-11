@@ -134,6 +134,26 @@ Every reply escapes `&`, `<` and `>`, so no answer can mention `@channel`
 or a person. Discord and Slack can run in one daemon.
 [ADR 0011](docs/adr/0011-slack-over-socket-mode.md) explains the design.
 
+### Slack over the Events API
+
+A host that sleeps cannot hold a socket open. Slack can call it instead,
+on the hooks (see [Hooks](#hooks)). Give the bot token and the signing
+secret, not the app token:
+
+```sh
+export SLACK_BOT_TOKEN=xoxb-...
+export SLACK_SIGNING_SECRET=...   # Basic Information > App Credentials
+export LG_HOOK_TOKEN=...          # [hooks] needs it too
+cargo run --bin lg -- serve
+```
+
+In the Slack app, leave Socket Mode off. Set the request URL of **Event
+Subscriptions** to `https://<host>/hooks/slack/events`, and the one of
+**Interactivity** to `https://<host>/hooks/slack/interactions`. Each
+request needs a good Slack signature. Both the app token and the signing
+secret stop `lg serve` at start.
+[ADR 0016](docs/adr/0016-slack-over-the-events-api.md) explains the design.
+
 ## Camel routes
 
 Feature `camel`, off by default.
@@ -417,6 +437,8 @@ token_env = "LG_HOOK_TOKEN"  # the default; at least 32 characters
 due timers and answers once the runs block, so the host stays awake while
 they work. Call it from a cron. With `[hooks]`, the app serves on the
 hooks address, and the pages serve only when that address is loopback.
+With `SLACK_SIGNING_SECRET`, Slack calls its own two hooks, and the Slack
+signature guards them.
 [ADR 0015](docs/adr/0015-hooks-that-wake-the-host.md) explains the design.
 
 ## Refine loop
@@ -470,6 +492,7 @@ from = "file:/home/mark/lg-inbox?delete=true"
 | `--config` | `LG_CONFIG` | `<config home>/littleguy/lg.toml` |
 | none | `DISCORD_BOT_TOKEN` | unset: no Discord |
 | none | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | unset: no Slack |
+| none | `SLACK_SIGNING_SECRET` | unset: Slack over Socket Mode, if at all |
 | none | `LG_SAN_MATEO_KEY` | required with `[san_mateo]` |
 | none | `LG_HOOK_TOKEN` | required with `[hooks]` |
 

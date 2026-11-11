@@ -22,8 +22,8 @@ use.
 | M4 | Mail and calendar tools on the M1.7 connections, with drafts that wait for approval | Done (#12) |
 | M5.1 | The refine loop: profile overlays that the model proposes and the owner activates, `lg refine` | Done (#15) |
 | M5.2 | `lg serve` as an autumn-web app, with maud and htmx pages on loopback and `lg ui` sign-in links | Done (#16) |
-| M5.3 | Hooks that wake a sleeping host: `[hooks]` and `POST /hooks/tick`, after a Fly Sprite spike | This PR |
-| M5.4 | Slack over the Events API, as a hook, for a host that sleeps | Planned |
+| M5.3 | Hooks that wake a sleeping host: `[hooks]` and `POST /hooks/tick`, after a Fly Sprite spike | Done (#17) |
+| M5.4 | Slack over the Events API, as a hook, for a host that sleeps | This PR |
 | M5 | A fleet of littleguys on the autumn-web fleet seams, Postgres mode, camel request and reply, and `HarvestPlugin` once autumn-harvest #2641 lands | Planned |
 
 Each engine gap gets a workaround here first. The engine issues are
@@ -32,10 +32,11 @@ transcript stores) and #2605 (a shared Claude model). `littleguy-stores`
 is the #2604 workaround for memory and episodes. The approval records in
 `memory.db` and the Discord notice are the #2603 workaround.
 
-The Slack channel does not use `autumn-plugin-slack` 0.4. It has no Socket
-Mode, and its Web API client cannot be built outside an autumn-web app.
-`littleguy-channels` has its own Socket Mode client until the plugin has
-one.
+The Slack channel uses `autumn-plugin-slack` 0.4 for the signature check
+of the Events API only. The plugin has no Socket Mode, its Web API client
+cannot be built outside an autumn-web app, and its action routes match a
+fixed `action_id`. `littleguy-channels` has its own Socket Mode and Web API
+client until the plugin has them.
 
 The Discord channel uses `autumn-plugin-discord` 0.3 for the gateway. Three
 gaps get a workaround in `littleguy-channels`: the plugin has no call to

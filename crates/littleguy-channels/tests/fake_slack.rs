@@ -190,3 +190,18 @@ async fn the_socket_acknowledges_each_envelope_and_connects_again() -> TestResul
     tokio::time::timeout(Duration::from_secs(10), socket).await??;
     Ok(())
 }
+
+#[tokio::test]
+async fn a_web_only_client_posts_but_cannot_open_socket_mode() -> TestResult {
+    let fake = FakeSlack::start().await?;
+    let api = SlackApi::web_only(&fake.api_base, BOT_TOKEN);
+    api.send("D1", "hello").await?;
+    assert_eq!(fake.posted().len(), 1);
+    assert!(format!("{api:?}").contains("redacted"));
+    let (events_tx, _events) = mpsc::unbounded_channel();
+    let socket = tokio::spawn(run_socket(api, events_tx));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(fake.connects(), 0, "the socket never connects");
+    socket.abort();
+    Ok(())
+}

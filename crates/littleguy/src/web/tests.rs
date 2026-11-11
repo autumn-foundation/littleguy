@@ -41,20 +41,38 @@ fn config(refine: bool) -> Config {
 }
 
 async fn rig(config: &Config) -> Rig {
+    rig_with(config, None).await
+}
+
+/// A rig whose Slack runs over the Events API against the fake Slack at
+/// `slack`, when there is one.
+async fn rig_with(config: &Config, slack: Option<&str>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("lg.db");
     let plan = Plan::of(config);
     let logins = Logins::new(base_url(plan.bind));
-    let daemon = Daemon::open(&db, config, Arc::new(OfflineModel::new()), UID, false)
+    let extras = daemon::Extras {
+        slack: slack.is_some(),
+        ..daemon::Extras::default()
+    };
+    let model = Arc::new(OfflineModel::new());
+    let daemon = Daemon::open_with(&db, config, model, UID, false, extras)
         .unwrap()
         .with_logins(logins.clone());
     let listener = daemon::bind(&dir.path().join("lg.sock")).await.unwrap();
     let (handle, jobs) = daemon::jobs(UID);
+    #[cfg(feature = "slack")]
+    let (links, slack) = slack_links(&daemon, &handle, slack);
+    #[cfg(not(feature = "slack"))]
+    let links = {
+        assert!(slack.is_none(), "this build has no Slack");
+        Links::default()
+    };
     let stop = Arc::new(Notify::new());
     let stopped = Arc::clone(&stop);
     tokio::spawn(async move {
         let until = async move { stopped.notified().await };
-        daemon::run(daemon, listener, Links::default(), None, jobs, until).await
+        daemon::run(daemon, listener, links, None, jobs, until).await
     });
     let hooks = plan
         .hooks
@@ -63,6 +81,8 @@ async fn rig(config: &Config) -> Rig {
         handle: handle.clone(),
         logins: logins.clone(),
         hooks,
+        #[cfg(feature = "slack")]
+        slack,
     };
     let client = TestApp::new()
         .config(settings(&plan))
@@ -76,6 +96,23 @@ async fn rig(config: &Config) -> Rig {
         stop,
         _dir: dir,
     }
+}
+
+/// The links and the Slack hooks of a rig with the fake Slack at `base`.
+#[cfg(feature = "slack")]
+fn slack_links(daemon: &Daemon, handle: &Handle, base: Option<&str>) -> (Links, Option<SlackHook>) {
+    let Some(base) = base else {
+        return (Links::default(), None);
+    };
+    let api = littleguy_channels::SlackApi::web_only(base, slack_tests::BOT_TOKEN);
+    let secret = littleguy_channels::SigningSecret::new(slack_tests::SECRET).unwrap();
+    let hook = SlackHook::new(&secret, daemon.slack_inbox(api.clone(), handle));
+    let links = Links {
+        #[cfg(feature = "discord")]
+        discord: None,
+        slack: Some(daemon::SlackLink::Events { api, secret }),
+    };
+    (links, Some(hook))
 }
 
 /// Signs the client in with a fresh link, and returns the CSRF token of
@@ -411,3 +448,6 @@ async fn a_tick_of_a_stopped_daemon_is_an_error() {
     drop(jobs);
     assert!(handle.tick().await.is_err());
 }
+
+#[cfg(feature = "slack")]
+mod slack_tests;

@@ -45,14 +45,14 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `camel` | no | `[[camel.route]]`: Apache Camel routes that feed the assistant. | `autumn-harvest-plugin`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `harvest-camel` |
 | `claude` | yes | `--model claude`: Claude over the Messages API. | `reqwest`, `rustls`, `sha2` |
 | `discord` | yes | Discord direct messages over the gateway. | `autumn-plugin-discord`, `reqwest`, `rustls` |
-| `full` | no | Every integration. | `autumn-harvest-plugin`, `autumn-plugin-discord`, `axum`, `base64`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `futures-util`, `harvest-camel`, `reqwest`, `rmcp`, `rustls`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `tokio-tungstenite`, `url`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
+| `full` | no | Every integration. | `autumn-harvest-plugin`, `autumn-plugin-discord`, `autumn-plugin-slack`, `axum`, `base64`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `form_urlencoded`, `futures-util`, `harvest-camel`, `reqwest`, `rmcp`, `rustls`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `tokio-tungstenite`, `url`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `google` | no | `[google]`: the Gmail and Google Calendar tools. Needs `oauth`. | `axum`, `base64`, `san-mateo`, `san-mateo-sqlite` |
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
 | `openai` | yes | `--model openai` and `--model openrouter`. | `reqwest`, `rustls` |
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
-| `slack` | yes | Slack direct messages over Socket Mode. | `futures-util`, `reqwest`, `rustls`, `tokio-tungstenite` |
+| `slack` | yes | Slack direct messages over Socket Mode, or over the Events API as a hook. | `autumn-plugin-slack`, `form_urlencoded`, `futures-util`, `reqwest`, `rustls`, `tokio-tungstenite` |
 | `web` | yes | The `web_fetch` and `web_search` tools. | `reqwest`, `rustls`, `url` |
 
 ### `littleguy-channels`

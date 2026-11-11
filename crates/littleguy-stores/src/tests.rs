@@ -466,3 +466,126 @@ mod approvals {
         assert_eq!(stores.approval(id).unwrap().unwrap().tool, "run_code");
     }
 }
+
+/// Stores in a file that another part keeps open, as the tenant database of
+/// a fleet (ADR 0017).
+mod shared {
+    use std::path::Path;
+
+    use autumn_harvest_agent::memory::{EditKey, MemoryStore};
+    use serde_json::json;
+
+    use super::{add, entries, now, scope};
+    use crate::SqliteStores;
+
+    /// A connection in WAL mode with the checkpoint off, as the fleet opens
+    /// a replicated database. It stays open, as the replicator does.
+    fn keeper(path: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode = wal", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        // A write opens the WAL, as the identity row of the fleet does. The
+        // connection then holds its shared lock, so no other close is last.
+        conn.execute_batch("CREATE TABLE keeper (x INTEGER)")
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn shared_stores_keep_their_rows_and_leave_the_checkpoint_to_the_keeper() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mark.db");
+        let keeper = keeper(&path);
+        let stores = SqliteStores::open_shared(&path).unwrap();
+        // Enough writes to pass the default checkpoint of 1000 pages.
+        for n in 0..1_200 {
+            stores.mark_sent(&format!("report:{n}")).unwrap();
+        }
+        now(stores.apply(&scope(), add("Mark drinks tea"), &EditKey::new("k1"))).unwrap();
+        drop(stores);
+        // Each call closed its own connection, and none checkpointed.
+        let frames: i64 = keeper
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(1))
+            .unwrap();
+        assert!(
+            frames > 1_000,
+            "the WAL lost frames to a checkpoint: {frames}"
+        );
+
+        let again = SqliteStores::open_shared(&path).unwrap();
+        assert_eq!(entries(&again), vec![String::from("Mark drinks tea")]);
+        assert!(again.was_sent("report:1199").unwrap());
+        drop(keeper);
+    }
+
+    #[test]
+    fn create_shared_makes_a_wal_file_with_the_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mark.db");
+        SqliteStores::create_shared(&path).unwrap();
+        // A second call keeps the file.
+        SqliteStores::create_shared(&path).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        drop(conn);
+        assert!(
+            !SqliteStores::open_shared(&path)
+                .unwrap()
+                .was_sent("x")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_shared_store_does_not_create_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(SqliteStores::open_shared(dir.path().join("none.db")).is_err());
+        assert!(!dir.path().join("none.db").exists());
+    }
+
+    #[test]
+    fn the_rows_of_an_old_file_move_into_an_empty_store_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("memory.db");
+        {
+            let stores = SqliteStores::open(&old).unwrap();
+            now(stores.apply(&scope(), add("Mark drinks tea"), &EditKey::new("k1"))).unwrap();
+            stores.mark_sent("brief:1").unwrap();
+            stores
+                .record_approval("c", "run_code", &json!({"a": 1}), "ask")
+                .unwrap();
+        }
+        let path = dir.path().join("mark.db");
+        let keeper = keeper(&path);
+        let stores = SqliteStores::open_shared(&path).unwrap();
+        assert!(stores.import(&old).unwrap());
+        assert_eq!(entries(&stores), vec![String::from("Mark drinks tea")]);
+        assert!(stores.was_sent("brief:1").unwrap());
+        assert_eq!(stores.approval(1).unwrap().unwrap().tool, "run_code");
+        // The edit key moved too, so a retry changes nothing.
+        let retry = now(stores.apply(&scope(), add("Mark drinks tea"), &EditKey::new("k1")));
+        assert_eq!(retry.unwrap().entries.len(), 1);
+        // A store with rows takes nothing more.
+        assert!(!stores.import(&old).unwrap());
+        assert_eq!(entries(&stores).len(), 1);
+        drop(keeper);
+    }
+
+    #[test]
+    fn an_import_from_a_newer_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("memory.db");
+        let conn = rusqlite::Connection::open(&old).unwrap();
+        conn.pragma_update(None, "user_version", crate::SCHEMA_VERSION + 1)
+            .unwrap();
+        drop(conn);
+        let stores = SqliteStores::open_in_memory().unwrap();
+        assert!(stores.import(&old).is_err());
+    }
+}

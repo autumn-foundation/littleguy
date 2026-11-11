@@ -273,6 +273,9 @@ pub struct Extras {
     pub google: Option<Arc<dyn littleguy_tools::google::GoogleApi>>,
     /// The Slack channel takes messages.
     pub slack: bool,
+    /// The tenant database of a fleet, which holds the stores instead of
+    /// `memory.db` (ADR 0017).
+    pub tenant: Option<std::path::PathBuf>,
 }
 
 /// The daemon state: the runtime, the routing table and the pairings.
@@ -391,7 +394,7 @@ impl Daemon {
         let flow = config.flow.rules();
         let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || google_on);
         let stores = if config.memory.enabled || config.brief.is_some() || asks {
-            Some(crate::memory::open(db)?)
+            Some(crate::memory::open(db, extras.tenant.as_deref())?)
         } else {
             None
         };

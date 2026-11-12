@@ -87,6 +87,8 @@ pub enum Request {
     /// A one-time link that signs a browser in to the web pages. Only the
     /// owner may.
     UiLink,
+    /// Read the config file again, and apply it. Only the owner may.
+    Reload,
 }
 
 /// One overlay version of the assistant.
@@ -253,6 +255,17 @@ pub enum Response {
         /// The version that was active before, if any.
         previous: Option<u64>,
     },
+    /// The daemon read its config file again.
+    Reloaded {
+        /// The sections that changed and apply now.
+        applied: Vec<String>,
+        /// The sections that changed and apply at the next start.
+        restart: Vec<String>,
+        /// The sections that changed and shape the agent profile. The
+        /// running assistant keeps its profile (autumn-harvest #2658).
+        #[serde(default)]
+        profile: Vec<String>,
+    },
     /// The request was not valid, or the daemon failed.
     Error {
         /// What went wrong.
@@ -298,6 +311,7 @@ mod tests {
                 integration: String::from("google"),
             },
             Request::Connections,
+            Request::Reload,
             Request::Disconnect {
                 integration: String::from("google"),
                 connection: String::from("c-1"),

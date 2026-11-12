@@ -45,6 +45,21 @@ pub type Runtime = Arc<SandboxRuntime>;
 #[cfg(not(feature = "sandbox"))]
 pub type Runtime = std::convert::Infallible;
 
+/// A second handle on `runtime`, if any.
+#[cfg(feature = "sandbox")]
+#[must_use]
+pub fn share(runtime: Option<&Runtime>) -> Option<Runtime> {
+    runtime.cloned()
+}
+
+/// A second handle on `runtime`. This build has no sandbox, so there is
+/// none.
+#[cfg(not(feature = "sandbox"))]
+#[must_use]
+pub const fn share(_runtime: Option<&Runtime>) -> Option<Runtime> {
+    None
+}
+
 /// Gives `harness` the `run_code` tool on `runtime`, if any.
 #[cfg(feature = "sandbox")]
 #[must_use]

@@ -24,7 +24,8 @@ use.
 | M5.2 | `lg serve` as an autumn-web app, with maud and htmx pages on loopback and `lg ui` sign-in links | Done (#16) |
 | M5.3 | Hooks that wake a sleeping host: `[hooks]` and `POST /hooks/tick`, after a Fly Sprite spike | Done (#17) |
 | M5.4 | Slack over the Events API, as a hook, for a host that sleeps | Done (#18) |
-| F1 | `[fleet]`: the memory, the episodes and the approvals in a tenant database, replicated by autumn-web to a directory or an S3-compatible store, and restored on a new volume | This PR |
+| F1 | `[fleet]`: the memory, the episodes and the approvals in a tenant database, replicated by autumn-web to a directory or an S3-compatible store, and restored on a new volume | Done (#19) |
+| R1 | Reload the config without a restart: a file watch and `lg reload`, camel routes added and removed in place | This PR |
 | F2 | An agent per tenant on `DatabaseFleet` and `HarvestPlugin::sqlite_per_tenant` | Waits on autumn-harvest 0.11 |
 | F3 | The leader: one always-on host that takes Slack and forwards each event to the follower of its owner | Planned |
 | F4 | The wake sweep: the leader wakes a closed tenant at its next timer | Waits on autumn-harvest #2650 |

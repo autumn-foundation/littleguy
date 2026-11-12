@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -304,6 +305,8 @@ pub struct Daemon {
     /// The overlay store and the proposer, with a `[refine]` section.
     #[cfg(feature = "refine")]
     refine: Option<Box<crate::refine::Refine>>,
+    /// What a reload of the config needs, and the config that runs.
+    kit: Box<reload::Kit>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
@@ -369,103 +372,55 @@ impl Daemon {
         }
         let mut rt =
             SqliteRuntime::open(db).with_context(|| format!("opening {}", db.display()))?;
-        let brief = config
-            .brief
-            .as_ref()
-            .map(|settings| Calendar::new(settings, Utc::now()))
-            .transpose()?;
-        // The brief keeps its sent reports in the memory store, and the
-        // guard keeps its calls that wait. So each opens the store even
-        // when memory is off.
-        let runtime = extras.sandbox.filter(|_| config.sandbox.is_some());
-        #[cfg(feature = "google")]
-        let google = crate::tools::google_tools(config.google.as_ref(), extras.google);
-        #[cfg(not(feature = "google"))]
-        let google: Vec<Arc<dyn autumn_harvest_agent::Tool>> = Vec::new();
-        let google_on = !google.is_empty();
-        let tools = crate::tools::Tools::new(
-            &config.tools,
-            db,
-            crate::tools::search_key_from_env().as_deref(),
-        )
-        .with(extras.mcp)
-        .with(google);
-        tracing::info!(tools = ?tools.names(), "the assistant tools");
-        let flow = config.flow.rules();
-        let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || google_on);
-        let stores = if config.memory.enabled || config.brief.is_some() || asks {
-            Some(crate::memory::open(db, extras.tenant.as_deref())?)
-        } else {
-            None
-        };
-        let chats = Arc::new(Chats::default());
         let services: Vec<Service> = [(Service::Discord, discord), (Service::Slack, extras.slack)]
             .into_iter()
             .filter_map(|(service, on)| on.then_some(service))
             .collect();
-        let delivery = config
-            .brief
-            .as_ref()
-            .zip(stores.as_ref())
-            .map(|(settings, stores)| {
-                Arc::new(BriefDelivery::new(
-                    settings,
-                    Arc::clone(stores),
-                    Arc::clone(&chats),
-                ))
-            });
-        let approvals = stores.clone().filter(|_| asks);
-        let guard = approvals.clone().map(|stores| crate::guard::Guard {
-            stores,
-            timeout: Duration::from_secs(config.approvals.timeout_secs),
-            flow,
-            sandbox: runtime,
-            google: google_on,
-        });
-        let approver = config.approvals.approver.clone();
-        warn_unreachable(approver.as_ref(), &services);
-        let memory = stores
-            .filter(|_| config.memory.enabled)
-            .map(|stores| (stores, db));
-        #[cfg(feature = "refine")]
-        let refine_model = Arc::clone(&model);
-        let assistant = harness(config, model, memory, delivery, tools, guard);
-        #[cfg(feature = "refine")]
-        let (assistant, refine) = refine::attach(assistant, config, db, refine_model)?;
-        sqlite::register(&mut rt, Arc::new(assistant));
+        let chats = Arc::new(Chats::default());
+        let mut kit = reload::Kit {
+            db: db.to_path_buf(),
+            model,
+            sandbox: extras.sandbox,
+            mcp: extras.mcp,
+            #[cfg(feature = "google")]
+            google: extras.google,
+            tenant: extras.tenant,
+            services,
+            stores: None,
+            config: config.clone(),
+            file: None,
+            watch_every: reload::WATCH_EVERY,
+        };
+        let built = kit.assemble(config, &chats)?;
+        sqlite::register(&mut rt, Arc::new(built.harness));
         crate::memory::schedule(&mut rt, &config.memory)?;
         // The runtime lock is held now, so this daemon is the store's one writer.
         let store = PairStore::open(crate::pairs::path_for(db))?;
         // A request that waited before a restart still waits.
-        let waiting = match &approvals {
+        let waiting = match &built.approvals {
             Some(stores) => stores.open_approvals()?.first().map(|record| record.id),
             None => None,
         };
         Ok(Self {
-            routing: routing(config, owner_uid, &store, &services)?,
+            routing: routing(config, owner_uid, &store, &kit.services)?,
             rt,
             owner_uid,
-            config_allowed: config
-                .discord
-                .allowed
-                .iter()
-                .chain(&config.slack.allowed)
-                .cloned()
-                .collect(),
+            config_allowed: reload::config_allowed(config),
             pending: PendingPairings::default(),
             store,
             #[cfg(feature = "oauth")]
             connections: None,
-            brief,
+            brief: built.brief,
             chats,
             clock: Arc::new(Utc::now),
-            approvals,
-            approver,
+            approvals: built.approvals,
+            approver: built.approver,
             waiting,
             held: VecDeque::new(),
             logins: None,
             #[cfg(feature = "refine")]
-            refine,
+            refine: built.refine,
+            kit: Box::new(kit),
         })
     }
 
@@ -572,6 +527,7 @@ impl Daemon {
                 self.decide_and_resume(id, crate::approvals::Choice::Deny(reason))
                     .await
             }
+            Request::Reload => self.reload_file().map(|merge| reload::reloaded(&merge)),
             Request::UiLink => Ok(self.logins.as_ref().map_or_else(
                 || Response::Error {
                     message: String::from("the web pages do not serve in this daemon"),
@@ -1225,14 +1181,29 @@ async fn run_job(daemon: &mut Daemon, job: Job) {
 
 /// Runs the daemon until `stop` completes or the accept loop ends.
 ///
+/// The loop holds the daemon and the camel context, so its future lives on
+/// the heap.
+///
 /// # Errors
 ///
 /// Returns an error only when the loop cannot start.
-pub async fn run(
-    mut daemon: Daemon,
+pub fn run(
+    daemon: Daemon,
     listener: UnixListener,
     links: Links,
     camel: Option<Camel>,
+    jobs: Jobs,
+    stop: impl Future<Output = ()>,
+) -> Pin<Box<impl Future<Output = Result<()>>>> {
+    Box::pin(serve(daemon, listener, links, camel, jobs, stop))
+}
+
+/// The loop of [`run`].
+async fn serve(
+    mut daemon: Daemon,
+    listener: UnixListener,
+    links: Links,
+    mut camel: Option<Camel>,
     jobs: Jobs,
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
@@ -1256,7 +1227,19 @@ pub async fn run(
         let pump = crate::camel::pump(camel.inbound(), tx.clone(), Job::Camel);
         tasks.push(tokio::spawn(pump));
     }
+    // A reload can start camel later. A weak sender lets the loop end when
+    // every other sender is gone.
+    let weak = tx.downgrade();
     drop(tx);
+    if let Some(file) = daemon.config_file() {
+        let watch = reload::watch(
+            file.to_path_buf(),
+            daemon.kit.watch_every,
+            weak.clone(),
+            daemon.owner_uid,
+        );
+        tasks.push(tokio::spawn(watch));
+    }
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(stop);
@@ -1265,7 +1248,21 @@ pub async fn run(
         tokio::select! {
             job = rx.recv() => {
                 let Some(job) = job else { break };
-                run_job(&mut daemon, job).await;
+                match job {
+                    Job::Socket { uid, request: Request::Reload, reply } => {
+                        // Boxed, so the loop future stays small.
+                        let answer = Box::pin(reload::reload_job(
+                            &mut daemon,
+                            &mut camel,
+                            &mut tasks,
+                            &weak,
+                            uid,
+                        ))
+                        .await;
+                        let _ = reply.send(answer);
+                    }
+                    job => run_job(&mut daemon, job).await,
+                }
             }
             _ = ticker.tick() => {
                 if let Err(error) = daemon.tick().await {
@@ -1427,6 +1424,7 @@ mod discord;
 mod gate;
 #[cfg(feature = "refine")]
 mod refine;
+mod reload;
 #[cfg(feature = "discord")]
 pub use discord::DiscordLink;
 #[cfg(feature = "slack")]

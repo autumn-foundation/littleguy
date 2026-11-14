@@ -1578,7 +1578,11 @@ mod tests {
             }
         );
         let stranger = daemon.handle_request(UID + 1, Request::History).await;
-        assert!(matches!(stranger, Response::Error { .. }), "{stranger:?}");
+        // The assertion prints no response, so a failure logs no turn.
+        assert!(matches!(
+            stranger,
+            Response::Error { message } if message == "only the owner of the daemon may do that"
+        ));
     }
 
     #[test]

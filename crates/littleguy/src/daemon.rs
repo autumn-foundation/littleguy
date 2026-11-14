@@ -499,7 +499,9 @@ impl Daemon {
     ) -> impl Future<Output = Result<Option<autumn_harvest_agent::AgentState>>> + Send + 'static
     {
         // The query starts now, so the future holds no borrow of the runtime.
-        let query = sqlite::state(&self.rt, self.routing.assistant());
+        // The query future is large, so it lives on the heap. Each caller
+        // then awaits a small future.
+        let query = Box::pin(sqlite::state(&self.rt, self.routing.assistant()));
         async move { Ok(query.await?) }
     }
 

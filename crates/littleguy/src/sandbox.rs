@@ -137,6 +137,10 @@ pub fn runtime_on(
 
 #[cfg(all(feature = "sandbox", target_os = "linux"))]
 /// A backend that runs code as a host process, for development.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "off Linux the same function refuses, so both share one signature"
+)]
 fn process() -> Result<Arc<dyn Backend>> {
     tracing::warn!("the sandbox runs code as a host process; this is for development only");
     Ok(Arc::new(

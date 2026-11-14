@@ -11,11 +11,14 @@
 //! Feature `sandbox` builds the tool. Without it, [`Runtime`] has no value,
 //! so the compiler drops each path that runs code, and a `[sandbox]`
 //! section fails at start.
+//!
+//! The engine builds both backends only on Linux. On another system, a
+//! `[sandbox]` section fails at start and names the backend.
 
 #[cfg(feature = "sandbox")]
 use std::sync::Arc;
 
-#[cfg(feature = "sandbox")]
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(feature = "sandbox")]
@@ -100,10 +103,7 @@ pub fn runtime(_config: &SandboxConfig) -> Result<Runtime> {
 /// Firecracker binary or image, or when the backend cannot meet the policy.
 pub fn runtime(config: &SandboxConfig) -> Result<Arc<SandboxRuntime>> {
     let backend: Arc<dyn Backend> = match &config.backend {
-        SandboxBackend::Process => {
-            tracing::warn!("the sandbox runs code as a host process; this is for development only");
-            Arc::new(autumn_harvest::sandbox::process::ProcessBackend::default())
-        }
+        SandboxBackend::Process => process()?,
         SandboxBackend::Firecracker(fc) => firecracker(fc)?,
     };
     runtime_on(backend, config)
@@ -135,7 +135,42 @@ pub fn runtime_on(
     Ok(Arc::new(runtime))
 }
 
-#[cfg(feature = "sandbox")]
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
+/// A backend that runs code as a host process, for development.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "off Linux the same function refuses, so both share one signature"
+)]
+fn process() -> Result<Arc<dyn Backend>> {
+    tracing::warn!("the sandbox runs code as a host process; this is for development only");
+    Ok(Arc::new(
+        autumn_harvest::sandbox::process::ProcessBackend::default(),
+    ))
+}
+
+#[cfg(all(feature = "sandbox", not(target_os = "linux")))]
+/// Refuses the process backend, because the engine builds it only on Linux.
+fn process() -> Result<Arc<dyn Backend>> {
+    anyhow::bail!(only_on_linux("process"))
+}
+
+#[cfg(all(feature = "sandbox", not(target_os = "linux")))]
+/// Refuses the Firecracker backend, because the engine builds it only on
+/// Linux.
+fn firecracker(_config: &FirecrackerConfig) -> Result<Arc<dyn Backend>> {
+    anyhow::bail!(only_on_linux("firecracker"))
+}
+
+#[cfg(all(feature = "sandbox", not(target_os = "linux")))]
+/// The error for a `backend` that this system does not have.
+fn only_on_linux(backend: &str) -> String {
+    format!(
+        "the {backend} sandbox backend runs only on Linux, and this lg runs on {}",
+        std::env::consts::OS
+    )
+}
+
+#[cfg(all(feature = "sandbox", target_os = "linux"))]
 /// A Firecracker backend behind the jailer.
 fn firecracker(config: &FirecrackerConfig) -> Result<Arc<dyn Backend>> {
     use autumn_harvest::sandbox::firecracker::{

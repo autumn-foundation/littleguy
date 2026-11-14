@@ -435,6 +435,15 @@ async fn a_cli_request_decided_in_discord_answers_the_approver() {
     assert_eq!(backend.runs.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn the_process_backend_does_not_open_off_linux() {
+    let settings = sandbox_config(None, 60).sandbox.unwrap();
+    let error = crate::sandbox::runtime(&settings).unwrap_err();
+    assert!(format!("{error:#}").contains("only on Linux"), "{error:#}");
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn the_process_backend_opens_with_the_development_policy() {
     let settings = sandbox_config(None, 60).sandbox.unwrap();

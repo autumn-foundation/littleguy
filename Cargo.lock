@@ -516,6 +516,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "autumn-plugin-markstream"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1d5209b65524581dd4b2b353a6bcc9031a4eb7f9568dc903bd2e3f8b613b31a"
+dependencies = [
+ "autumn-web",
+ "futures-util",
+ "maud",
+ "serde_json",
+]
+
+[[package]]
 name = "autumn-plugin-slack"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3616,6 +3628,7 @@ dependencies = [
  "autumn-harvest-agent",
  "autumn-harvest-plugin",
  "autumn-harvest-sqlite",
+ "autumn-plugin-markstream",
  "autumn-plugin-slack",
  "autumn-web",
  "axum",

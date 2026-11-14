@@ -84,9 +84,11 @@ async fn rig_with(config: &Config, slack: Option<&str>) -> Rig {
         #[cfg(feature = "slack")]
         slack,
     };
-    let client = TestApp::new()
-        .config(settings(&plan))
-        .routes(routes(&plan))
+    let mut app = TestApp::new().config(settings(&plan)).routes(routes(&plan));
+    if plan.pages {
+        app = app.plugin(pages::Assets);
+    }
+    let client = app
         .state_initializer(move |state| state.insert_extension(web))
         .build();
     Rig {
@@ -154,14 +156,11 @@ async fn a_sign_in_link_works_once() {
     rig.client.get(path).send().await.assert_status(403);
     let home = rig.client.get("/").send().await;
     home.assert_status(200);
-    for section in [
-        "Chat",
-        "Approvals",
-        "Who can talk to it",
-        "Refine",
-        "Connections",
-    ] {
-        home.assert_body_contains(section);
+    home.assert_selector_count("form#composer", 1);
+    let manage = rig.client.get("/manage").send().await;
+    manage.assert_status(200);
+    for section in ["Approvals", "Who can talk to it", "Refine", "Connections"] {
+        manage.assert_body_contains(section);
     }
     assert_eq!(
         home.selector_count("script[src='/static/js/htmx.min.js']"),
@@ -451,3 +450,71 @@ async fn a_tick_of_a_stopped_daemon_is_an_error() {
 
 #[cfg(feature = "slack")]
 mod slack_tests;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_home_page_shows_the_conversation() {
+    let rig = rig(&config(false)).await;
+    let token = sign_in(&rig).await;
+    rig.client
+        .get("/")
+        .send()
+        .await
+        .assert_selector_count("#thread .msg", 0);
+    let answer = rig
+        .client
+        .post("/chat")
+        .header("X-CSRF-Token", &token)
+        .form("text=**hello**")
+        .send()
+        .await;
+    answer.assert_status(200);
+    answer.assert_selector_count(".msg.lg [data-markstream]", 1);
+    answer.assert_body_contains("you said '**hello**'");
+
+    let home = rig.client.get("/").send().await;
+    home.assert_status(200);
+    home.assert_selector_count("#thread .msg.you", 1);
+    home.assert_selector_count("#thread .msg.lg [data-markstream]", 1);
+    home.assert_text_contains("#thread .msg.you", "**hello**");
+    home.assert_selector_count("form#composer[hx-target='#thread']", 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pages_load_their_script_and_style_from_the_binary() {
+    let rig = rig(&config(false)).await;
+    sign_in(&rig).await;
+    let home = rig.client.get("/").send().await;
+    for (selector, attr, kind) in [
+        ("script[src*='chat']", "src", "javascript"),
+        ("link[rel=stylesheet][href*='lg']", "href", "css"),
+    ] {
+        let url = home
+            .selector_attr(selector, attr)
+            .into_iter()
+            .flatten()
+            .next()
+            .unwrap_or_else(|| panic!("no {selector}"));
+        home.assert_selector_count(&format!("{selector}[integrity]"), 1);
+        let file = rig.client.get(&url).send().await;
+        file.assert_status(200);
+        file.assert_header_contains("content-type", kind);
+    }
+    home.assert_selector_count("script[type=module][src*='markstream']", 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_manage_page_holds_the_sections() {
+    let rig = rig(&config(false)).await;
+    rig.client.get("/manage").send().await.assert_status(401);
+    sign_in(&rig).await;
+    let manage = rig.client.get("/manage").send().await;
+    manage.assert_status(200);
+    for id in ["approvals", "pairs", "refine", "connections"] {
+        manage.assert_selector_count(&format!("section#{id}"), 1);
+    }
+    rig.client
+        .get("/")
+        .send()
+        .await
+        .assert_selector_count("section#approvals", 0);
+}

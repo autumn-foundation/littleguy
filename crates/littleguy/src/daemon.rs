@@ -48,7 +48,7 @@ use crate::chats::Chats;
 #[cfg(feature = "oauth")]
 use crate::oauth::Connections;
 use crate::pairs::{Entry, PairStore};
-use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response};
+use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response, Speaker, Turn};
 
 /// The channel id of the local socket.
 pub const CLI_CHANNEL: &str = "cli";
@@ -493,7 +493,6 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns an error when the query fails.
-    #[cfg(test)]
     pub fn state(
         &self,
     ) -> impl Future<Output = Result<Option<autumn_harvest_agent::AgentState>>> + Send + 'static
@@ -538,6 +537,7 @@ impl Daemon {
                     link: logins.link(),
                 },
             )),
+            Request::History => self.history().await,
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
             Request::Unpair { sender } => self.unpair(&sender),
@@ -774,6 +774,21 @@ impl Daemon {
     }
 
     /// The allowed senders of every channel.
+    /// The text turns of the assistant conversation, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot read the state.
+    fn history(&self) -> impl Future<Output = Result<Response>> + Send + 'static {
+        // The query starts now, so the future holds no borrow of the daemon.
+        let query = self.state();
+        async move {
+            let state = query.await?;
+            let turns = state.map_or_else(Vec::new, |state| turns(&state.transcript));
+            Ok(Response::History { turns })
+        }
+    }
+
     fn pairs(&self) -> Response {
         let mut entries = Vec::new();
         let channels = std::iter::once(CLI_CHANNEL).chain(Service::ALL.map(Service::name));
@@ -1434,6 +1449,36 @@ mod slack;
 #[cfg(feature = "slack")]
 pub use slack::SlackInbox;
 
+/// The text turns of `transcript`, oldest first. A turn joins the text
+/// parts of one message. Tool calls, tool results and system text are not
+/// turns, and a message with no text is left out.
+fn turns(transcript: &[autumn_harvest_agent::ChatMessage]) -> Vec<Turn> {
+    use autumn_harvest_agent::{ChatRole, ContentPart};
+    transcript
+        .iter()
+        .filter_map(|message| {
+            let from = match message.role {
+                ChatRole::User => Speaker::Person,
+                ChatRole::Assistant => Speaker::Assistant,
+                ChatRole::System | ChatRole::Tool => return None,
+            };
+            let text: Vec<&str> = message
+                .content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentPart::Text(text) => Some(text.trim()),
+                    _ => None,
+                })
+                .filter(|text| !text.is_empty())
+                .collect();
+            (!text.is_empty()).then(|| Turn {
+                from,
+                text: text.join("\n\n"),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -1506,6 +1551,72 @@ mod tests {
         assert_eq!(response, Response::Dropped);
         assert_eq!(model.calls(), 0);
         assert!(daemon.state().await.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_history_shows_the_text_turns_to_the_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(&dir.path().join("lg.db"), Arc::new(OfflineModel::new()));
+        assert_eq!(
+            daemon.handle_request(UID, Request::History).await,
+            Response::History { turns: Vec::new() }
+        );
+        daemon.handle_request(UID, request("m-1", "hello")).await;
+        assert_eq!(
+            daemon.handle_request(UID, Request::History).await,
+            Response::History {
+                turns: vec![
+                    Turn {
+                        from: Speaker::Person,
+                        text: String::from("hello"),
+                    },
+                    Turn {
+                        from: Speaker::Assistant,
+                        text: String::from("littleguy (offline): you said 'hello'"),
+                    },
+                ]
+            }
+        );
+        let stranger = daemon.handle_request(UID + 1, Request::History).await;
+        assert!(matches!(stranger, Response::Error { .. }), "{stranger:?}");
+    }
+
+    #[test]
+    fn a_turn_keeps_text_and_leaves_out_tools() {
+        use autumn_harvest_agent::{ChatMessage, ChatRole, ContentPart};
+        let call = ContentPart::ToolCall {
+            id: String::from("c1"),
+            name: String::from("list_files"),
+            arguments: serde_json::json!({}),
+        };
+        let transcript = vec![
+            ChatMessage::text(ChatRole::User, "what is there?"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: vec![call],
+            },
+            ChatMessage::text(ChatRole::Tool, "notes/a.md"),
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: vec![
+                    ContentPart::Text(String::from("One file.")),
+                    ContentPart::Text(String::from(" ")),
+                ],
+            },
+        ];
+        assert_eq!(
+            turns(&transcript),
+            vec![
+                Turn {
+                    from: Speaker::Person,
+                    text: String::from("what is there?"),
+                },
+                Turn {
+                    from: Speaker::Assistant,
+                    text: String::from("One file."),
+                },
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

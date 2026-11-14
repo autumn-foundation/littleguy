@@ -89,6 +89,29 @@ pub enum Request {
     UiLink,
     /// Read the config file again, and apply it. Only the owner may.
     Reload,
+    /// The text turns of the conversation, oldest first. Only the owner
+    /// may.
+    History,
+}
+
+/// Who wrote one turn of the conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Speaker {
+    /// A person, on any channel.
+    Person,
+    /// The assistant.
+    Assistant,
+}
+
+/// One text turn of the conversation. Tool calls and tool results are not
+/// turns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Turn {
+    /// Who wrote it.
+    pub from: Speaker,
+    /// The text.
+    pub text: String,
 }
 
 /// One overlay version of the assistant.
@@ -266,6 +289,11 @@ pub enum Response {
         #[serde(default)]
         profile: Vec<String>,
     },
+    /// The text turns of the conversation, oldest first.
+    History {
+        /// The turns.
+        turns: Vec<Turn>,
+    },
     /// The request was not valid, or the daemon failed.
     Error {
         /// What went wrong.
@@ -312,6 +340,7 @@ mod tests {
             },
             Request::Connections,
             Request::Reload,
+            Request::History,
             Request::Disconnect {
                 integration: String::from("google"),
                 connection: String::from("c-1"),

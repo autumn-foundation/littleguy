@@ -409,9 +409,13 @@ San Mateo, and no tool sees one.
 
 ## Web pages
 
-`lg serve` is an autumn-web app. Its pages show the chat, the calls that
-wait for approval, who can talk to the assistant, the refine overlays and
-the OAuth connections. They serve on a loopback address only:
+`lg serve` is an autumn-web app. The home page is the chat: the
+conversation so far, with each answer rendered as Markdown by
+[markstream](https://crates.io/crates/autumn-plugin-markstream). Enter
+sends a message, and Shift+Enter adds a line. The manage page shows the
+calls that wait for approval, who can talk to the assistant, the refine
+overlays and the OAuth connections. The binary holds every script and
+style. The pages serve on a loopback address only:
 
 ```toml
 [ui]

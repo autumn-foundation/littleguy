@@ -19,7 +19,8 @@
 //! key sends it once.
 //!
 //! The file also keeps each tool call that waits for an approval
-//! ([`approvals`]), and the goals and ideas of the assistant ([`plans`]).
+//! ([`approvals`]), and the goals and ideas of the assistant (`plans`,
+//! with the `plans` feature).
 //!
 //! [`RunLog`] is the one reader of `lg.db` itself. It opens the file read
 //! only, so the runtime stays its one writer.
@@ -37,6 +38,7 @@ use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub mod approvals;
+#[cfg(feature = "plans")]
 pub mod plans;
 pub mod runlog;
 pub mod skill_drafts;

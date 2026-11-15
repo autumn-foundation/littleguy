@@ -1,4 +1,7 @@
-//! The tools of goals and ideas (ADR 0020).
+//! The tools of goals and ideas (ADR 0020), wakes and skill drafts.
+//!
+//! The goal and idea tools come with the `plans` feature. A build without
+//! it keeps the wake and skill tools, and `list_plans` lists only those.
 //!
 //! The assistant files ideas, researches them, proposes goals and works on
 //! the goals that the owner accepted. It cannot accept, decline or drop: a
@@ -23,6 +26,7 @@ use autumn_harvest_agent::flow::labels;
 use autumn_harvest_agent::{AgentError, ErrorKind, FnTool, Tool, ToolContext, ToolEffect};
 use chrono::{DateTime, Utc};
 use littleguy_stores::SqliteStores;
+#[cfg(feature = "plans")]
 use littleguy_stores::plans::{Goal, Idea, Note};
 use serde_json::{Value, json};
 
@@ -58,6 +62,7 @@ fn id(input: &Value, name: &str) -> Result<i64, AgentError> {
         .ok_or_else(|| refuse(format!("`{name}` must be a whole number")))
 }
 
+#[cfg(feature = "plans")]
 fn notes_json(notes: &[Note]) -> Vec<Value> {
     notes
         .iter()
@@ -65,6 +70,7 @@ fn notes_json(notes: &[Note]) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(feature = "plans")]
 fn goal_json(goal: &Goal, now: i64) -> Value {
     json!({
         "id": goal.id,
@@ -79,6 +85,7 @@ fn goal_json(goal: &Goal, now: i64) -> Value {
     })
 }
 
+#[cfg(feature = "plans")]
 fn idea_json(idea: &Idea) -> Value {
     json!({
         "id": idea.id,
@@ -116,11 +123,23 @@ fn object(properties: &Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required})
 }
 
-/// The goal, idea and wake tools over `stores`.
+/// What `list_plans` says it lists.
+#[cfg(feature = "plans")]
+const LIST_PLANS: &str = "List your goals, ideas and wakes. An active goal is yours to work on; \
+     a goal with `due` true needs a check now. A proposed goal waits for the owner to accept \
+     it. An idea is something to plan and research. A wake with `due` true is one you booked \
+     with wake_me, and its time has come.";
+
+/// What `list_plans` says it lists, in a build without goals and ideas.
+#[cfg(not(feature = "plans"))]
+const LIST_PLANS: &str = "List your wakes and skill drafts. A wake with `due` true is one you \
+     booked with wake_me, and its time has come.";
+
+/// The goal, idea, wake and skill tools over `stores`.
 #[must_use]
 #[expect(
     clippy::too_many_lines,
-    reason = "nine tools, each a schema and a short body, read best in one list"
+    reason = "the tools, each a schema and a short body, read best in one list"
 )]
 pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>> {
     let list = Arc::clone(stores);
@@ -128,28 +147,18 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
     let draft = Arc::clone(stores);
     let ticks = Arc::clone(stores);
     let cancel = (Arc::clone(stores), wakes.clone());
-    let file = Arc::clone(stores);
-    let research = Arc::clone(stores);
-    let propose = Arc::clone(stores);
-    let progress = Arc::clone(stores);
-    vec![
+    let tools = vec![
         FnTool::new(
             "list_plans",
-            "List your goals, ideas and wakes. An active goal is yours to work on; a goal \
-             with `due` true needs a check now. A proposed goal waits for the owner to accept \
-             it. An idea is something to plan and research. A wake with `due` true is one you \
-             booked with wake_me, and its time has come.",
+            LIST_PLANS,
             json!({"type": "object", "properties": {}}),
             move |_input| {
                 let stores = Arc::clone(&list);
                 async move {
-                    let plans = stores.plans()?;
                     let wakes = stores.pending_wakes()?;
                     let drafts = stores.skill_drafts()?;
                     let now = now_ms();
-                    Ok(json!({
-                        "goals": plans.goals.iter().map(|goal| goal_json(goal, now)).collect::<Vec<_>>(),
-                        "ideas": plans.ideas.iter().map(idea_json).collect::<Vec<_>>(),
+                    let listing = json!({
                         "skill_drafts": drafts.iter().map(|draft| json!({
                             "id": draft.id,
                             "name": draft.name,
@@ -161,125 +170,22 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
                             "due": wake.at_ms <= now,
                             "about": wake.about,
                         })).collect::<Vec<_>>(),
-                    }))
+                    });
+                    #[cfg(feature = "plans")]
+                    let listing = {
+                        let mut listing = listing;
+                        let plans = stores.plans()?;
+                        listing["goals"] =
+                            plans.goals.iter().map(|goal| goal_json(goal, now)).collect();
+                        listing["ideas"] = plans.ideas.iter().map(idea_json).collect();
+                        listing
+                    };
+                    Ok(listing)
                 }
             },
         )
         .effect(ToolEffect::ReadOnly)
         .label(labels::UNTRUSTED_INPUT)
-        .shared(),
-        FnTool::with_context(
-            "add_idea",
-            "File an idea: something worth planning or researching that might become a goal. \
-             File one when the owner mentions something worth exploring, or when you notice \
-             one yourself.",
-            object(
-                &json!({
-                    "title": {"type": "string", "description": "A short name."},
-                    "body": {"type": "string", "description": "What the idea is, and why it might matter."},
-                }),
-                &["title", "body"],
-            ),
-            move |input, ctx| {
-                let stores = Arc::clone(&file);
-                async move {
-                    let id = stores.add_idea(
-                        &call_key(&ctx),
-                        text(&input, "title")?,
-                        text(&input, "body")?,
-                        now_ms(),
-                    )?;
-                    Ok(json!({"idea": id}))
-                }
-            },
-        )
-        .effect(ToolEffect::Internal)
-        .shared(),
-        FnTool::with_context(
-            "research_idea",
-            "Add a research note to an open idea: what you found, what is still unknown, and \
-             what it would take.",
-            object(
-                &json!({
-                    "idea": {"type": "integer"},
-                    "note": {"type": "string"},
-                }),
-                &["idea", "note"],
-            ),
-            move |input, ctx| {
-                let stores = Arc::clone(&research);
-                async move {
-                    let idea = id(&input, "idea")?;
-                    stores.research_idea(&call_key(&ctx), idea, text(&input, "note")?, now_ms())?;
-                    Ok(json!({"idea": idea, "noted": true}))
-                }
-            },
-        )
-        .effect(ToolEffect::Internal)
-        .shared(),
-        FnTool::with_context(
-            "propose_goal",
-            "Propose a goal: a thing to do. It does nothing until the owner accepts it on the \
-             Workspace page; tell them you proposed it. Name the idea it comes from, if any. \
-             Ask for checks when the goal means watching something over time.",
-            object(
-                &json!({
-                    "title": {"type": "string", "description": "A short name."},
-                    "why": {"type": "string", "description": "Why it matters, and what done looks like."},
-                    "check_every_minutes": {"type": "integer", "minimum": 1, "description": "How often to check on it, if at all."},
-                    "from_idea": {"type": "integer"},
-                }),
-                &["title", "why"],
-            ),
-            move |input, ctx| {
-                let stores = Arc::clone(&propose);
-                async move {
-                    let every = input["check_every_minutes"]
-                        .as_i64()
-                        .map(|minutes| minutes.saturating_mul(60));
-                    let goal = stores.propose_goal(
-                        &call_key(&ctx),
-                        text(&input, "title")?,
-                        text(&input, "why")?,
-                        every,
-                        input["from_idea"].as_i64(),
-                        now_ms(),
-                    )?;
-                    Ok(json!({"goal": goal, "status": "proposed"}))
-                }
-            },
-        )
-        .effect(ToolEffect::Internal)
-        .shared(),
-        FnTool::with_context(
-            "goal_progress",
-            "Note progress on an active goal, or a check that found nothing new. A goal with \
-             checks is due again one interval later. Set `finished` when the goal is done.",
-            object(
-                &json!({
-                    "goal": {"type": "integer"},
-                    "note": {"type": "string"},
-                    "finished": {"type": "boolean"},
-                }),
-                &["goal", "note"],
-            ),
-            move |input, ctx| {
-                let stores = Arc::clone(&progress);
-                async move {
-                    let goal = id(&input, "goal")?;
-                    let finished = input["finished"].as_bool().unwrap_or(false);
-                    stores.goal_progress(
-                        &call_key(&ctx),
-                        goal,
-                        text(&input, "note")?,
-                        finished,
-                        now_ms(),
-                    )?;
-                    Ok(json!({"goal": goal, "finished": finished}))
-                }
-            },
-        )
-        .effect(ToolEffect::Internal)
         .shared(),
         FnTool::with_context(
             "wake_me",
@@ -393,6 +299,142 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
         )
         .effect(ToolEffect::Internal)
         .shared(),
+    ];
+    // The goal and idea tools come right after `list_plans`.
+    #[cfg(feature = "plans")]
+    let tools = {
+        let mut tools = tools;
+        tools.splice(1..1, goal_tools(stores));
+        tools
+    };
+    tools
+}
+
+/// The tools that file and research ideas, and propose and work on goals.
+#[cfg(feature = "plans")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "four tools, each a schema and a short body, read best in one list"
+)]
+fn goal_tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
+    let file = Arc::clone(stores);
+    let research = Arc::clone(stores);
+    let propose = Arc::clone(stores);
+    let progress = Arc::clone(stores);
+    vec![
+        FnTool::with_context(
+            "add_idea",
+            "File an idea: something worth planning or researching that might become a goal. \
+             File one when the owner mentions something worth exploring, or when you notice \
+             one yourself.",
+            object(
+                &json!({
+                    "title": {"type": "string", "description": "A short name."},
+                    "body": {"type": "string", "description": "What the idea is, and why it might matter."},
+                }),
+                &["title", "body"],
+            ),
+            move |input, ctx| {
+                let stores = Arc::clone(&file);
+                async move {
+                    let id = stores.add_idea(
+                        &call_key(&ctx),
+                        text(&input, "title")?,
+                        text(&input, "body")?,
+                        now_ms(),
+                    )?;
+                    Ok(json!({"idea": id}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
+        FnTool::with_context(
+            "research_idea",
+            "Add a research note to an open idea: what you found, what is still unknown, and \
+             what it would take.",
+            object(
+                &json!({
+                    "idea": {"type": "integer"},
+                    "note": {"type": "string"},
+                }),
+                &["idea", "note"],
+            ),
+            move |input, ctx| {
+                let stores = Arc::clone(&research);
+                async move {
+                    let idea = id(&input, "idea")?;
+                    stores.research_idea(&call_key(&ctx), idea, text(&input, "note")?, now_ms())?;
+                    Ok(json!({"idea": idea, "noted": true}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
+        FnTool::with_context(
+            "propose_goal",
+            "Propose a goal: a thing to do. It does nothing until the owner accepts it on the \
+             Workspace page; tell them you proposed it. Name the idea it comes from, if any. \
+             Ask for checks when the goal means watching something over time.",
+            object(
+                &json!({
+                    "title": {"type": "string", "description": "A short name."},
+                    "why": {"type": "string", "description": "Why it matters, and what done looks like."},
+                    "check_every_minutes": {"type": "integer", "minimum": 1, "description": "How often to check on it, if at all."},
+                    "from_idea": {"type": "integer"},
+                }),
+                &["title", "why"],
+            ),
+            move |input, ctx| {
+                let stores = Arc::clone(&propose);
+                async move {
+                    let every = input["check_every_minutes"]
+                        .as_i64()
+                        .map(|minutes| minutes.saturating_mul(60));
+                    let goal = stores.propose_goal(
+                        &call_key(&ctx),
+                        text(&input, "title")?,
+                        text(&input, "why")?,
+                        every,
+                        input["from_idea"].as_i64(),
+                        now_ms(),
+                    )?;
+                    Ok(json!({"goal": goal, "status": "proposed"}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
+        FnTool::with_context(
+            "goal_progress",
+            "Note progress on an active goal, or a check that found nothing new. A goal with \
+             checks is due again one interval later. Set `finished` when the goal is done.",
+            object(
+                &json!({
+                    "goal": {"type": "integer"},
+                    "note": {"type": "string"},
+                    "finished": {"type": "boolean"},
+                }),
+                &["goal", "note"],
+            ),
+            move |input, ctx| {
+                let stores = Arc::clone(&progress);
+                async move {
+                    let goal = id(&input, "goal")?;
+                    let finished = input["finished"].as_bool().unwrap_or(false);
+                    stores.goal_progress(
+                        &call_key(&ctx),
+                        goal,
+                        text(&input, "note")?,
+                        finished,
+                        now_ms(),
+                    )?;
+                    Ok(json!({"goal": goal, "finished": finished}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
     ]
 }
 
@@ -405,20 +447,16 @@ mod tests {
         let stores = Arc::new(SqliteStores::open_in_memory().unwrap());
         let tools = tools(&stores, &WakeLinks::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
-        assert_eq!(
-            names,
-            [
-                "list_plans",
-                "add_idea",
-                "research_idea",
-                "propose_goal",
-                "goal_progress",
-                "wake_me",
-                "propose_skill",
-                "recent_wakes",
-                "cancel_wake"
-            ]
-        );
+        let goals: &[&str] = if cfg!(feature = "plans") {
+            &["add_idea", "research_idea", "propose_goal", "goal_progress"]
+        } else {
+            &[]
+        };
+        let want: Vec<&str> = std::iter::once("list_plans")
+            .chain(goals.iter().copied())
+            .chain(["wake_me", "propose_skill", "recent_wakes", "cancel_wake"])
+            .collect();
+        assert_eq!(names, want);
         for tool in &tools {
             assert!(
                 tool.effect() <= ToolEffect::Internal,

@@ -619,12 +619,22 @@ impl Daemon {
             Request::History => self.history().await,
             Request::Workspace => self.workspace_files().await,
             Request::WorkspaceFile { path } => self.workspace_file(path).await,
+            #[cfg(feature = "plans")]
             Request::Plans => self.plans(),
+            #[cfg(not(feature = "plans"))]
+            Request::Plans => Ok(Response::Off {
+                message: crate::features::missing("goals and ideas", "plans"),
+            }),
             request @ (Request::Skills
             | Request::AcceptSkill { .. }
             | Request::DeclineSkill { .. }
             | Request::RetireSkill { .. }) => Box::pin(self.skills_request(request)).await,
+            #[cfg(feature = "plans")]
             Request::Decide { decision, id } => self.decide_plan(decision, id),
+            #[cfg(not(feature = "plans"))]
+            Request::Decide { .. } => Ok(Response::Error {
+                message: crate::features::missing("goals and ideas", "plans"),
+            }),
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
             Request::Unpair { sender } => self.unpair(&sender),
@@ -1091,7 +1101,12 @@ impl Daemon {
     /// Returns an error when the runtime or the store cannot read.
     fn notice_passes(&mut self) -> Result<()> {
         let config = &self.kit.config;
-        if !(config.memory.enabled && config.memory.reflect && config.tools.plans) {
+        // A reflection files ideas, so it needs them in this build.
+        if !(cfg!(feature = "plans")
+            && config.memory.enabled
+            && config.memory.reflect
+            && config.tools.plans)
+        {
             return Ok(());
         }
         let now = (self.clock)();
@@ -1764,6 +1779,7 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
 mod discord;
 mod gate;
 pub mod live;
+#[cfg(feature = "plans")]
 mod plans;
 #[cfg(feature = "refine")]
 mod refine;
@@ -3348,7 +3364,7 @@ mod tests {
         config
     }
 
-    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
     fn armed(daemon: &Daemon) -> Option<DateTime<Utc>> {
         daemon
             .wake
@@ -3357,14 +3373,14 @@ mod tests {
             .map(|(at, _)| at)
     }
 
-    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
     fn utc(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text)
             .unwrap()
             .with_timezone(&Utc)
     }
 
-    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_heartbeat_wakes_the_model_only_with_work_and_speaks_in_the_chat() {
         use std::sync::atomic::Ordering;
@@ -3427,7 +3443,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_consolidation_pass_wakes_one_reflection_then_the_timer_stops() {
         use std::sync::atomic::Ordering;
@@ -4018,6 +4034,41 @@ mod tests {
         assert_eq!(reply_text(&failed), "log: {\"failures\":[]}");
     }
 
+    #[cfg(not(feature = "plans"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_build_without_plans_says_so_and_has_no_goal_tools() {
+        use crate::protocol::PlanDecision;
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        let Response::Off { message } = daemon.handle_request(UID, Request::Plans).await else {
+            panic!("the listing is not off");
+        };
+        assert!(message.contains("`plans` feature"));
+        let decide = Request::Decide {
+            decision: PlanDecision::Accept,
+            id: 1,
+        };
+        assert!(matches!(
+            daemon.handle_request(UID, decide).await,
+            Response::Error { .. }
+        ));
+        let tried = daemon
+            .handle_request(
+                UID,
+                request("p-1", r#"use add_idea {"title": "T", "body": "B"}"#),
+            )
+            .await;
+        assert!(!reply_text(&tried).starts_with("ok"));
+    }
+
+    #[cfg(feature = "plans")]
     #[tokio::test(flavor = "multi_thread")]
     async fn an_idea_becomes_a_goal_only_when_the_owner_accepts() {
         use crate::protocol::PlanDecision;

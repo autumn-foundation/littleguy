@@ -483,6 +483,13 @@ fn interval(now: DateTime<Utc>, at: DateTime<Utc>) -> Duration {
 /// with `research`, when an idea is open. A brief tick always runs. With
 /// no store of goals and ideas, every heartbeat runs.
 #[derive(Debug)]
+#[cfg_attr(
+    not(feature = "plans"),
+    expect(
+        dead_code,
+        reason = "a build without goals and ideas never reads the store or `research`"
+    )
+)]
 pub struct Due {
     /// The goals and ideas, when they are on.
     pub plans: Option<Arc<SqliteStores>>,
@@ -493,6 +500,7 @@ pub struct Due {
 }
 
 impl Due {
+    #[cfg(feature = "plans")]
     fn worth_it(&self, now_ms: i64) -> bool {
         let Some(plans) = &self.plans else {
             return true;
@@ -501,6 +509,18 @@ impl Due {
         let ideas = || plans.plans().is_ok_and(|plans| !plans.ideas.is_empty());
         // A store that fails runs the tick, which then says why.
         due.unwrap_or(true) || (self.research && ideas())
+    }
+
+    /// A build without goals and ideas has no store of them, so every
+    /// heartbeat runs.
+    #[cfg(not(feature = "plans"))]
+    #[expect(
+        clippy::unused_self,
+        clippy::missing_const_for_fn,
+        reason = "the build with goals and ideas reads the store, and both share one signature"
+    )]
+    fn worth_it(&self, _now_ms: i64) -> bool {
+        true
     }
 }
 
@@ -790,6 +810,22 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "plans"))]
+    #[tokio::test]
+    async fn without_plans_every_heartbeat_runs() {
+        let due = Due {
+            plans: Some(Arc::new(SqliteStores::open_in_memory().unwrap())),
+            research: true,
+            verdict: Arc::default(),
+        };
+        let heartbeat = HeartbeatTask {
+            prompt: marked(HEARTBEAT_MARK, "go"),
+            ..HeartbeatTask::default()
+        };
+        assert!(due.should_run(&heartbeat).await);
+    }
+
+    #[cfg(feature = "plans")]
     #[tokio::test]
     async fn the_precheck_runs_a_heartbeat_only_with_work_to_do() {
         let stores = Arc::new(SqliteStores::open_in_memory().unwrap());

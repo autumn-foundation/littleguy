@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 12] = [
+pub const ALL: [Feature; 13] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -55,6 +55,10 @@ pub const ALL: [Feature; 12] = [
     Feature {
         name: "refine",
         on: cfg!(feature = "refine"),
+    },
+    Feature {
+        name: "plans",
+        on: cfg!(feature = "plans"),
     },
     Feature {
         name: "camel",
@@ -111,6 +115,9 @@ pub fn check(config: &Config) -> Result<()> {
             "{}. Build lg with those features, or remove the sections",
             problems.join("; ")
         );
+    }
+    if !has("plans") && config.tools.plans {
+        tracing::info!("goals and ideas are off: this lg is built without the `plans` feature");
     }
     if !has("web") && (config.tools.web_fetch || config.tools.web_search) {
         tracing::info!("the web tools are off: this lg is built without the `web` feature");

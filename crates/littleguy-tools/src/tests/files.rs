@@ -117,3 +117,75 @@ async fn a_long_file_is_cut_when_read() {
     assert_eq!(read["text"].as_str().unwrap().len(), crate::MAX_READ_CHARS);
     assert_eq!(read["truncated"], true);
 }
+
+#[cfg(feature = "search-notes")]
+#[tokio::test]
+async fn search_notes_finds_a_forgotten_note_by_its_words() {
+    let handle = WorkspaceHandle::new(Workspace::default());
+    handle
+        .with(|files| {
+            files.write("notes/drinks.md", "Mark likes GREEN tea, never coffee.")?;
+            files.write("notes/tea-shops.md", "A shop on 5th sells tea.")?;
+            files.write("notes/todo.md", "Fix the docs links.")?;
+            files.write("blob.bin", vec![0xff, 0xfe, b't', b'e', b'a'])
+        })
+        .unwrap();
+    let call = ctx(Some(handle.clone()));
+    let search = crate::search_notes_tool();
+    assert_eq!(search.effect(), ToolEffect::ReadOnly, "a tick may search");
+
+    let found = search
+        .execute(json!({"query": "green tea"}), &call)
+        .await
+        .unwrap();
+    assert_eq!(found["searched"], 3, "a file that is not text is skipped");
+    let matches = found["matches"].as_array().unwrap();
+    let paths: Vec<&str> = matches
+        .iter()
+        .map(|m| m["path"].as_str().unwrap())
+        .collect();
+    // The file with both words comes first, then the one with `tea` twice:
+    // in its path and its text.
+    assert_eq!(paths, ["notes/drinks.md", "notes/tea-shops.md"]);
+    assert_eq!(matches[0]["matched"], 2);
+    assert_eq!(matches[0]["of"], 2);
+    assert!(
+        matches[0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("GREEN tea")
+    );
+    assert_eq!(found["more"], false);
+
+    let one = search
+        .execute(json!({"query": "tea", "limit": 1}), &call)
+        .await
+        .unwrap();
+    assert_eq!(one["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(one["more"], true);
+
+    let none = search
+        .execute(json!({"query": "biscuits"}), &call)
+        .await
+        .unwrap();
+    assert_eq!(none["matches"], json!([]));
+    // Searching changes nothing.
+    assert_eq!(handle.snapshot().files().len(), 4);
+}
+
+#[cfg(feature = "search-notes")]
+#[tokio::test]
+async fn search_notes_refuses_an_empty_query_and_no_workspace() {
+    let search = crate::search_notes_tool();
+    let call = ctx(Some(WorkspaceHandle::new(Workspace::default())));
+    let empty = search
+        .execute(json!({"query": "a ?"}), &call)
+        .await
+        .unwrap_err();
+    assert_eq!(empty.kind(), ErrorKind::Tool);
+    let alone = search
+        .execute(json!({"query": "tea"}), &ctx(None))
+        .await
+        .unwrap_err();
+    assert!(alone.to_string().contains("no workspace"));
+}

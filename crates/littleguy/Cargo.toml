@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.3"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes"]
 # Every integration.
 full = ["default", "camel", "google", "fleet"]
 # Discord direct messages over the gateway.
@@ -66,6 +66,8 @@ openai = ["littleguy-models/openai"]
 web = ["littleguy-tools/web"]
 # The tools of each `[[mcp.server]]`.
 mcp = ["littleguy-tools/mcp"]
+# `search_notes`: the assistant finds a note of its workspace by its words.
+search-notes = ["littleguy-tools/search-notes"]
 # The `run_code` tool and `[sandbox]`.
 sandbox = ["autumn-harvest/sandbox-activities", "autumn-harvest-agent/sandbox"]
 # Goals and ideas: the tools that file, research and propose them, the

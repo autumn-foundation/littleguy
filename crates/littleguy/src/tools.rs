@@ -129,6 +129,9 @@ impl Tools {
         let _ = search_key;
         if config.files {
             tools.extend(file_tools());
+            // A note is no use when its path is forgotten.
+            #[cfg(feature = "search-notes")]
+            tools.push(littleguy_tools::search_notes_tool());
         }
         #[cfg(feature = "self-debug")]
         if config.runs {
@@ -201,7 +204,10 @@ mod tests {
         } else {
             &[]
         };
-        let files = ["read_file", "write_file", "list_files", "delete_file"];
+        let mut files = vec!["read_file", "write_file", "list_files", "delete_file"];
+        if cfg!(feature = "search-notes") {
+            files.push("search_notes");
+        }
         let runs: &[&str] = if cfg!(feature = "self-debug") {
             &["recent_runs", "failed_attempts", "model_usage"]
         } else {

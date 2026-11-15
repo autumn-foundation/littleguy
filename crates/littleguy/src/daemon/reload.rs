@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use autumn_harvest_agent::{AgentHarness, AgentModel, sqlite};
+use autumn_harvest_agent::{AgentHarness, AgentModel, LiveSink, sqlite};
 use chrono::Utc;
 use littleguy_channels::Service;
 use littleguy_core::reload::{Merge, merge};
@@ -54,6 +54,8 @@ pub(super) struct Kit {
     pub(super) file: Option<PathBuf>,
     /// How often the daemon looks at the config file.
     pub(super) watch_every: Duration,
+    /// The readers of live answers. Every harness sends its text there.
+    pub(super) live: Arc<super::live::Live>,
 }
 
 /// The parts of the daemon that a config shapes.
@@ -140,6 +142,7 @@ impl Kit {
         let (assistant, refine) = super::refine::attach(assistant, config, &db, model)?;
         #[cfg(not(feature = "refine"))]
         let _ = model;
+        let assistant = assistant.live_sink(Arc::clone(&self.live) as Arc<dyn LiveSink>);
         Ok(Assembled {
             harness: assistant,
             brief,

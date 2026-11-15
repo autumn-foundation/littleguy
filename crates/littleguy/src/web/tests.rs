@@ -61,6 +61,8 @@ async fn rig_with(config: &Config, slack: Option<&str>) -> Rig {
         .with_logins(logins.clone());
     let listener = daemon::bind(&dir.path().join("lg.sock")).await.unwrap();
     let (handle, jobs) = daemon::jobs(UID);
+    // As `lg serve` does, so a chat streams.
+    let handle = handle.with_live(daemon.live());
     #[cfg(feature = "slack")]
     let (links, slack) = slack_links(&daemon, &handle, slack);
     #[cfg(not(feature = "slack"))]
@@ -80,6 +82,7 @@ async fn rig_with(config: &Config, slack: Option<&str>) -> Rig {
     let web = Web {
         handle: handle.clone(),
         logins: logins.clone(),
+        streams: crate::web::Streams::default(),
         hooks,
         #[cfg(feature = "slack")]
         slack,
@@ -127,6 +130,108 @@ async fn sign_in(rig: &Rig) -> String {
     home.assert_status(200);
     let tokens = home.selector_attr("input[name=_csrf]", "value");
     tokens.into_iter().flatten().next().unwrap()
+}
+
+/// The events of a markstream stream body, as `(name, data)`.
+fn events(body: &str) -> Vec<(String, String)> {
+    body.split("\n\n")
+        .filter_map(|block| {
+            let mut name = None;
+            let mut data = None;
+            for line in block.lines() {
+                if let Some(value) = line.strip_prefix("event: ") {
+                    name = Some(value.to_owned());
+                } else if let Some(value) = line.strip_prefix("data: ") {
+                    data = Some(value.to_owned());
+                }
+            }
+            Some((name?, data?))
+        })
+        .collect()
+}
+
+/// The stream URL in the reply of a chat.
+fn stream_src(reply: &autumn_web::test::TestResponse) -> String {
+    let sources = reply.selector_attr("[data-markstream-src]", "data-markstream-src");
+    sources.into_iter().flatten().next().unwrap()
+}
+
+/// Sends `text` as the owner, and reads its answer stream to the end.
+async fn chat(rig: &Rig, token: &str, text: &str) -> Vec<(String, String)> {
+    let reply = rig
+        .client
+        .post("/chat")
+        .header("X-CSRF-Token", token)
+        .form(&format!("text={text}"))
+        .send()
+        .await;
+    reply.assert_status(200);
+    let stream = rig.client.get(&stream_src(&reply)).send().await;
+    stream.assert_status(200);
+    stream.assert_header_contains("content-type", "text/event-stream");
+    events(&stream.text())
+}
+
+/// The text that the events leave in the answer, as markstream applies them.
+fn shown(events: &[(String, String)]) -> String {
+    let mut text = String::new();
+    for (name, data) in events {
+        match name.as_str() {
+            "chunk" => text.push_str(&serde_json::from_str::<String>(data).unwrap()),
+            "replace" => text = serde_json::from_str(data).unwrap(),
+            _ => {}
+        }
+    }
+    text
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_streams_as_the_model_writes_then_settles() {
+    let rig = rig(&config(false)).await;
+    let token = sign_in(&rig).await;
+    let events = chat(&rig, &token, "hi").await;
+    let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+    let answer = "littleguy (offline): you said 'hi'";
+    // A model call starts, its text comes, then the answer takes its place.
+    assert_eq!(names.first(), Some(&"replace"));
+    assert!(names.contains(&"chunk"), "{names:?}");
+    assert_eq!(names[names.len() - 2..], ["replace", "done"]);
+    let live: Vec<_> = events[..events.len() - 2].to_vec();
+    assert_eq!(shown(&live), answer);
+    assert_eq!(shown(&events), answer);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_streams_once_and_only_to_the_owner() {
+    let rig = rig(&config(false)).await;
+    let token = sign_in(&rig).await;
+    let reply = rig
+        .client
+        .post("/chat")
+        .header("X-CSRF-Token", &token)
+        .form("text=hi")
+        .send()
+        .await;
+    let src = stream_src(&reply);
+    assert_eq!(
+        shown(&events(&rig.client.get(&src).send().await.text())),
+        "littleguy (offline): you said 'hi'"
+    );
+    let again = rig.client.get(&src).send().await;
+    again.assert_status(200);
+    assert_eq!(
+        events(&again.text()),
+        [(String::from("error"), String::from("null"))]
+    );
+    rig.client
+        .get("/chat/stream/unknown")
+        .send()
+        .await
+        .assert_body_contains("event: error");
+    rig.client.log_out();
+    let stranger = rig.client.get("/").send().await;
+    stranger.assert_status(401);
+    rig.client.get(&src).send().await.assert_status(401);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -186,7 +291,8 @@ async fn an_action_needs_the_csrf_token() {
         .send()
         .await;
     answer.assert_status(200);
-    answer.assert_body_contains("you said 'hello'");
+    let stream = rig.client.get(&stream_src(&answer)).send().await;
+    assert!(shown(&events(&stream.text())).contains("you said 'hello'"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -468,8 +574,12 @@ async fn the_home_page_shows_the_conversation() {
         .send()
         .await;
     answer.assert_status(200);
-    answer.assert_selector_count(".msg.lg [data-markstream]", 1);
-    answer.assert_body_contains("you said '**hello**'");
+    answer.assert_selector_count(".msg.lg [data-markstream][data-markstream-src]", 1);
+    let stream = rig.client.get(&stream_src(&answer)).send().await;
+    assert_eq!(
+        shown(&events(&stream.text())),
+        "littleguy (offline): you said '**hello**'"
+    );
 
     let home = rig.client.get("/").send().await;
     home.assert_status(200);

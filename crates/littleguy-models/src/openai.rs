@@ -10,6 +10,11 @@
 //! carries its arguments as a JSON string here, so the adapter encodes them
 //! on the way out and parses them on the way back. Arguments that are not
 //! JSON fail as a `Decode` error, so the harness never runs a tool on them.
+//!
+//! `chat_stream` sends the same request with `"stream": true` and reads the
+//! Server-Sent Events. It passes each text delta to the caller. It joins
+//! the chunks into the body that a plain request returns, and maps that
+//! body with the same code.
 
 use autumn_harvest_agent::{
     AgentError, AgentModel, BoxFuture, ChatRequest, ChatResponse, ChatRole, ContentPart, ErrorKind,
@@ -17,7 +22,7 @@ use autumn_harvest_agent::{
 };
 use serde_json::{Value, json};
 
-use crate::http::{client, error_kind, read_body};
+use crate::http::{MAX_BODY_BYTES, SseFrames, client, error_kind, read_body};
 
 /// The base URL of the OpenAI API.
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -124,6 +129,31 @@ impl OpenAiModel {
     }
 }
 
+impl OpenAiModel {
+    /// Send `body` and return the response, or the API error.
+    async fn send(&self, body: &Value) -> Result<reqwest::Response, AgentError> {
+        let mut call = self.client.post(self.endpoint()).bearer_auth(&self.api_key);
+        if self.provider == Provider::OpenRouter {
+            call = call.header("X-Title", APP_TITLE);
+        }
+        let response =
+            call.json(body).send().await.map_err(|e| {
+                AgentError::new(ErrorKind::Transport, format!("request failed: {e}"))
+            })?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(response);
+        }
+        // The body names the error. It holds no secret: the key is a header.
+        let text = read_body(response).await?;
+        let detail: String = text.chars().take(500).collect();
+        Err(AgentError::new(
+            error_kind(status),
+            format!("HTTP {status}: {detail}"),
+        ))
+    }
+}
+
 impl AgentModel for OpenAiModel {
     fn chat<'a>(
         &'a self,
@@ -131,26 +161,44 @@ impl AgentModel for OpenAiModel {
     ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
         Box::pin(async move {
             let body = request_body(request, &self.model, self.provider);
-            let mut call = self.client.post(self.endpoint()).bearer_auth(&self.api_key);
-            if self.provider == Provider::OpenRouter {
-                call = call.header("X-Title", APP_TITLE);
-            }
-            let response = call.json(&body).send().await.map_err(|e| {
-                AgentError::new(ErrorKind::Transport, format!("request failed: {e}"))
-            })?;
-            let status = response.status().as_u16();
-            let text = read_body(response).await?;
-            if !(200..300).contains(&status) {
-                // The body names the error. It holds no secret: the key is a header.
-                let detail: String = text.chars().take(500).collect();
-                return Err(AgentError::new(
-                    error_kind(status),
-                    format!("HTTP {status}: {detail}"),
-                ));
-            }
+            let text = read_body(self.send(&body).await?).await?;
             let body: Value = serde_json::from_str(&text)
                 .map_err(|e| AgentError::new(ErrorKind::Decode, format!("not JSON: {e}")))?;
             parse_response(&body)
+        })
+    }
+
+    fn chat_stream<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+        on_delta: &'a (dyn Fn(&str) + Send + Sync),
+    ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
+        Box::pin(async move {
+            let body = streaming_body(request_body(request, &self.model, self.provider));
+            let mut response = self.send(&body).await?;
+            let mut stream = StreamAssembler::default();
+            let mut frames = SseFrames::default();
+            let mut read = 0_usize;
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|e| AgentError::new(ErrorKind::Transport, format!("stream lost: {e}")))?
+            {
+                read = read.saturating_add(chunk.len());
+                if read > MAX_BODY_BYTES {
+                    return Err(AgentError::new(
+                        ErrorKind::Decode,
+                        format!("the stream is over {MAX_BODY_BYTES} bytes"),
+                    ));
+                }
+                for data in frames.push(&chunk) {
+                    stream.event(&data, on_delta)?;
+                }
+            }
+            for data in frames.end() {
+                stream.event(&data, on_delta)?;
+            }
+            parse_response(&stream.finish()?)
         })
     }
 
@@ -372,6 +420,155 @@ fn tool_call(call: &Value) -> Result<ContentPart, AgentError> {
         name: name.to_owned(),
         arguments,
     })
+}
+
+/// The streamed form of `body`. The last chunk then carries the usage.
+#[must_use]
+pub fn streaming_body(mut body: Value) -> Value {
+    body["stream"] = json!(true);
+    body["stream_options"] = json!({"include_usage": true});
+    body
+}
+
+/// One tool call of a stream, as its pieces arrive.
+#[derive(Debug, Default)]
+struct CallParts {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// Builds the body of a streamed completion from its chunks.
+///
+/// The result has the shape of a plain response body, so
+/// [`parse_response`] reads it. A chunk carries a piece of the text, of a
+/// refusal or of a tool call. A tool call names its place with `index`,
+/// and its arguments arrive in pieces.
+#[derive(Debug, Default)]
+pub struct StreamAssembler {
+    /// A chunk with a choice came.
+    seen: bool,
+    /// `[DONE]` came.
+    done: bool,
+    text: String,
+    refusal: String,
+    calls: Vec<CallParts>,
+    finish_reason: Option<String>,
+    usage: Value,
+}
+
+impl StreamAssembler {
+    /// Apply the data of one event. Each text piece goes to `on_delta`. An
+    /// event with no text passes `""`, so the harness sends the text that
+    /// waits.
+    ///
+    /// # Errors
+    ///
+    /// Data that is not JSON is a `Decode` error. An `error` object is the
+    /// error of its code.
+    pub fn event(&mut self, data: &str, on_delta: &dyn Fn(&str)) -> Result<(), AgentError> {
+        if data.trim() == "[DONE]" {
+            self.done = true;
+            return Ok(());
+        }
+        let chunk: Value = serde_json::from_str(data).map_err(|e| {
+            AgentError::new(
+                ErrorKind::Decode,
+                format!("a stream event is not JSON: {e}"),
+            )
+        })?;
+        if chunk["error"].is_object() {
+            return Err(body_error(&chunk["error"]));
+        }
+        if chunk["usage"].is_object() {
+            self.usage = chunk["usage"].clone();
+        }
+        let mut text = "";
+        if let Some(choice) = chunk["choices"].get(0) {
+            self.seen = true;
+            if let Some(reason) = choice["finish_reason"].as_str() {
+                self.finish_reason = Some(reason.to_owned());
+            }
+            let delta = &choice["delta"];
+            text = delta["content"].as_str().unwrap_or("");
+            self.text.push_str(text);
+            if let Some(refusal) = delta["refusal"].as_str() {
+                self.refusal.push_str(refusal);
+            }
+            for call in delta["tool_calls"].as_array().into_iter().flatten() {
+                self.call(call)?;
+            }
+        }
+        on_delta(text);
+        Ok(())
+    }
+
+    /// Add the piece of one tool call.
+    fn call(&mut self, piece: &Value) -> Result<(), AgentError> {
+        let index = piece["index"]
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or_else(|| AgentError::new(ErrorKind::Decode, "a tool call has no index"))?;
+        // A provider numbers the calls from 0, so a gap is a broken stream.
+        if index > self.calls.len() {
+            return Err(AgentError::new(
+                ErrorKind::Decode,
+                format!("tool call {index} came before call {}", self.calls.len()),
+            ));
+        }
+        if index == self.calls.len() {
+            self.calls.push(CallParts::default());
+        }
+        let parts = &mut self.calls[index];
+        if let Some(id) = piece["id"].as_str() {
+            id.clone_into(&mut parts.id);
+        }
+        let function = &piece["function"];
+        if let Some(name) = function["name"].as_str() {
+            parts.name.push_str(name);
+        }
+        if let Some(arguments) = function["arguments"].as_str() {
+            parts.arguments.push_str(arguments);
+        }
+        Ok(())
+    }
+
+    /// The body of a plain response with the same message.
+    ///
+    /// # Errors
+    ///
+    /// A stream with no choice, or one that stops before its finish reason
+    /// and before `[DONE]`, is a `Transport` error: the answer is not whole.
+    pub fn finish(self) -> Result<Value, AgentError> {
+        if !self.seen || (self.finish_reason.is_none() && !self.done) {
+            return Err(AgentError::new(
+                ErrorKind::Transport,
+                "the stream ended before the answer did",
+            ));
+        }
+        let calls: Vec<Value> = self
+            .calls
+            .into_iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": call.arguments},
+                })
+            })
+            .collect();
+        let mut message = json!({"role": "assistant", "content": self.text});
+        if !self.refusal.is_empty() {
+            message["refusal"] = json!(self.refusal);
+        }
+        if !calls.is_empty() {
+            message["tool_calls"] = json!(calls);
+        }
+        Ok(json!({
+            "choices": [{"message": message, "finish_reason": self.finish_reason}],
+            "usage": self.usage,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -606,5 +803,138 @@ mod tests {
     fn the_key_stays_out_of_debug_output() {
         let model = OpenAiModel::new(Provider::OpenAi, "sk-secret", "m");
         assert!(!format!("{model:?}").contains("sk-secret"));
+    }
+
+    /// Stream `chunks` as events in network chunks of `size` bytes, then
+    /// `[DONE]`. Returns the body and each piece that reached `on_delta`.
+    fn streamed_in(chunks: &[Value], size: usize) -> Result<(Value, Vec<String>), AgentError> {
+        let mut wire = chunks.iter().fold(String::new(), |mut wire, chunk| {
+            use std::fmt::Write as _;
+            let _ = write!(wire, "data: {chunk}\n\n");
+            wire
+        });
+        wire.push_str(": done soon\n\ndata: [DONE]\n\n");
+        let mut frames = SseFrames::default();
+        let mut stream = StreamAssembler::default();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let on_delta = |piece: &str| seen.lock().unwrap().push(piece.to_owned());
+        for chunk in wire.as_bytes().chunks(size) {
+            for data in frames.push(chunk) {
+                stream.event(&data, &on_delta)?;
+            }
+        }
+        for data in frames.end() {
+            stream.event(&data, &on_delta)?;
+        }
+        Ok((stream.finish()?, seen.into_inner().unwrap()))
+    }
+
+    fn delta(delta: &Value, finish: Option<&str>) -> Value {
+        json!({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+    }
+
+    #[test]
+    fn a_stream_builds_the_body_of_a_plain_response() {
+        let text = "h\u{e9}llo \u{1f642}";
+        let chunks = [
+            delta(&json!({"role": "assistant", "content": ""}), None),
+            delta(&json!({"content": &text[..3]}), None),
+            delta(&json!({"content": &text[3..]}), None),
+            delta(&json!({"reasoning": "hm"}), None),
+            delta(&json!({}), Some("stop")),
+            json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 4}}),
+        ];
+        // One byte per chunk splits each character of more than one byte.
+        let (body, pieces) = streamed_in(&chunks, 1).unwrap();
+        assert_eq!(pieces.concat(), text);
+        // The harness sends the text that waits at each empty piece.
+        assert_eq!(pieces, ["", &text[..3], &text[3..], "", "", ""]);
+        let response = parse_response(&body).unwrap();
+        assert_eq!(response.content, vec![ContentPart::Text(text.into())]);
+        assert_eq!(response.stop_reason, StopReason::EndTurn);
+        assert_eq!(response.usage.input_tokens, 9);
+        assert_eq!(response.usage.output_tokens, 4);
+    }
+
+    #[test]
+    fn tool_calls_join_their_pieces_by_index() {
+        let call = |index: u64, id: Option<&str>, name: Option<&str>, args: &str| {
+            let mut piece = json!({"index": index, "function": {"arguments": args}});
+            if let Some(id) = id {
+                piece["id"] = json!(id);
+                piece["type"] = json!("function");
+            }
+            if let Some(name) = name {
+                piece["function"]["name"] = json!(name);
+            }
+            delta(&json!({"tool_calls": [piece]}), None)
+        };
+        let chunks = [
+            delta(&json!({"content": "let me look"}), None),
+            call(0, Some("c1"), Some("read_file"), ""),
+            call(0, None, None, "{\"path\":"),
+            call(1, Some("c2"), Some("web_search"), "{}"),
+            call(0, None, None, "\"a.md\"}"),
+            delta(&json!({}), Some("tool_calls")),
+        ];
+        let (body, _) = streamed_in(&chunks, 5).unwrap();
+        let response = parse_response(&body).unwrap();
+        assert_eq!(response.stop_reason, StopReason::ToolUse);
+        assert_eq!(
+            response.content,
+            vec![
+                ContentPart::Text("let me look".into()),
+                ContentPart::ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: json!({"path": "a.md"}),
+                },
+                ContentPart::ToolCall {
+                    id: "c2".into(),
+                    name: "web_search".into(),
+                    arguments: json!({}),
+                },
+            ]
+        );
+        let gap = streamed_in(&[call(1, Some("c"), Some("x"), "{}")], 64).unwrap_err();
+        assert_eq!(gap.kind(), ErrorKind::Decode);
+    }
+
+    #[test]
+    fn a_stream_that_fails_breaks_off_or_refuses_is_an_error() {
+        let upstream = json!({"error": {"code": 502, "message": "upstream down"}});
+        let error =
+            streamed_in(&[delta(&json!({"content": "a"}), None), upstream], 64).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert!(error.message().contains("upstream down"));
+
+        let mut cut = StreamAssembler::default();
+        cut.event(&delta(&json!({"content": "a"}), None).to_string(), &|_| {})
+            .unwrap();
+        assert_eq!(cut.finish().unwrap_err().kind(), ErrorKind::Transport);
+        assert_eq!(
+            StreamAssembler::default().finish().unwrap_err().kind(),
+            ErrorKind::Transport
+        );
+
+        let mut junk = StreamAssembler::default();
+        assert_eq!(
+            junk.event("{not json", &|_| {}).unwrap_err().kind(),
+            ErrorKind::Decode
+        );
+
+        let refused = [delta(&json!({"refusal": "no"}), Some("stop"))];
+        let (body, _) = streamed_in(&refused, 64).unwrap();
+        assert_eq!(
+            parse_response(&body).unwrap_err().kind(),
+            ErrorKind::Provider
+        );
+    }
+
+    #[test]
+    fn a_streamed_request_asks_for_the_usage() {
+        let body = streaming_body(request_body(&request(), "m", Provider::OpenRouter));
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 }

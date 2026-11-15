@@ -2,26 +2,49 @@
 //
 // The page CSP allows no inline script, so this file holds the behaviour of
 // the chat. Enter sends the message. Shift+Enter breaks the line. The message
-// shows at once, and the thread keeps its newest message in view.
+// shows at once. The answer then streams in, and the thread follows it.
 (() => {
   "use strict";
 
   const form = document.getElementById("composer");
   const scroller = document.getElementById("scroller");
   const thread = document.getElementById("thread");
-  if (!form || !scroller || !thread) {
+  const thinking = document.getElementById("thinking");
+  if (!form || !scroller || !thread || !thinking) {
     return;
   }
   const box = form.querySelector("textarea");
+  const send = form.querySelector("button");
 
+  // The thread follows new text while the reader is at its end. A reader
+  // who scrolls up to read keeps the place.
+  let follow = true;
+  scroller.addEventListener("scroll", () => {
+    const gap = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    follow = gap < 48;
+  });
   const toBottom = () => {
     scroller.scrollTop = scroller.scrollHeight;
+  };
+  const keepUp = () => {
+    if (follow) {
+      toBottom();
+    }
   };
 
   // The box grows with its text, up to the height that the CSS allows.
   const fit = () => {
     box.style.height = "auto";
     box.style.height = `${box.scrollHeight}px`;
+  };
+
+  // From the send until the answer settles, the chat is busy. The dots
+  // show until the first text of the answer.
+  let busy = false;
+  const setBusy = (on) => {
+    busy = on;
+    send.disabled = on;
+    thinking.classList.toggle("on", on);
   };
 
   box.addEventListener("input", fit);
@@ -33,7 +56,7 @@
       return;
     }
     event.preventDefault();
-    if (box.value.trim() !== "") {
+    if (!busy && box.value.trim() !== "") {
       form.requestSubmit();
     }
   });
@@ -51,13 +74,34 @@
     thread.append(message);
     box.value = "";
     fit();
+    setBusy(true);
+    follow = true;
     toBottom();
   });
 
-  document.body.addEventListener("htmx:afterSettle", toBottom);
-  // The markdown of an answer mounts after the swap, and it can grow.
-  document.addEventListener("markstream:mount", toBottom);
-  form.addEventListener("htmx:afterRequest", () => box.focus());
+  // A send that fails gets no answer to wait for.
+  form.addEventListener("htmx:responseError", () => setBusy(false));
+  form.addEventListener("htmx:sendError", () => setBusy(false));
+
+  // The answer settles with its whole text, or fails.
+  const settle = () => {
+    setBusy(false);
+    keepUp();
+    box.focus();
+  };
+  thread.addEventListener("markstream:done", settle);
+  thread.addEventListener("markstream:error", settle);
+
+  // Each piece of text changes the thread. Text hides the dots. A model
+  // call that starts again, after a tool, clears the text, so the dots
+  // show again.
+  new MutationObserver(() => {
+    const live = thread.querySelector('[data-markstream-state="streaming"]');
+    if (live) {
+      thinking.classList.toggle("on", busy && live.textContent.trim() === "");
+    }
+    keepUp();
+  }).observe(thread, { childList: true, subtree: true, characterData: true });
 
   toBottom();
   box.focus();

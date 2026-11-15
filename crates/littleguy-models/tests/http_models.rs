@@ -380,3 +380,49 @@ async fn openai_with_no_server_or_a_bad_body_fails() -> TestResult {
     assert_eq!(failure.kind(), ErrorKind::Transport);
     Ok(())
 }
+
+#[tokio::test]
+async fn openrouter_streams_each_text_delta_and_returns_the_message() -> TestResult {
+    let chunks = [
+        json!({"choices": [{"index": 0, "delta": {"role": "assistant", "content": "hel"}, "finish_reason": null}]}),
+        json!({"choices": [{"index": 0, "delta": {"content": "lo"}, "finish_reason": "stop"}]}),
+        json!({"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 2}}),
+    ];
+    let mut body = chunks.iter().fold(String::new(), |mut body, chunk| {
+        let _ = write!(body, ": OPENROUTER PROCESSING\n\ndata: {chunk}\n\n");
+        body
+    });
+    body.push_str("data: [DONE]\n\n");
+    let (endpoint, log) = serve(vec![
+        Canned {
+            status: 200,
+            content_type: "text/event-stream",
+            body,
+        },
+        Canned::json(401, &json!({"error": {"message": "bad key"}})),
+    ])
+    .await?;
+    let base = endpoint.trim_end_matches("/messages").to_owned();
+    let model = OpenAiModel::new(Provider::OpenRouter, "sk-or", "a/b").base_url(base);
+    let pieces = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&pieces);
+    let on_delta = move |piece: &str| {
+        if let Ok(mut text) = sink.lock() {
+            text.push_str(piece);
+        }
+    };
+    let response = model.chat_stream(&ask("hi"), &on_delta).await?;
+    assert_eq!(response.content, vec![ContentPart::Text("hello".into())]);
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+    assert_eq!(response.usage.output_tokens, 2);
+    assert_eq!(pieces.lock().map_err(|e| e.to_string())?.as_str(), "hello");
+    let requests = seen(&log)?;
+    assert_eq!(requests[0].body["stream"], true);
+    assert_eq!(requests[0].header("x-title").as_deref(), Some("littleguy"));
+    // An error status fails before any text, as a plain request does.
+    let Err(failure) = model.chat_stream(&ask("hi"), &on_delta).await else {
+        return Err("an error status gave a reply".into());
+    };
+    assert_eq!(failure.kind(), ErrorKind::Authentication);
+    Ok(())
+}

@@ -95,6 +95,25 @@ impl AgentModel for OfflineModel {
         })
     }
 
+    /// Passes the answer word by word, as a remote model streams it.
+    fn chat_stream<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+        on_delta: &'a (dyn Fn(&str) + Send + Sync),
+    ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
+        Box::pin(async move {
+            let response = self.chat(request).await?;
+            for part in &response.content {
+                if let ContentPart::Text(text) = part {
+                    for word in text.split_inclusive(' ') {
+                        on_delta(word);
+                    }
+                }
+            }
+            Ok(response)
+        })
+    }
+
     fn model_id(&self) -> Option<&str> {
         Some(OFFLINE_MODEL_ID)
     }
@@ -172,5 +191,21 @@ mod tests {
         let hi = request(vec![ChatMessage::text(ChatRole::User, "hi")]);
         let error = model.chat(&hi).await.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Config);
+    }
+
+    #[tokio::test]
+    async fn a_stream_passes_the_answer_word_by_word() {
+        let model = OfflineModel::new();
+        let words = std::sync::Mutex::new(Vec::new());
+        let on_delta = |word: &str| words.lock().unwrap().push(word.to_owned());
+        let hi = request(vec![ChatMessage::text(ChatRole::User, "hi")]);
+        let reply = model.chat_stream(&hi, &on_delta).await.unwrap();
+        let words = words.into_inner().unwrap();
+        assert_eq!(
+            words,
+            ["littleguy ", "(offline): ", "you ", "said ", "'hi'"]
+        );
+        assert_eq!(reply.content, vec![ContentPart::Text(words.concat())]);
+        assert_eq!(model.calls(), 1);
     }
 }

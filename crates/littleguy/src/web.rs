@@ -13,6 +13,7 @@ pub mod logins;
 mod pages;
 #[cfg(feature = "slack")]
 pub mod slack;
+pub mod streams;
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -31,6 +32,7 @@ pub use hooks::HookToken;
 pub use logins::Logins;
 #[cfg(feature = "slack")]
 pub use slack::SlackHook;
+pub use streams::Streams;
 
 use crate::daemon::Handle;
 
@@ -44,6 +46,8 @@ pub struct Web {
     pub handle: Handle,
     /// The sign-in links.
     pub logins: Logins,
+    /// The chat answers that wait for their stream.
+    pub streams: Streams,
     /// The bearer token of the hooks, when the hooks serve.
     pub hooks: Option<HookToken>,
     /// The Slack hooks, when Slack runs over the Events API.

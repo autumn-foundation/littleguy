@@ -194,13 +194,19 @@ button:disabled {
   font-size: 0.9em;
 }
 
-.msg.error .body {
+.msg.error .body,
+.msg.lg .body[data-markstream-state="error"] {
   background: var(--error-bg);
   border-color: var(--error);
   color: var(--error);
 }
 
-/* htmx shows the indicator while a request runs. */
+/* An answer with no text yet takes no room. The dots stand for it. */
+.msg.lg:has(> [data-markstream-src] > .markstream-source:empty) {
+  display: none;
+}
+
+/* The chat script shows the dots until the first text of an answer. */
 
 #thinking {
   display: none;
@@ -210,7 +216,7 @@ button:disabled {
   align-items: center;
 }
 
-#thinking.htmx-request {
+#thinking.on {
   display: flex;
 }
 

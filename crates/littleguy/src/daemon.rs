@@ -307,6 +307,8 @@ pub struct Daemon {
     refine: Option<Box<crate::refine::Refine>>,
     /// What a reload of the config needs, and the config that runs.
     kit: Box<reload::Kit>,
+    /// The readers of the answers that the model writes now.
+    live: Arc<live::Live>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
@@ -377,6 +379,7 @@ impl Daemon {
             .filter_map(|(service, on)| on.then_some(service))
             .collect();
         let chats = Arc::new(Chats::default());
+        let live = Arc::new(live::Live::default());
         let mut kit = reload::Kit {
             db: db.to_path_buf(),
             model,
@@ -390,6 +393,7 @@ impl Daemon {
             config: config.clone(),
             file: None,
             watch_every: reload::WATCH_EVERY,
+            live: Arc::clone(&live),
         };
         let built = kit.assemble(config, &chats)?;
         sqlite::register(&mut rt, Arc::new(built.harness));
@@ -421,6 +425,7 @@ impl Daemon {
             #[cfg(feature = "refine")]
             refine: built.refine,
             kit: Box::new(kit),
+            live,
         })
     }
 
@@ -447,6 +452,12 @@ impl Daemon {
     pub fn with_logins(mut self, logins: crate::web::Logins) -> Self {
         self.logins = Some(logins);
         self
+    }
+
+    /// The readers of live answers. A [`Handle`] with them streams a chat.
+    #[must_use]
+    pub fn live(&self) -> Arc<live::Live> {
+        Arc::clone(&self.live)
     }
 
     /// The agent that the owner talks to.
@@ -508,7 +519,13 @@ impl Daemon {
     pub async fn handle_request(&mut self, uid: u32, request: Request) -> Response {
         let result = match request {
             Request::Chat { message_id, text } => match cli_inbound(uid, message_id, text) {
-                Ok(inbound) => self.handle(&inbound, "").await,
+                Ok(inbound) => {
+                    // Each piece of text in this drive belongs to this message.
+                    self.live.begin(inbound.message_id.as_str());
+                    let answer = self.handle(&inbound, "").await;
+                    self.live.end();
+                    answer
+                }
                 Err(error) => Err(error),
             },
             owner_only if uid != self.owner_uid => {
@@ -1076,6 +1093,8 @@ pub struct Jobs {
 pub struct Handle {
     tx: mpsc::Sender<Job>,
     uid: u32,
+    /// The readers of live answers, when the daemon streams them.
+    live: Option<Arc<live::Live>>,
 }
 
 impl Handle {
@@ -1095,6 +1114,44 @@ impl Handle {
             .await
             .context("the daemon is stopping")?;
         answer.await.context("the daemon dropped the request")
+    }
+
+    /// Streams chats with the readers of `live`.
+    #[must_use]
+    pub fn with_live(mut self, live: Arc<live::Live>) -> Self {
+        self.live = Some(live);
+        self
+    }
+
+    /// Sends `text` to the assistant as the owner, and returns its pieces:
+    /// the text while the model writes it, then the answer. Without live
+    /// readers, the answer is the one piece. The chat runs to its end even
+    /// when the receiver goes.
+    #[must_use]
+    pub fn chat_live(&self, text: String) -> mpsc::Receiver<live::Piece> {
+        let message_id = crate::client::fresh_message_id();
+        let (pieces, receiver) = mpsc::channel(live::LIVE_PIECES);
+        if let Some(live) = &self.live {
+            live.watch(&message_id, pieces.clone());
+        }
+        let handle = self.clone();
+        tokio::spawn(async move {
+            let request = Request::Chat {
+                message_id: message_id.clone(),
+                text,
+            };
+            let answer = handle
+                .ask(request)
+                .await
+                .unwrap_or_else(|error| Response::Error {
+                    message: format!("{error:#}"),
+                });
+            if let Some(live) = &handle.live {
+                live.forget(&message_id);
+            }
+            let _ = pieces.send(live::Piece::Answer(answer)).await;
+        });
+        receiver
     }
 
     /// Ticks the daemon now, as its own timer does, and waits until the
@@ -1121,6 +1178,7 @@ pub fn jobs(owner_uid: u32) -> (Handle, Jobs) {
         Handle {
             tx: tx.clone(),
             uid: owner_uid,
+            live: None,
         },
         Jobs { tx, rx },
     )
@@ -1439,6 +1497,7 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
 #[cfg(feature = "discord")]
 mod discord;
 mod gate;
+pub mod live;
 #[cfg(feature = "refine")]
 mod refine;
 mod reload;

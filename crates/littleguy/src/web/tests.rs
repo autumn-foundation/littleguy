@@ -66,8 +66,9 @@ async fn rig_on(
     };
     let daemon = Daemon::open_with(&db, config, model, UID, false, extras)
         .unwrap()
-        .with_logins(logins.clone())
-        .with_skills_dir(dir.path().join("skills"));
+        .with_logins(logins.clone());
+    #[cfg(feature = "skills")]
+    let daemon = daemon.with_skills_dir(dir.path().join("skills"));
     let listener = daemon::bind(&dir.path().join("lg.sock")).await.unwrap();
     let (handle, jobs) = daemon::jobs(UID);
     // As `lg serve` does, so a chat streams.
@@ -922,7 +923,7 @@ async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {
         .assert_status(401);
 }
 
-#[cfg(feature = "refine")]
+#[cfg(feature = "skills")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_accepts_and_retires_a_skill_on_the_skills_tab() {
     let rig = rig_on(&config(true), None, Arc::new(Saver)).await;

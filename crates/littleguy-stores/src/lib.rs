@@ -41,6 +41,7 @@ pub mod approvals;
 #[cfg(feature = "plans")]
 pub mod plans;
 pub mod runlog;
+#[cfg(feature = "skills")]
 pub mod skill_drafts;
 pub mod tick_log;
 #[cfg(feature = "followups")]

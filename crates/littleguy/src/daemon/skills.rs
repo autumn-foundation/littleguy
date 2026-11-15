@@ -6,6 +6,8 @@
 //! overlay is read at each op, so no restart is needed (autumn-harvest
 //! #2658 does not bind it). The assistant drafts skills, and only the owner
 //! turns a draft into a file.
+//!
+//! The module comes with the `skills` feature, which needs `refine`.
 
 use std::path::PathBuf;
 
@@ -19,7 +21,6 @@ use crate::skills;
 const ASSISTANT_AUTHOR: &str = "littleguy";
 
 /// Why skills are off in this daemon, or `None` when they work.
-#[cfg(feature = "refine")]
 fn off_reason(daemon: &Daemon) -> Option<String> {
     if daemon.skills_dir().is_none() {
         return Some(String::from(
@@ -31,16 +32,6 @@ fn off_reason(daemon: &Daemon) -> Option<String> {
             "skills need a [refine] section: they reach the assistant through its profile overlay",
         )
     })
-}
-
-/// Why skills are off in this daemon: this build has no refine loop.
-#[cfg(not(feature = "refine"))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "with the refine loop the same function can answer None, so both share one signature"
-)]
-fn off_reason(_daemon: &Daemon) -> Option<String> {
-    Some(crate::features::missing("skills", "refine"))
 }
 
 impl Daemon {
@@ -66,7 +57,6 @@ impl Daemon {
     /// Puts the skills of the folder in the overlay, when the folder changed
     /// since the last sync. A failure goes to the log once: the next change
     /// of the folder tries again.
-    #[cfg(feature = "refine")]
     pub(super) async fn sync_skills(&mut self) {
         {
             let (Some(dir), Some(refine)) = (self.skills_dir(), self.refine.as_deref()) else {
@@ -101,16 +91,6 @@ impl Daemon {
             }
             self.skills_stamp = Some(stamp);
         }
-    }
-
-    /// This build has no refine loop, so no skill reaches the assistant.
-    #[cfg(not(feature = "refine"))]
-    #[expect(
-        clippy::unused_self,
-        reason = "the refine build reads the daemon, and the callers are the same in both builds"
-    )]
-    pub(super) fn sync_skills(&self) -> std::future::Ready<()> {
-        std::future::ready(())
     }
 
     /// The listing of the skills and the drafts.
@@ -162,13 +142,6 @@ impl Daemon {
 
     /// Handles one skills request of the owner. Each change answers with the
     /// listing after it, and syncs the overlay at once.
-    #[cfg_attr(
-        not(feature = "refine"),
-        expect(
-            clippy::needless_pass_by_ref_mut,
-            reason = "the refine build syncs the skills, which changes the daemon"
-        )
-    )]
     pub(super) async fn skills_request(&mut self, request: Request) -> Result<Response> {
         if let Some(message) = off_reason(self) {
             return Ok(if matches!(request, Request::Skills) {

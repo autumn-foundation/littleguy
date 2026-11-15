@@ -72,7 +72,6 @@ pub struct Shelf {
 impl Shelf {
     /// The skills as the engine takes them. Only the overlay sync of the
     /// refine loop needs them.
-    #[cfg(any(feature = "refine", test))]
     #[must_use]
     pub fn texts(&self) -> BTreeMap<String, SkillText> {
         self.skills
@@ -348,7 +347,6 @@ pub fn retire(dir: &Path, name: &str) -> Result<bool> {
 
 /// The change stamp of the folder `dir`: each `SKILL.md` with its time and
 /// length. The daemon syncs the skills when it changes.
-#[cfg(any(feature = "refine", test))]
 #[must_use]
 pub fn stamp(dir: &Path) -> Vec<(PathBuf, std::time::SystemTime, u64)> {
     let Ok(entries) = std::fs::read_dir(dir) else {

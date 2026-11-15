@@ -64,13 +64,42 @@ fn serve_command(paths: &Paths, socket: &Path) -> Command {
     command
 }
 
+/// A running `lg serve`. It is killed when the test ends, also when an
+/// assertion fails, so a failed test leaves no daemon on its port and no
+/// daemon that outlives its folder.
+struct Running(Child);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        // The daemon may be gone already; then there is nothing to stop.
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl std::ops::Deref for Running {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Running {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
 /// Starts `lg serve` and waits until its socket answers.
-fn serve(paths: &Paths) -> TestResult<Child> {
-    let child = serve_command(paths, &paths.socket)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+fn serve(paths: &Paths) -> TestResult<Running> {
+    let child = Running(
+        serve_command(paths, &paths.socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?,
+    );
     let deadline = Instant::now() + Duration::from_secs(30);
     while std::os::unix::net::UnixStream::connect(&paths.socket).is_err() {
         if Instant::now() > deadline {
@@ -102,7 +131,7 @@ fn calls(paths: &Paths) -> usize {
     std::fs::read_to_string(&paths.calls).map_or(0, |log| log.lines().count())
 }
 
-fn kill(mut child: Child) -> TestResult {
+fn kill(mut child: Running) -> TestResult {
     // `Child::kill` sends SIGKILL: the daemon gets no chance to clean up.
     child.kill()?;
     child.wait()?;
@@ -294,12 +323,14 @@ fn hooked_paths() -> TestResult<Paths> {
 #[test]
 fn a_public_hook_ticks_the_daemon_with_its_token() -> TestResult {
     let paths = hooked_paths()?;
-    let child = serve_command(&paths, &paths.socket)
-        .env("LG_HOOK_TOKEN", HOOK_TOKEN)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+    let child = Running(
+        serve_command(&paths, &paths.socket)
+            .env("LG_HOOK_TOKEN", HOOK_TOKEN)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?,
+    );
     let (head, _) = request(paths.port, "POST", "/hooks/tick", "")?;
     assert!(head.starts_with("HTTP/1.1 401"), "a hook needs its token");
     let bearer = format!("Authorization: Bearer {HOOK_TOKEN}\r\n");
@@ -346,17 +377,19 @@ const SLACK_SECRET: &str = "8f742231b10e8888abcd99yyyzzz85a5";
 #[test]
 fn slack_over_the_events_api_answers_through_lg_serve() -> TestResult {
     let paths = hooked_paths()?;
-    let child = serve_command(&paths, &paths.socket)
-        .arg("--slack-api")
-        .arg("http://127.0.0.1:9/api")
-        .env("LG_HOOK_TOKEN", HOOK_TOKEN)
-        .env("SLACK_BOT_TOKEN", "xoxb-test")
-        .env("SLACK_SIGNING_SECRET", SLACK_SECRET)
-        .env_remove("SLACK_APP_TOKEN")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+    let child = Running(
+        serve_command(&paths, &paths.socket)
+            .arg("--slack-api")
+            .arg("http://127.0.0.1:9/api")
+            .env("LG_HOOK_TOKEN", HOOK_TOKEN)
+            .env("SLACK_BOT_TOKEN", "xoxb-test")
+            .env("SLACK_SIGNING_SECRET", SLACK_SECRET)
+            .env_remove("SLACK_APP_TOKEN")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?,
+    );
     let body = r#"{"type":"url_verification","challenge":"c-42"}"#;
     let (head, _) = send(paths.port, "POST", "/hooks/slack/events", "", body)?;
     assert!(head.starts_with("HTTP/1.1 401"), "Slack signs each request");

@@ -218,6 +218,47 @@ fn shown_text(data: &[u8]) -> Option<String> {
     std::str::from_utf8(data).ok().map(str::to_owned)
 }
 
+/// Why an op stopped before its answer, in words for the owner.
+fn stopped_early(stop: autumn_harvest_agent::AgentStop) -> String {
+    use autumn_harvest_agent::AgentStop;
+    match stop {
+        AgentStop::StepsExhausted => {
+            String::from("I used every tool round that one message gets. Ask me to go on")
+        }
+        AgentStop::TokensExhausted | AgentStop::BudgetExceeded => {
+            String::from("I ran out of my token budget")
+        }
+        AgentStop::TranscriptFull => String::from("the conversation got too long"),
+        AgentStop::LoopDetected => String::from("I kept making the same tool calls"),
+        AgentStop::OutputCapped => String::from("my answer hit the output limit"),
+        AgentStop::ReplyTooLarge => String::from("my answer was too large to send"),
+        AgentStop::Interrupted => String::from("the op was interrupted"),
+        other => format!("the op stopped early ({other:?})"),
+    }
+}
+
+/// The answer to a person, from how the op stopped and its last text. An
+/// op that stopped early says why, also when it wrote some text first. An
+/// op with no text at all is no answer, never an empty reply.
+fn answer_of(stop: Option<autumn_harvest_agent::AgentStop>, text: &str) -> Response {
+    use autumn_harvest_agent::AgentStop;
+    let text = text.trim();
+    match stop {
+        None | Some(AgentStop::Completed) if !text.is_empty() => Response::Reply {
+            text: text.to_owned(),
+        },
+        None | Some(AgentStop::Completed) => Response::NoAnswer {
+            reason: String::from("the op ended without an answer"),
+        },
+        Some(stop) if text.is_empty() => Response::NoAnswer {
+            reason: stopped_early(stop),
+        },
+        Some(stop) => Response::Reply {
+            text: format!("{text}\n\n(I stopped early: {}.)", stopped_early(stop)),
+        },
+    }
+}
+
 /// How a tick went, in a few words. `skipped` is the verdict of the
 /// heartbeat precheck, and `finished` counts the booked wakes it ended.
 #[cfg(feature = "self-debug")]
@@ -759,11 +800,9 @@ impl Daemon {
                     .unwrap_or_else(|| String::from("the op failed")),
             });
         }
-        Ok(state.last_answer.map_or_else(
-            || Response::NoAnswer {
-                reason: String::from("the op ended without an answer"),
-            },
-            |text| Response::Reply { text },
+        Ok(answer_of(
+            state.last_stop,
+            state.last_answer.as_deref().unwrap_or_default(),
         ))
     }
 
@@ -3240,6 +3279,76 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[test]
+    fn an_early_stop_is_never_an_empty_reply() {
+        use autumn_harvest_agent::AgentStop;
+        assert_eq!(
+            answer_of(Some(AgentStop::Completed), " Hi. "),
+            Response::Reply {
+                text: String::from("Hi.")
+            }
+        );
+        assert!(matches!(
+            answer_of(Some(AgentStop::Completed), ""),
+            Response::NoAnswer { .. }
+        ));
+        let Response::NoAnswer { reason } = answer_of(Some(AgentStop::StepsExhausted), "") else {
+            panic!("an early stop with no text is no answer");
+        };
+        assert!(reason.contains("tool round"));
+        let Response::Reply { text } = answer_of(Some(AgentStop::LoopDetected), "Half done.")
+        else {
+            panic!("an early stop keeps its text");
+        };
+        assert!(text.starts_with("Half done."));
+        assert!(text.contains("I stopped early"));
+    }
+
+    /// A model that asks for another tool call each time, so an op runs out
+    /// of tool rounds.
+    #[derive(Debug, Default)]
+    struct BusyModel {
+        calls: std::sync::atomic::AtomicU64,
+    }
+
+    impl AgentModel for BusyModel {
+        fn chat<'a>(
+            &'a self,
+            _request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            use std::sync::atomic::Ordering;
+            Box::pin(async move {
+                // Each call reads another path, so no two calls repeat.
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(autumn_harvest_agent::ChatResponse {
+                    content: vec![autumn_harvest_agent::ContentPart::ToolCall {
+                        id: format!("c{n}"),
+                        name: String::from("read_file"),
+                        arguments: serde_json::json!({"path": format!("notes/{n}.md")}),
+                    }],
+                    stop_reason: autumn_harvest_agent::StopReason::ToolUse,
+                    usage: autumn_harvest_agent::TokenUsage::new(1, 1),
+                })
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_that_runs_out_of_tool_rounds_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let model: Arc<dyn AgentModel> = Arc::new(BusyModel::default());
+        let mut daemon =
+            Daemon::open(&dir.path().join("lg.db"), &config(), model, UID, false).unwrap();
+        let Response::NoAnswer { reason } = daemon.handle_request(UID, request("b-1", "dig")).await
+        else {
+            panic!("an op that ran out of rounds answered");
+        };
+        assert!(reason.contains("tool round"));
     }
 
     fn reply_text(response: &Response) -> &str {

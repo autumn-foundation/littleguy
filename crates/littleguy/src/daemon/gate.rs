@@ -59,10 +59,20 @@ async fn finish(
     else {
         return Ok(());
     };
-    let answer = state
-        .await?
-        .and_then(|state| state.last_answer)
-        .unwrap_or_else(|| format!("Request #{} ended without an answer.", record.id));
+    let state = state.await?;
+    let answer = match super::answer_of(
+        state.as_ref().and_then(|state| state.last_stop),
+        state
+            .as_ref()
+            .and_then(|state| state.last_answer.as_deref())
+            .unwrap_or_default(),
+    ) {
+        Response::Reply { text } => text,
+        Response::NoAnswer { reason } => {
+            format!("Request #{} ended without an answer: {reason}.", record.id)
+        }
+        _ => format!("Request #{} ended without an answer.", record.id),
+    };
     if let Err(error) = chats.send(service, &channel, &answer).await {
         tracing::warn!(%error, approval = record.id, "the answer of a request did not go out");
     }
@@ -247,14 +257,13 @@ impl Daemon {
                 approval: record.id,
             });
         }
-        let answer = sqlite::state(&self.rt, &id)
-            .await?
-            .and_then(|s| s.last_answer);
-        Ok(answer.map_or_else(
-            || Response::NoAnswer {
-                reason: String::from("the op ended without an answer"),
-            },
-            |text| Response::Reply { text },
+        let state = sqlite::state(&self.rt, &id).await?;
+        Ok(super::answer_of(
+            state.as_ref().and_then(|s| s.last_stop),
+            state
+                .as_ref()
+                .and_then(|s| s.last_answer.as_deref())
+                .unwrap_or_default(),
         ))
     }
 

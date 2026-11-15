@@ -8,6 +8,10 @@
 //! Other programs of the same user read it too, such as a table that runs
 //! each character as an `lg serve`. So a new field is optional: an older
 //! reader ignores it, and a reply from an older daemon leaves it out.
+//!
+//! One request has more than one response line: `chat_stream` gets a
+//! [`Piece`] line for each piece of text while the model writes, then the
+//! response line (issue #67).
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +24,15 @@ pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub enum Request {
     /// A message for the assistant, from `lg chat`.
     Chat {
+        /// The id of the message. A retry with the same id delivers it once.
+        message_id: String,
+        /// The text.
+        text: String,
+    },
+    /// A message for the assistant, as `chat`, with the text of the answer
+    /// while the model writes it. The daemon writes a [`Piece`] line for
+    /// each piece, then the response line.
+    ChatStream {
         /// The id of the message. A retry with the same id delivers it once.
         message_id: String,
         /// The text.
@@ -317,6 +330,22 @@ pub struct PairEntry {
     pub source: String,
 }
 
+/// A piece of an answer while the model writes it: a line before the
+/// response line of a `chat_stream`. The pieces are a preview. The response
+/// line is the answer that counts, and a piece that a slow reader misses is
+/// lost.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Piece {
+    /// A model call starts. The text of an earlier call of the turn goes.
+    Restart,
+    /// Text that the model wrote.
+    Delta {
+        /// The text.
+        text: String,
+    },
+}
+
 /// What one op spent: the model calls that its drive recorded in the cost
 /// ledger.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -530,6 +559,26 @@ mod tests {
                 usage: None,
             }
         );
+    }
+
+    #[test]
+    fn a_piece_carries_its_kind() {
+        assert_eq!(
+            serde_json::to_value(Piece::Delta {
+                text: String::from("I try")
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "delta", "text": "I try"})
+        );
+        assert_eq!(
+            serde_json::to_value(Piece::Restart).unwrap(),
+            serde_json::json!({"kind": "restart"})
+        );
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "kind": "chat_stream", "message_id": "m-1", "text": "hello",
+        }))
+        .unwrap();
+        assert!(matches!(request, Request::ChatStream { .. }));
     }
 
     #[test]

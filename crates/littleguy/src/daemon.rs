@@ -703,19 +703,28 @@ impl Daemon {
         async move { Ok(query.await?) }
     }
 
+    /// Handles a chat from the local socket. The pieces of its op go to the
+    /// reader of its message id.
+    async fn chat_request(
+        &mut self,
+        uid: u32,
+        message_id: String,
+        text: String,
+    ) -> Result<Response> {
+        let inbound = cli_inbound(uid, message_id, text)?;
+        self.live.begin(inbound.message_id.as_str());
+        let answer = self.handle(&inbound, "").await;
+        self.live.end();
+        answer
+    }
+
     /// Handles one request from the local socket, sent by `uid`.
     pub async fn handle_request(&mut self, uid: u32, request: Request) -> Response {
         let result = match request {
-            Request::Chat { message_id, text } => match cli_inbound(uid, message_id, text) {
-                Ok(inbound) => {
-                    // The pieces of the op of this message go to its reader.
-                    self.live.begin(inbound.message_id.as_str());
-                    let answer = self.handle(&inbound, "").await;
-                    self.live.end();
-                    answer
-                }
-                Err(error) => Err(error),
-            },
+            // The socket server streams `chat_stream`. Here it is a chat.
+            Request::Chat { message_id, text } | Request::ChatStream { message_id, text } => {
+                self.chat_request(uid, message_id, text).await
+            }
             owner_only if uid != self.owner_uid => {
                 tracing::warn!(uid, request = ?owner_only, "refused an owner request");
                 Ok(Response::Error {
@@ -1769,7 +1778,11 @@ async fn serve(
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let Jobs { tx, mut rx } = jobs;
-    let mut tasks = vec![tokio::spawn(accept_loop(listener, tx.clone()))];
+    let mut tasks = vec![tokio::spawn(accept_loop(
+        listener,
+        tx.clone(),
+        daemon.live(),
+    ))];
     #[cfg(feature = "discord")]
     if let Some(link) = links.discord {
         discord::start(&daemon, link, &tx, &mut tasks);
@@ -1917,13 +1930,14 @@ async fn decide_press(jobs: &mpsc::Sender<Job>, press: Press) -> Option<gate::Pr
     answer.await.ok()
 }
 
-async fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Job>) {
+async fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Job>, live: Arc<live::Live>) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let tx = tx.clone();
+                let live = Arc::clone(&live);
                 tokio::spawn(async move {
-                    if let Err(error) = serve_connection(stream, tx).await {
+                    if let Err(error) = serve_connection(stream, tx, &live).await {
                         tracing::debug!(error = %format!("{error:#}"), "a connection failed");
                     }
                 });
@@ -1936,7 +1950,95 @@ async fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Job>) {
     }
 }
 
-async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<()> {
+/// Writes one JSON line.
+async fn write_line(
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+    line: &(impl serde::Serialize + Sync),
+) -> Result<()> {
+    let mut out = serde_json::to_vec(line)?;
+    out.push(b'\n');
+    write.write_all(&out).await.context("writing a line")
+}
+
+/// Hands a `chat_stream` to the owner as a chat, and writes each piece of
+/// its answer as a line while the model writes it. Returns the answer.
+///
+/// The reader of the message id goes in before the op reaches the owner,
+/// so no piece of the op comes too early.
+async fn stream_chat(
+    uid: u32,
+    message_id: String,
+    text: String,
+    tx: &mpsc::Sender<Job>,
+    taps: &live::Live,
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Result<Response> {
+    let (pieces, taken) = mpsc::channel(live::LIVE_PIECES);
+    taps.watch(&message_id, pieces);
+    let (reply, answer) = oneshot::channel();
+    let request = Request::Chat {
+        message_id: message_id.clone(),
+        text,
+    };
+    let job = Job::Socket {
+        uid,
+        request,
+        reply,
+    };
+    let result = if tx.send(job).await.is_ok() {
+        relay(answer, taken, write).await
+    } else {
+        Err(anyhow::anyhow!("the daemon is stopping"))
+    };
+    taps.forget(&message_id);
+    result
+}
+
+/// Writes each piece as it comes, until the answer comes. The sink sends
+/// each piece during the drive, before the owner answers, so the pieces
+/// that still wait then are written first. A reader that goes keeps the op
+/// running to its end.
+async fn relay(
+    answer: oneshot::Receiver<Response>,
+    mut taken: mpsc::Receiver<live::Piece>,
+    write: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Result<Response> {
+    let mut answer = std::pin::pin!(answer);
+    let mut written = Ok(());
+    let response = loop {
+        tokio::select! {
+            biased;
+            Some(piece) = taken.recv() => {
+                if let (Ok(()), Some(line)) = (&written, wire_piece(piece)) {
+                    written = write_line(write, &line).await;
+                }
+            }
+            response = &mut answer => break response,
+        }
+    };
+    while let Ok(piece) = taken.try_recv() {
+        if let (Ok(()), Some(line)) = (&written, wire_piece(piece)) {
+            written = write_line(write, &line).await;
+        }
+    }
+    written.and_then(|()| response.context("the daemon dropped the request"))
+}
+
+/// A live piece as a line of the wire. The answer is the response line,
+/// not a piece, and the sink never sends it.
+fn wire_piece(piece: live::Piece) -> Option<crate::protocol::Piece> {
+    match piece {
+        live::Piece::Restart => Some(crate::protocol::Piece::Restart),
+        live::Piece::Text(text) => Some(crate::protocol::Piece::Delta { text }),
+        live::Piece::Answer(_) => None,
+    }
+}
+
+async fn serve_connection(
+    stream: UnixStream,
+    tx: mpsc::Sender<Job>,
+    taps: &live::Live,
+) -> Result<()> {
     let uid = stream
         .peer_cred()
         .context("reading the peer credentials")?
@@ -1955,6 +2057,9 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
         }
     } else {
         match serde_json::from_str::<Request>(&line) {
+            Ok(Request::ChatStream { message_id, text }) => {
+                stream_chat(uid, message_id, text, &tx, taps, &mut write).await?
+            }
             Ok(request) => {
                 let (reply, answer) = oneshot::channel();
                 tx.send(Job::Socket {
@@ -1971,13 +2076,7 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
             },
         }
     };
-    let mut out = serde_json::to_vec(&response)?;
-    out.push(b'\n');
-    write
-        .write_all(&out)
-        .await
-        .context("writing the response")?;
-    Ok(())
+    write_line(&mut write, &response).await
 }
 
 #[cfg(feature = "council")]
@@ -2261,6 +2360,82 @@ mod tests {
         let mut answer = String::new();
         BufReader::new(read).read_line(&mut answer).await.unwrap();
         serde_json::from_str(&answer).unwrap()
+    }
+
+    /// Sends `line`, and reads every line of the answer.
+    async fn lines(socket: &Path, line: &serde_json::Value) -> Vec<serde_json::Value> {
+        let stream = UnixStream::connect(socket).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        write
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut lines = Vec::new();
+        let mut reader = BufReader::new(read);
+        let mut text = String::new();
+        while reader.read_line(&mut text).await.unwrap() > 0 {
+            lines.push(serde_json::from_str(&text).unwrap());
+            text.clear();
+        }
+        lines
+    }
+
+    /// A `chat_stream` gets the pieces of its answer, then the answer. The
+    /// pieces after the last restart make the text of the answer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_chat_stream_writes_its_pieces_then_the_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("lg.sock");
+        let uid = rustix::process::getuid().as_raw();
+        let model = Arc::new(OfflineModel::new());
+        let daemon = Daemon::open(&dir.path().join("lg.db"), &config(), model, uid, false).unwrap();
+        let listener = bind(&socket).await.unwrap();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let stop = async {
+            let _ = stop_rx.await;
+        };
+        let streamed = serde_json::json!({
+            "kind": "chat_stream", "message_id": "s-1", "text": "a long way down",
+        });
+        let client = async {
+            let first = lines(&socket, &streamed).await;
+            let again = lines(&socket, &streamed).await;
+            let plain = lines(
+                &socket,
+                &serde_json::json!({"kind": "chat", "message_id": "s-2", "text": "hi"}),
+            )
+            .await;
+            stop_tx.send(()).unwrap();
+            (first, again, plain)
+        };
+        let (served, (first, again, plain)) = tokio::join!(
+            run(daemon, listener, Links::default(), None, jobs(UID).1, stop),
+            client
+        );
+        served.unwrap();
+        let (last, pieces) = first.split_last().unwrap();
+        assert_eq!(last["kind"], "reply");
+        let answer = last["text"].as_str().unwrap();
+        assert_eq!(answer, "littleguy (offline): you said 'a long way down'");
+        let start = pieces
+            .iter()
+            .rposition(|piece| piece["kind"] == "restart")
+            .map_or(0, |at| at + 1);
+        let text: String = pieces[start..]
+            .iter()
+            .map(|piece| {
+                assert_eq!(piece["kind"], "delta", "{piece}");
+                piece["text"].as_str().unwrap()
+            })
+            .collect();
+        assert_eq!(text, answer, "the pieces make the answer: {pieces:?}");
+        assert!(pieces.iter().any(|piece| piece["kind"] == "delta"));
+        // A seen id ran nothing, so it has no pieces.
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0]["kind"], "duplicate");
+        // A plain chat still gets one line.
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0]["kind"], "reply");
     }
 
     /// The whole socket path: accept, route, run, answer, stop.

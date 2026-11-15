@@ -189,3 +189,78 @@ async fn search_notes_refuses_an_empty_query_and_no_workspace() {
         .unwrap_err();
     assert!(alone.to_string().contains("no workspace"));
 }
+
+/// A workspace with one file of `text` at `long.txt`, and `read_file`.
+fn reader(text: &str) -> (WorkspaceHandle, Arc<dyn Tool>) {
+    let handle = WorkspaceHandle::new(Workspace::default());
+    handle.with(|files| files.write("long.txt", text)).unwrap();
+    (handle, tool("read_file"))
+}
+
+#[tokio::test]
+async fn a_read_with_no_offset_starts_at_the_start() {
+    let (handle, read_file) = reader("héllo world");
+    let read = read_file
+        .execute(json!({"path": "long.txt"}), &ctx(Some(handle)))
+        .await
+        .unwrap();
+    assert_eq!(
+        read,
+        json!({"path": "long.txt", "offset": 0, "text": "héllo world",
+               "truncated": false, "length": 11})
+    );
+}
+
+#[tokio::test]
+async fn an_offset_reads_a_window_in_the_middle_of_a_long_file() {
+    // Each line holds its number, so a window shows where it starts.
+    let text = (0..30_000).fold(String::new(), |mut text, n| {
+        use std::fmt::Write as _;
+        let _ = writeln!(text, "{n:06}");
+        text
+    });
+    let (handle, read_file) = reader(&text);
+    let call = ctx(Some(handle));
+    let start = 7 * 20_000;
+    let read = read_file
+        .execute(json!({"path": "long.txt", "offset": start}), &call)
+        .await
+        .unwrap();
+    let window = read["text"].as_str().unwrap();
+    assert!(window.starts_with("020000\n"), "{}", &window[..14]);
+    assert_eq!(window.chars().count(), text.chars().count() - start);
+    assert_eq!(read["offset"], start);
+    assert_eq!(read["truncated"], false);
+    assert_eq!(read["length"], 7 * 30_000);
+    // A window that ends before the file does says so.
+    let read = read_file
+        .execute(json!({"path": "long.txt", "offset": 7}), &call)
+        .await
+        .unwrap();
+    assert!(read["text"].as_str().unwrap().starts_with("000001\n"));
+    assert_eq!(
+        read["text"].as_str().unwrap().chars().count(),
+        crate::MAX_READ_CHARS
+    );
+    assert_eq!(read["truncated"], true);
+}
+
+#[tokio::test]
+async fn an_offset_past_the_end_reads_nothing_and_gives_the_length() {
+    let (handle, read_file) = reader("héllo");
+    let call = ctx(Some(handle));
+    for offset in [5, 6, 1_000_000] {
+        let read = read_file
+            .execute(json!({"path": "long.txt", "offset": offset}), &call)
+            .await
+            .unwrap();
+        assert_eq!(read["text"], "");
+        assert_eq!(read["truncated"], false);
+        assert_eq!(read["length"], 5);
+    }
+    let error = read_file
+        .execute(json!({"path": "long.txt", "offset": -1}), &call)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Tool);
+}

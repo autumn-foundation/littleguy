@@ -69,6 +69,44 @@ fn clip(text: &str, max: usize) -> (String, bool) {
     }
 }
 
+/// A window of `text`: at most `max` characters from character `offset`.
+/// Returns the window, whether more text follows it, and the length of
+/// `text` in characters. An `offset` past the end gives an empty window
+/// (issue #73).
+fn window(text: &str, offset: usize, max: usize) -> (String, bool, usize) {
+    let length = text.chars().count();
+    let start = text
+        .char_indices()
+        .nth(offset)
+        .map_or(text.len(), |(at, _)| at);
+    let (shown, more) = clip(&text[start..], max);
+    (shown, more, length)
+}
+
+/// The optional `offset` of `input`: a whole number of characters, 0 when
+/// it is missing.
+fn offset_field(input: &serde_json::Value) -> Result<usize, AgentError> {
+    match input.get("offset") {
+        None | Some(serde_json::Value::Null) => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| refuse("`offset` must be a whole number of characters, from 0")),
+    }
+}
+
+/// The schema of an `offset` field.
+fn offset_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "integer",
+        "minimum": 0,
+        "description": "Where to start, in characters from the start. Leave it out to start at 0. \
+                        `length` is the whole size in characters. When `offset` plus the \
+                        characters of the `text` you got is less than `length`, call again from \
+                        there to read on. Count what you got: a long result can reach you cut.",
+    })
+}
+
 /// Installs the TLS provider. Reqwest panics without one, and an `Err`
 /// means that one is installed already.
 #[cfg(any(feature = "web", feature = "mcp"))]
@@ -85,6 +123,37 @@ mod unit {
         assert_eq!(clip("héllo", 2), (String::from("hé"), true));
         assert_eq!(clip("hé", 2), (String::from("hé"), false));
         assert_eq!(clip("", 0), (String::new(), false));
+    }
+
+    #[test]
+    fn a_window_starts_at_its_offset_and_counts_characters() {
+        assert_eq!(window("héllo", 1, 2), (String::from("él"), true, 5));
+        assert_eq!(window("héllo", 3, 10), (String::from("lo"), false, 5));
+        assert_eq!(window("héllo", 5, 10), (String::new(), false, 5));
+        assert_eq!(window("héllo", 99, 10), (String::new(), false, 5));
+        assert_eq!(window("", 0, 10), (String::new(), false, 0));
+    }
+
+    #[test]
+    fn an_offset_is_a_whole_number_or_nothing() {
+        assert_eq!(offset_field(&serde_json::json!({})).unwrap(), 0);
+        assert_eq!(
+            offset_field(&serde_json::json!({"offset": null})).unwrap(),
+            0
+        );
+        assert_eq!(
+            offset_field(&serde_json::json!({"offset": 12})).unwrap(),
+            12
+        );
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("3"),
+        ] {
+            let error = offset_field(&serde_json::json!({"offset": bad})).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Tool);
+            assert!(error.to_string().contains("`offset`"), "{error}");
+        }
     }
 
     #[test]

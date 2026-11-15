@@ -271,6 +271,31 @@ The web tools only read, and their results count as untrusted input. The
 file tools change only the private workspace. A morning brief can read but
 not write. [ADR 0007](docs/adr/0007-first-tools.md) explains the design.
 
+
+## Heartbeat
+
+A `[heartbeat]` section wakes littleguy on its own. On each tick it checks
+the goals that are due and researches an open idea, and it tells you only
+what you should know. A tick with nothing due costs no model call: a
+check in code skips it first.
+
+```toml
+[heartbeat]
+every_minutes = 60              # the default
+quiet = "22:00-08:00"           # no ticks in these hours; optional
+timezone = "America/Chicago"    # of `quiet`; the default is the memory time zone
+research = true                 # research open ideas when no goal is due
+deliver = "web"                 # where news goes: the web chat, for now
+# prompt = "..."                # the instruction of each tick
+```
+
+A tick is read-only, as the brief is: it can file ideas, add notes and
+propose goals, but it cannot act outside or write anything that people
+see. When it has news, the answer waits in the web chat, labelled
+"littleguy, on its own". The heartbeat and the morning brief share the
+engine timer, and a brief slot always comes first.
+[ADR 0021](docs/adr/0021-the-heartbeat.md) explains the design.
+
 ## Running code
 
 `[sandbox]` gives the assistant a `run_code` tool for python3, node, bash

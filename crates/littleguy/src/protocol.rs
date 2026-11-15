@@ -187,6 +187,8 @@ pub enum Speaker {
     Person,
     /// The assistant.
     Assistant,
+    /// The assistant on its own: the answer of a brief or a heartbeat.
+    Unprompted,
 }
 
 /// One text turn of the conversation. Tool calls and tool results are not

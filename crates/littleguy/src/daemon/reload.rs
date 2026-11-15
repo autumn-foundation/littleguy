@@ -24,9 +24,10 @@ use littleguy_core::{Config, SenderId};
 use littleguy_stores::SqliteStores;
 
 use super::{Daemon, harness, routing, warn_unreachable};
-use crate::brief::{BriefDelivery, Calendar};
+use crate::brief::BriefDelivery;
 use crate::chats::Chats;
 use crate::protocol::Response;
+use crate::wake::{Due, Wake};
 
 /// What a reload needs that the config does not hold, and the config that
 /// runs.
@@ -56,12 +57,14 @@ pub(super) struct Kit {
     pub(super) watch_every: Duration,
     /// The readers of live answers. Every harness sends its text there.
     pub(super) live: Arc<super::live::Live>,
+    /// Whether the wake plan armed a brief. The brief delivery reads it.
+    pub(super) brief_armed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The parts of the daemon that a config shapes.
 pub(super) struct Assembled {
     pub(super) harness: AgentHarness,
-    pub(super) brief: Option<Calendar>,
+    pub(super) wake: Option<Wake>,
     pub(super) approvals: Option<Arc<SqliteStores>>,
     pub(super) approver: Option<SenderId>,
     #[cfg(feature = "refine")]
@@ -82,11 +85,12 @@ impl Kit {
     /// Builds the assistant and the parts around it from `config`.
     pub(super) fn assemble(&mut self, config: &Config, chats: &Arc<Chats>) -> Result<Assembled> {
         let db = self.db.clone();
-        let brief = config
-            .brief
-            .as_ref()
-            .map(|settings| Calendar::new(settings, Utc::now()))
-            .transpose()?;
+        let wake = Wake::new(
+            config.brief.as_ref(),
+            config.heartbeat.as_ref(),
+            Arc::clone(&self.brief_armed),
+            Utc::now(),
+        )?;
         let runtime =
             crate::sandbox::share(self.sandbox.as_ref().filter(|_| config.sandbox.is_some()));
         #[cfg(feature = "google")]
@@ -126,6 +130,7 @@ impl Kit {
                     settings,
                     Arc::clone(stores),
                     Arc::clone(chats),
+                    Arc::clone(&self.brief_armed),
                 ))
             });
         let approvals = stores.clone().filter(|_| asks);
@@ -138,6 +143,11 @@ impl Kit {
         });
         let approver = config.approvals.approver.clone();
         warn_unreachable(approver.as_ref(), &self.services);
+        // A heartbeat tick asks first whether a goal is due or an idea waits.
+        let precheck = config.heartbeat.as_ref().map(|beat| Due {
+            plans: stores.clone().filter(|_| config.tools.plans),
+            research: beat.research,
+        });
         let memory = stores
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db.as_path()));
@@ -148,9 +158,13 @@ impl Kit {
         #[cfg(not(feature = "refine"))]
         let _ = model;
         let assistant = assistant.live_sink(Arc::clone(&self.live) as Arc<dyn LiveSink>);
+        let assistant = match precheck {
+            Some(due) => assistant.precheck(Arc::new(due)),
+            None => assistant,
+        };
         Ok(Assembled {
             harness: assistant,
-            brief,
+            wake,
             approvals,
             approver,
             #[cfg(feature = "refine")]
@@ -248,10 +262,11 @@ impl Daemon {
         sqlite::register(&mut self.rt, Arc::new(built.harness));
         self.routing = table;
         self.config_allowed = config_allowed(&config);
-        // A brief that did not change keeps its calendar, so a slot that
-        // went out does not go out again.
-        if config.brief != self.kit.config.brief {
-            self.brief = built.brief;
+        // A plan that did not change keeps its arm, so a wake that went out
+        // does not go out again. A plan that went away turns the timer off.
+        if config.brief != self.kit.config.brief || config.heartbeat != self.kit.config.heartbeat {
+            self.wake = built.wake;
+            self.disarm = self.wake.is_none();
         }
         self.approvals = built.approvals;
         self.approver = built.approver;

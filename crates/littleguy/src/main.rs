@@ -47,6 +47,7 @@ mod refine;
 mod runlog;
 mod sandbox;
 mod tools;
+mod wake;
 mod web;
 
 use std::path::{Path, PathBuf};

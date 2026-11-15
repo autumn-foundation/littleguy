@@ -191,6 +191,11 @@ fn turn(turn: &Turn) -> Markup {
     match turn.from {
         Speaker::Person => html! { div.msg.you { div.body { (turn.text) } } },
         Speaker::Assistant => answer_turn(&turn.text, true),
+        // A heartbeat or a brief: the same answer, with a label.
+        Speaker::Unprompted => html! {
+            p.unprompted { "littleguy, on its own" }
+            (answer_turn(&turn.text, true))
+        },
     }
 }
 

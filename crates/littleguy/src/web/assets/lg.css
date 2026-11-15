@@ -525,3 +525,11 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+
+/* An answer that littleguy gave on its own, from a heartbeat or a brief. */
+
+.unprompted {
+  margin: 0 0 -0.6rem 0.2rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}

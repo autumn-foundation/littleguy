@@ -142,6 +142,45 @@ pub enum Kind {
     Followup,
 }
 
+impl Kind {
+    /// The name in the tick log.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Brief => "brief",
+            Self::Heartbeat => "heartbeat",
+            Self::Reflection => "reflection",
+            Self::Followup => "follow-up",
+        }
+    }
+}
+
+/// What the precheck decided for the last heartbeat tick, for the tick log.
+#[derive(Debug, Default)]
+pub struct Verdict(std::sync::atomic::AtomicU8);
+
+impl Verdict {
+    const UNKNOWN: u8 = 0;
+    const RAN: u8 = 1;
+    const SKIPPED: u8 = 2;
+
+    fn set(&self, ran: bool) {
+        let value = if ran { Self::RAN } else { Self::SKIPPED };
+        self.0.store(value, Ordering::SeqCst);
+    }
+
+    /// Whether the precheck skipped the last heartbeat tick, and forgets it.
+    /// `None` when no precheck ran since.
+    #[must_use]
+    pub fn take_skipped(&self) -> Option<bool> {
+        match self.0.swap(Self::UNKNOWN, Ordering::SeqCst) {
+            Self::RAN => Some(false),
+            Self::SKIPPED => Some(true),
+            _ => None,
+        }
+    }
+}
+
 /// The wake that the engine timer aims at, and the tick count at the arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Armed {
@@ -316,10 +355,10 @@ impl Wake {
     /// The time of the armed wake, when its tick ran: it passed, and the
     /// tick count moved since the arm.
     #[must_use]
-    pub fn ran(&self, now: DateTime<Utc>, ticks: u64) -> Option<DateTime<Utc>> {
+    pub fn ran(&self, now: DateTime<Utc>, ticks: u64) -> Option<(DateTime<Utc>, Kind)> {
         self.armed
             .filter(|armed| armed.at <= now && ticks > armed.ticks)
-            .map(|armed| armed.at)
+            .map(|armed| (armed.at, armed.kind))
     }
 
     /// The pass whose reflection is planned but not armed yet.
@@ -449,6 +488,8 @@ pub struct Due {
     pub plans: Option<Arc<SqliteStores>>,
     /// Research open ideas when no goal is due.
     pub research: bool,
+    /// Where the decision goes, for the tick log.
+    pub verdict: Arc<Verdict>,
 }
 
 impl Due {
@@ -466,7 +507,12 @@ impl Due {
 impl Precheck for Due {
     fn should_run<'a>(&'a self, task: &'a HeartbeatTask) -> BoxFuture<'a, bool> {
         Box::pin(async move {
-            !task.prompt.starts_with(HEARTBEAT_MARK) || self.worth_it(Utc::now().timestamp_millis())
+            if !task.prompt.starts_with(HEARTBEAT_MARK) {
+                return true;
+            }
+            let run = self.worth_it(Utc::now().timestamp_millis());
+            self.verdict.set(run);
+            run
         })
     }
 }
@@ -712,7 +758,10 @@ mod tests {
 
         let after = at("2026-11-14T12:20:30Z");
         assert_eq!(wake.ran(after, 0), None, "the tick has not run");
-        assert_eq!(wake.ran(after, 1), Some(at("2026-11-14T12:20:00Z")));
+        assert_eq!(
+            wake.ran(after, 1),
+            Some((at("2026-11-14T12:20:00Z"), Kind::Followup))
+        );
         // The daemon marks it done; no wake is left, so the beat is next.
         wake.set_followup(None, after);
         let arm = wake.arm(after, 1).unwrap();
@@ -750,16 +799,26 @@ mod tests {
         };
         let heartbeat = task(&marked(HEARTBEAT_MARK, "go"));
         let brief = task(&marked(BRIEF_MARK, "go"));
+        let verdict = Arc::new(Verdict::default());
         let due = Due {
             plans: Some(Arc::clone(&stores)),
             research: true,
+            verdict: Arc::clone(&verdict),
         };
         assert!(!due.should_run(&heartbeat).await, "nothing to do");
+        assert_eq!(verdict.take_skipped(), Some(true));
+        assert_eq!(verdict.take_skipped(), None, "taken once");
         assert!(due.should_run(&brief).await, "a brief always runs");
+        assert_eq!(
+            verdict.take_skipped(),
+            None,
+            "a brief asks no precheck verdict"
+        );
         assert!(
             Due {
                 plans: None,
-                research: true
+                research: true,
+                verdict: Arc::default(),
             }
             .should_run(&heartbeat)
             .await,
@@ -768,9 +827,11 @@ mod tests {
 
         stores.add_idea("i", "An idea", "b", 0).unwrap();
         assert!(due.should_run(&heartbeat).await, "an idea waits");
+        assert_eq!(verdict.take_skipped(), Some(false));
         let quiet_research = Due {
             plans: Some(Arc::clone(&stores)),
             research: false,
+            verdict: Arc::default(),
         };
         assert!(!quiet_research.should_run(&heartbeat).await);
         let goal = stores

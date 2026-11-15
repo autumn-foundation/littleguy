@@ -66,7 +66,8 @@ async fn rig_on(
     };
     let daemon = Daemon::open_with(&db, config, model, UID, false, extras)
         .unwrap()
-        .with_logins(logins.clone());
+        .with_logins(logins.clone())
+        .with_skills_dir(dir.path().join("skills"));
     let listener = daemon::bind(&dir.path().join("lg.sock")).await.unwrap();
     let (handle, jobs) = daemon::jobs(UID);
     // As `lg serve` does, so a chat streams.
@@ -900,6 +901,94 @@ async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {
     rig.client.log_out();
     rig.client
         .post("/plans/drop-goal/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(401);
+}
+
+#[cfg(feature = "refine")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_accepts_and_retires_a_skill_on_the_skills_tab() {
+    let rig = rig_on(&config(true), None, Arc::new(Saver)).await;
+    let token = sign_in(&rig).await;
+    rig.client
+        .get("/workspace?tab=skills")
+        .send()
+        .await
+        .assert_text_contains("#plan-view", "No skills yet");
+
+    let drafted = rig
+        .handle
+        .ask(Request::Chat {
+            message_id: String::from("k-1"),
+            text: String::from(
+                r#"use propose_skill {"name": "weekly-digest", "description": "Write the Friday digest.", "body": "1. Read <b>the</b> week."}"#,
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        drafted,
+        Response::Reply {
+            text: String::from("saved")
+        }
+    );
+
+    // Every tab counts the draft. The skills tab opens it as a document.
+    let files = rig.client.get("/workspace").send().await;
+    files.assert_text_contains("#tabs a[href='/workspace?tab=skills'] .count", "1 waiting");
+    let skills = rig.client.get("/workspace?tab=skills").send().await;
+    skills.assert_text_contains("#file .doc .tag", "waiting for you");
+    skills.assert_selector_count("#file button[hx-post='/skills/accept/1']", 1);
+    skills.assert_selector_count("#file button[hx-post='/skills/decline/1']", 1);
+    skills.assert_selector_count("#file b", 0);
+
+    rig.client
+        .post("/skills/accept/1")
+        .send()
+        .await
+        .assert_status(403);
+    let accepted = rig
+        .client
+        .post("/skills/accept/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    accepted.assert_status(200);
+    accepted.assert_selector_count("#plan-view .tag.active", 1);
+    accepted.assert_text_contains("#plan-view .meta", "by littleguy");
+    accepted.assert_text_contains("#plan-view #file .doc h2", "weekly-digest");
+    accepted.assert_selector_count(
+        "#plan-view button[hx-post='/skills/retire/weekly-digest']",
+        1,
+    );
+    accepted.assert_selector_count("#tabs[hx-swap-oob='true']", 1);
+    accepted.assert_selector_count("#tabs .count", 0);
+
+    let retired = rig
+        .client
+        .post("/skills/retire/weekly-digest")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    retired.assert_text_contains("#plan-view", "No skills yet");
+    let again = rig
+        .client
+        .post("/skills/retire/weekly-digest")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    again.assert_text_contains("#plan-view .error", "no skill is named weekly-digest");
+    rig.client
+        .post("/skills/bogus/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(404);
+    rig.client.log_out();
+    rig.client
+        .post("/skills/accept/1")
         .header("X-CSRF-Token", &token)
         .send()
         .await

@@ -39,13 +39,14 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 pub mod approvals;
 pub mod plans;
 pub mod runlog;
+pub mod skill_drafts;
 pub mod wakes;
 
 pub use approvals::{ApprovalRecord, Claim, Verdict};
 pub use runlog::RunLog;
 
 /// The schema version that [`SqliteStores::open`] writes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// The most edit keys that one memory scope keeps. A retry comes soon after
 /// its first attempt, so the oldest key is safe to forget. The engine keeps
@@ -120,6 +121,15 @@ CREATE TABLE IF NOT EXISTS goal_notes (
     at_ms INTEGER NOT NULL,
     key   TEXT UNIQUE
 );
+CREATE TABLE IF NOT EXISTS skill_drafts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'draft',
+    created_ms  INTEGER NOT NULL,
+    key         TEXT UNIQUE
+);
 CREATE TABLE IF NOT EXISTS wakes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     at_ms      INTEGER NOT NULL,
@@ -145,7 +155,7 @@ pub enum StoreError {
 }
 
 /// The tables of the stores, in the order an import copies them.
-const TABLES: [&str; 11] = [
+const TABLES: [&str; 12] = [
     "memory_scopes",
     "memory_edits",
     "episode_logs",
@@ -157,6 +167,7 @@ const TABLES: [&str; 11] = [
     "goals",
     "goal_notes",
     "wakes",
+    "skill_drafts",
 ];
 
 /// Where the stores get a connection.

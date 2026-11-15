@@ -72,8 +72,9 @@ pub const REFLECT_PROMPT: &str = "Your memory was just consolidated: new facts a
      your notes. Read your notes and call list_plans. For anything worth planning or \
      researching that is not an idea yet, file one with add_idea. Add what you now know \
      to a related open idea with research_idea. Do not file an idea that exists. Propose \
-     a goal only when an idea is clearly worth doing. Reply with exactly HEARTBEAT_OK \
-     unless the owner should know something now.";
+     a goal only when an idea is clearly worth doing. If you found a way of doing \
+     something that you will need again, draft a skill with propose_skill. Reply with \
+     exactly HEARTBEAT_OK unless the owner should know something now.";
 
 /// The prefix of the op key that arms one brief slot.
 pub const BRIEF_KEY: &str = "brief:";

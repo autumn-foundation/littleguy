@@ -23,8 +23,11 @@
 //! engine timer off. Otherwise the engine would book the same tick again.
 //!
 //! Each tick prompt starts with a mark, so the history shows its answer as
-//! the assistant speaking on its own ([`is_tick`]). A tick is unattended and
-//! read-only, as every engine heartbeat is.
+//! the assistant speaking on its own ([`is_tick`]). A tick is unattended. Its
+//! tools may read, and they may write the assistant's own bookkeeping
+//! (`Internal`). The workspace is read-only on a tick: the engine keeps no
+//! workspace change of a read-only run, so the file tools that change it
+//! are `Write`, which the engine refuses there.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

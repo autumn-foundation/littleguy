@@ -4259,6 +4259,59 @@ mod tests {
         any(feature = "discord", feature = "sandbox")
     ))]
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_tick_that_writes_a_file_is_refused_and_does_not_hear_success() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let hand = clock.clone();
+        let mut config = heartbeat_config();
+        if let Some(beat) = config.heartbeat.as_mut() {
+            beat.prompt = String::from("save notes/probe.md written on a tick");
+        }
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.tick().await.unwrap();
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-1",
+                    r#"use add_idea {"title": "Docs", "body": "Links rot."}"#,
+                ),
+            )
+            .await;
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set("2026-11-14T13:00:01Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        clock.set("2026-11-14T13:00:30Z");
+        daemon.tick().await.unwrap();
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let outcome = stores.recent_ticks(1).unwrap()[0].outcome.clone();
+        // The model hears that the write did not happen, not a byte count.
+        // The policy refuses before the tool runs, so no call is traced.
+        assert!(outcome.contains("may only read data"), "{outcome}");
+        assert!(!outcome.contains("noted"), "{outcome}");
+        let Response::Workspace { files } = daemon.handle_request(UID, Request::Workspace).await
+        else {
+            panic!("no workspace");
+        };
+        assert!(files.iter().all(|file| file.path != "notes/probe.md"));
+    }
+
+    #[cfg(all(
+        feature = "heartbeat",
+        feature = "self-debug",
+        any(feature = "discord", feature = "sandbox")
+    ))]
+    #[tokio::test(flavor = "multi_thread")]
     async fn the_tick_log_names_the_tools_of_the_tick_and_not_of_the_person() {
         use std::sync::atomic::Ordering;
         let dir = tempfile::tempdir().unwrap();

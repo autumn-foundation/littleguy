@@ -107,11 +107,14 @@ pub fn file_tools() -> Vec<Arc<dyn Tool>> {
         FnTool::with_context(
             "write_file",
             "Write a text file in your workspace. It replaces a file at the same path. \
-             The workspace keeps it across conversations.",
+             The workspace keeps it across conversations. A run with no one present, such \
+             as a heartbeat, cannot change the workspace, so there it is refused.",
             path_schema(Some(("text", "The whole content of the file."))),
             |input, ctx| async move { write(&input, &ctx) },
         )
-        .effect(ToolEffect::Internal)
+        // A read-only run never saves the workspace, so a write there would
+        // answer success and vanish. As a Write, the engine refuses it.
+        .effect(ToolEffect::Write)
         .uses_workspace()
         .shared(),
         FnTool::with_context(
@@ -125,11 +128,12 @@ pub fn file_tools() -> Vec<Arc<dyn Tool>> {
         .shared(),
         FnTool::with_context(
             "delete_file",
-            "Delete a file of your workspace.",
+            "Delete a file of your workspace. A run with no one present, such as a \
+             heartbeat, cannot change the workspace, so there it is refused.",
             path_schema(None),
             |input, ctx| async move { delete(&input, &ctx) },
         )
-        .effect(ToolEffect::Internal)
+        .effect(ToolEffect::Write)
         .uses_workspace()
         .shared(),
     ]

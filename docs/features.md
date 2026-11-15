@@ -51,6 +51,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
 | `openai` | yes | `--model openai` and `--model openrouter`. | `reqwest`, `rustls` |
+| `plans` | yes | Goals and ideas: the tools that file, research and propose them, the Goals and Ideas tabs, and the heartbeat precheck that looks at them. | none |
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `slack` | yes | Slack direct messages over Socket Mode, or over the Events API as a hook. | `autumn-plugin-slack`, `futures-util`, `reqwest`, `rustls`, `tokio-tungstenite` |
@@ -70,6 +71,12 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 |---|---|---|---|
 | `claude` | yes | Claude over the Messages API, with its turn store. | `reqwest`, `rustls`, `sha2` |
 | `openai` | yes | OpenAI, OpenRouter and any Chat Completions server. | `reqwest`, `rustls` |
+
+### `littleguy-stores`
+
+| Feature | Default | What it builds | Crates it adds |
+|---|---|---|---|
+| `plans` | no | The goals and ideas of the assistant (`plans`). | none |
 
 ### `littleguy-tools`
 

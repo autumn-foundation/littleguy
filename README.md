@@ -290,6 +290,11 @@ tool it has works on a run with no one present, so a later heartbeat can
 research ideas and check goals on its own. [ADR 0020](docs/adr/0020-goals-and-ideas.md)
 explains the design.
 
+Goals and ideas come with the `plans` feature, which is on by default. A
+build without it has no goal or idea tools, and the Goals and Ideas tabs
+say so. `plans = false` under `[tools]` turns them off in a build that
+has them.
+
 The web tools only read, and their results count as untrusted input. The
 file tools change only the private workspace. A morning brief can read but
 not write. [ADR 0007](docs/adr/0007-first-tools.md) explains the design.

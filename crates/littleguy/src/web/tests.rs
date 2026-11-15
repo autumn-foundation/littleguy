@@ -794,6 +794,21 @@ fn markdown_is_known_by_its_extension_in_any_case() {
     }
 }
 
+#[cfg(not(feature = "plans"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_goals_tab_says_the_build_has_no_plans() {
+    let rig = rig_on(&config(false), None, Arc::new(Saver)).await;
+    sign_in(&rig).await;
+    for tab in ["goals", "ideas"] {
+        rig.client
+            .get(&format!("/workspace?tab={tab}"))
+            .send()
+            .await
+            .assert_body_contains("`plans` feature");
+    }
+}
+
+#[cfg(feature = "plans")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {
     let rig = rig_on(&config(false), None, Arc::new(Saver)).await;

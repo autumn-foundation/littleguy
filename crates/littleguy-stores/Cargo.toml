@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# The goals and ideas of the assistant (`plans`).
+plans = []
+
 [dependencies]
 autumn-harvest-agent = { version = "0.10.0", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }

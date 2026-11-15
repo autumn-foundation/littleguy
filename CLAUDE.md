@@ -22,9 +22,13 @@ each command.
 
 ## Features
 
-- Each integration is a cargo feature. A new one gets a comment above it
-  in `Cargo.toml`, and `cargo xtask feature-docs --write` renders
-  `docs/features.md` again. CI fails when the table drifts.
+- Each integration and each capability is a cargo feature, on by default
+  (ADR 0026). A capability is a part that an owner can do without: goals
+  and ideas, the heartbeat, skills. A config switch is not enough, because
+  a build without the part should not compile it.
+- A new feature gets a comment above it in `Cargo.toml`, and
+  `cargo xtask feature-docs --write` renders `docs/features.md` again. CI
+  fails when the table drifts.
 - A config section of a missing feature fails `lg serve` at start
   (`crates/littleguy/src/features.rs`). Never skip it quietly.
 - `cargo xtask features` builds each feature alone and none at all. Run it

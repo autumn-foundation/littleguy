@@ -94,24 +94,29 @@ impl Kit {
         #[cfg(not(feature = "google"))]
         let google: Vec<Arc<dyn autumn_harvest_agent::Tool>> = Vec::new();
         let google_on = !google.is_empty();
-        let tools = crate::tools::Tools::new(
+        let mut tools = crate::tools::Tools::new(
             &config.tools,
             &db,
             crate::tools::search_key_from_env().as_deref(),
         )
         .with(self.mcp.clone())
         .with(google);
+        // The goals and ideas live in the memory store.
+        if config.tools.plans {
+            tools = tools.with(crate::plans::tools(&self.stores()?));
+        }
         tracing::info!(tools = ?tools.names(), "the assistant tools");
         let flow = config.flow.rules();
         let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || google_on);
         // The brief keeps its sent reports in the memory store, and the
         // guard keeps its calls that wait. So each opens the store even
         // when memory is off.
-        let stores = if config.memory.enabled || config.brief.is_some() || asks {
-            Some(self.stores()?)
-        } else {
-            None
-        };
+        let stores =
+            if config.memory.enabled || config.brief.is_some() || asks || config.tools.plans {
+                Some(self.stores()?)
+            } else {
+                None
+            };
         let delivery = config
             .brief
             .as_ref()

@@ -233,6 +233,7 @@ web_fetch = true                # read one http or https page as text
 web_search = true               # needs LG_BRAVE_API_KEY
 files = true                    # read_file, write_file, list_files, delete_file
 runs = true                     # recent_runs, failed_attempts, model_usage
+plans = true                    # goals and ideas; see below
 fetch_max_chars = 20000         # the most text of one page
 ```
 
@@ -250,6 +251,21 @@ fetch_max_chars = 20000         # the most text of one page
   query on `lg.db`, read only, and reads no message.
   [ADR 0019](docs/adr/0019-the-assistant-reads-its-own-runs.md) explains
   the design.
+
+## Goals and ideas
+
+littleguy keeps **ideas**, things to plan and research, and **goals**,
+things to do. It files an idea when you mention something worth exploring,
+or when it notices one, and it adds research notes to it. When an idea is
+worth doing, it proposes a goal. A proposed goal does nothing until you
+accept it on the **Workspace** page, as a refine overlay does nothing until
+you activate it. An accepted goal can ask for a check every so often, and
+littleguy notes its progress and marks it done.
+
+littleguy cannot accept, decline or drop anything; only you can. Every
+tool it has works on a run with no one present, so a later heartbeat can
+research ideas and check goals on its own. [ADR 0020](docs/adr/0020-goals-and-ideas.md)
+explains the design.
 
 The web tools only read, and their results count as untrusted input. The
 file tools change only the private workspace. A morning brief can read but

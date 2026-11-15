@@ -9,8 +9,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::protocol::{
-    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response, Speaker, Turn,
-    WorkspaceEntry,
+    ApprovalEntry, ConnectionEntry, GoalEntry, IdeaEntry, OverlayEntry, PairEntry, Request,
+    Response, Speaker, Turn, WorkspaceEntry,
 };
 
 /// A fresh message id: the clock in nanoseconds and the process id.
@@ -143,6 +143,7 @@ pub fn render(response: &Response) -> (String, bool) {
         } => (render_reload(applied, restart, profile), true),
         Response::History { turns } => (render_history(turns), true),
         Response::Workspace { files } => (render_workspace(files), true),
+        Response::Plans { goals, ideas } => (render_plans(goals, ideas), true),
         Response::WorkspaceFile { path, bytes, text } => (
             text.clone()
                 .unwrap_or_else(|| format!("{path}: {bytes} bytes, not text or too large to show")),
@@ -150,6 +151,24 @@ pub fn render(response: &Response) -> (String, bool) {
         ),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// One line per goal and per idea, with its number.
+fn render_plans(goals: &[GoalEntry], ideas: &[IdeaEntry]) -> String {
+    let mut lines = Vec::new();
+    for goal in goals {
+        lines.push(format!(
+            "goal {} ({}): {}",
+            goal.id, goal.status, goal.title
+        ));
+    }
+    for idea in ideas {
+        lines.push(format!("idea {}: {}", idea.id, idea.title));
+    }
+    if lines.is_empty() {
+        return String::from("no goals and no ideas yet");
+    }
+    lines.join("\n")
 }
 
 /// One line per file: its size and its path.

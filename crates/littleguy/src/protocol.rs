@@ -99,6 +99,75 @@ pub enum Request {
         /// The path of the file in the workspace.
         path: String,
     },
+    /// The goals and the ideas of the assistant. Only the owner may.
+    Plans,
+    /// Accept a proposed goal, or decline it, drop an active goal, or drop
+    /// an open idea. Only the owner may.
+    Decide {
+        /// What to do.
+        decision: PlanDecision,
+        /// The goal or the idea.
+        id: i64,
+    },
+}
+
+/// What the owner decides about a goal or an idea.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDecision {
+    /// Accept a proposed goal.
+    Accept,
+    /// Decline a proposed goal.
+    Decline,
+    /// Drop an active goal.
+    DropGoal,
+    /// Drop an open idea.
+    DropIdea,
+}
+
+/// One note of a goal or an idea.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanNote {
+    /// When, in epoch milliseconds.
+    pub at_ms: i64,
+    /// The text.
+    pub text: String,
+}
+
+/// One goal that waits for the owner or is active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalEntry {
+    /// Its number.
+    pub id: i64,
+    /// `proposed` or `active`.
+    pub status: String,
+    /// A short name.
+    pub title: String,
+    /// Why it matters.
+    pub why: String,
+    /// How often it is checked, in minutes.
+    pub check_every_minutes: Option<i64>,
+    /// When the next check is due, in epoch milliseconds.
+    pub next_check_ms: Option<i64>,
+    /// The idea that it came from.
+    pub idea: Option<i64>,
+    /// The newest notes, oldest first.
+    pub notes: Vec<PlanNote>,
+}
+
+/// One open idea.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeaEntry {
+    /// Its number.
+    pub id: i64,
+    /// A short name.
+    pub title: String,
+    /// What it is.
+    pub body: String,
+    /// When it was filed, in epoch milliseconds.
+    pub created_ms: i64,
+    /// The newest research notes, oldest first.
+    pub notes: Vec<PlanNote>,
 }
 
 /// One file of the assistant workspace.
@@ -325,6 +394,13 @@ pub enum Response {
         /// large to show.
         text: Option<String>,
     },
+    /// The goals and the ideas of the assistant.
+    Plans {
+        /// The active goals, then the proposed ones.
+        goals: Vec<GoalEntry>,
+        /// The open ideas, oldest first.
+        ideas: Vec<IdeaEntry>,
+    },
     /// The request was not valid, or the daemon failed.
     Error {
         /// What went wrong.
@@ -372,6 +448,11 @@ mod tests {
             Request::Connections,
             Request::Reload,
             Request::History,
+            Request::Plans,
+            Request::Decide {
+                decision: PlanDecision::DropIdea,
+                id: 4,
+            },
             Request::Workspace,
             Request::WorkspaceFile {
                 path: String::from("notes/a.md"),

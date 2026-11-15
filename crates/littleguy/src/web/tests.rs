@@ -637,8 +637,9 @@ async fn the_manage_page_holds_the_sections() {
         .assert_selector_count("section#approvals", 0);
 }
 
-/// Saves a file for `save <path> <text>`, with the file tool, then says
-/// `saved`. Any other message gets `ok`.
+/// Saves a file for `save <path> <text>`, with the file tool, and calls any
+/// tool for `use <tool> <json>`. Then it says `saved`. Any other message
+/// gets `ok`.
 #[derive(Debug)]
 struct Saver;
 
@@ -663,13 +664,24 @@ impl autumn_harvest_agent::AgentModel for Saver {
         let save = text
             .as_deref()
             .and_then(|text| text.strip_prefix("save "))
-            .and_then(|rest| rest.split_once(' '));
-        let (content, stop_reason) = match save {
-            Some((path, text)) if !answered => (
+            .and_then(|rest| rest.split_once(' '))
+            .map(|(path, text)| {
+                (
+                    "write_file",
+                    serde_json::json!({"path": path, "text": text}),
+                )
+            });
+        // `use <tool> <json>` calls any tool.
+        let call = save.or_else(|| {
+            let (tool, input) = text.as_deref()?.strip_prefix("use ")?.split_once(' ')?;
+            Some((tool, serde_json::from_str(input).ok()?))
+        });
+        let (content, stop_reason) = match call {
+            Some((name, arguments)) if !answered => (
                 ContentPart::ToolCall {
                     id: String::from("call-1"),
-                    name: String::from("write_file"),
-                    arguments: serde_json::json!({"path": path, "text": text}),
+                    name: name.to_owned(),
+                    arguments,
                 },
                 StopReason::ToolUse,
             ),
@@ -760,4 +772,86 @@ fn markdown_is_known_by_its_extension_in_any_case() {
     for path in ["a.txt", "md", "notes.md/plan"] {
         assert!(!pages::is_markdown(path), "{path}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_accepts_a_proposed_goal_on_the_workspace_page() {
+    let rig = rig_on(&config(false), None, Arc::new(Saver)).await;
+    let token = sign_in(&rig).await;
+    let empty = rig.client.get("/workspace").send().await;
+    empty.assert_text_contains("#plans", "No goals yet");
+    empty.assert_text_contains("#plans", "No ideas yet");
+
+    for (id, text) in [
+        (
+            "p-1",
+            r#"use add_idea {"title": "Docs links", "body": "They <b>rot</b>."}"#,
+        ),
+        (
+            "p-2",
+            r#"use propose_goal {"title": "Fix links", "why": "Dead ends.", "check_every_minutes": 60, "from_idea": 1}"#,
+        ),
+    ] {
+        let answer = rig
+            .handle
+            .ask(Request::Chat {
+                message_id: id.to_owned(),
+                text: text.to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            answer,
+            Response::Reply {
+                text: String::from("saved")
+            }
+        );
+    }
+
+    let page = rig.client.get("/workspace").send().await;
+    page.assert_selector_count("#plans .plan.proposed", 1);
+    page.assert_selector_count("#plans button[hx-post='/plans/accept/1']", 1);
+    page.assert_selector_count("#plans button[hx-post='/plans/drop-idea/1']", 1);
+    page.assert_text_contains("#plans .plan.proposed", "waiting for you");
+    // An idea is text, and HTML in it stays text.
+    page.assert_selector_count("#plans b", 0);
+
+    rig.client
+        .post("/plans/accept/1")
+        .send()
+        .await
+        .assert_status(403);
+    let accepted = rig
+        .client
+        .post("/plans/accept/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    accepted.assert_status(200);
+    accepted.assert_selector_count("section#plans .plan.proposed", 0);
+    accepted.assert_selector_count("button[hx-post='/plans/drop-goal/1']", 1);
+    accepted.assert_text_contains("#plans", "No ideas yet");
+    accepted.assert_text_contains("#plans", "checks every 60 min");
+
+    let again = rig
+        .client
+        .post("/plans/accept/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    again.assert_text_contains("#plans .error", "1 is not a proposed goal");
+    rig.client
+        .post("/plans/bogus/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(404);
+
+    rig.client.log_out();
+    rig.client
+        .post("/plans/drop-goal/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(401);
 }

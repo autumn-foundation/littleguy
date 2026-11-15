@@ -41,6 +41,9 @@ part pays for it at each build.
   the goals and ideas. A build without it refuses `[heartbeat]` at start
   and at a reload. The wake plan stays: the brief, the reflection and the
   booked wakes use it.
+- `followups` gates `wake_me`, `cancel_wake`, the wakes in `list_plans`,
+  the follow-up part of the wake plan and the `wakes` module of
+  `littleguy-stores`. A tick of a build without it ends no booked wake.
 - `[tools] plans` still switches the whole set of the assistant's own
   tools, also `wake_me`, `cancel_wake`, `propose_skill` and
   `recent_wakes`. Their own features split that switch.

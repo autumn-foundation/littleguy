@@ -62,6 +62,7 @@ pub(super) struct Kit {
     /// Whether the wake plan armed a brief. The brief delivery reads it.
     pub(super) brief_armed: Arc<std::sync::atomic::AtomicBool>,
     /// What the wake tools share with the daemon.
+    #[cfg(feature = "followups")]
     pub(super) wake_links: crate::plans::WakeLinks,
     /// What the precheck decided for the last heartbeat, for the tick log.
     #[cfg(feature = "heartbeat")]
@@ -114,7 +115,11 @@ impl Kit {
         .with(google);
         // The goals and ideas live in the memory store.
         if config.tools.plans {
-            tools = tools.with(crate::plans::tools(&self.stores()?, &self.wake_links));
+            tools = tools.with(crate::plans::tools(
+                &self.stores()?,
+                #[cfg(feature = "followups")]
+                &self.wake_links,
+            ));
         }
         tracing::info!(tools = ?tools.names(), "the assistant tools");
         let flow = config.flow.rules();
@@ -297,6 +302,7 @@ impl Daemon {
             }
             self.disarm = self.wake.is_none();
             // The new plan reads the booked wakes again.
+            #[cfg(feature = "followups")]
             self.kit
                 .wake_links
                 .changed

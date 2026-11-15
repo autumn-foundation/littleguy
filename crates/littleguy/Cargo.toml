@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.3"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups"]
 # Every integration.
 full = ["default", "camel", "google", "fleet"]
 # Discord direct messages over the gateway.
@@ -74,6 +74,9 @@ plans = ["littleguy-stores/plans"]
 # `[heartbeat]`: the assistant wakes on its own every so often. Its precheck
 # skips a tick with no model call when no goal is due and no idea waits.
 heartbeat = ["plans"]
+# `wake_me` and `cancel_wake`: the assistant books a wake to look at
+# something again later.
+followups = ["littleguy-stores/followups"]
 # `[refine]` and `lg refine`: profile overlays that the model proposes and
 # the owner activates. It adds no crate.
 refine = []

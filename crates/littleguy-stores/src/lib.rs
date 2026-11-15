@@ -43,6 +43,7 @@ pub mod plans;
 pub mod runlog;
 pub mod skill_drafts;
 pub mod tick_log;
+#[cfg(feature = "followups")]
 pub mod wakes;
 
 pub use approvals::{ApprovalRecord, Claim, Verdict};

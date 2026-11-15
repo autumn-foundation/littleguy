@@ -561,6 +561,8 @@ impl Daemon {
             wake_links: crate::plans::WakeLinks::default(),
             #[cfg(feature = "heartbeat")]
             verdict: Arc::default(),
+            #[cfg(feature = "skills")]
+            skills_dir: crate::plans::SkillsDir::default(),
         };
         let built = kit.assemble(config, &chats)?;
         sqlite::register(&mut rt, Arc::new(built.harness));
@@ -3210,16 +3212,21 @@ mod tests {
                 "goal",
                 "wake",
                 "skill_draft",
+                "skills",
                 "ticks",
             ]
             .iter()
             .any(|key| result.get(key).is_some())
             .then(|| format!("log: {result}"));
+            let failed = result["error"]
+                .as_str()
+                .map(|error| format!("error: {error}"));
             result["text"]
                 .as_str()
                 .map(str::to_owned)
                 .or(ran)
                 .or(said)
+                .or(failed)
                 .or(logged)
         }
 
@@ -4594,6 +4601,69 @@ mod tests {
                 ideas: Vec::new()
             }
         );
+    }
+
+    #[cfg(feature = "skills")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_draft_close_to_a_skill_is_refused_unless_littleguy_says_it_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("skills");
+        let mut with_refine = config();
+        with_refine.refine = Some(littleguy_core::RefineConfig::default());
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &with_refine,
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_skills_dir(shelf.clone());
+        crate::skills::write(
+            &shelf,
+            "read-a-page",
+            "Read one web page.",
+            "1. Fetch.",
+            "mark",
+        )
+        .unwrap();
+        daemon.tick().await.unwrap();
+
+        // list_plans shows the skill, so a draft need not repeat it.
+        let listed = daemon
+            .handle_request(UID, request("d-1", "use list_plans {}"))
+            .await;
+        assert!(reply_text(&listed).contains(r#""name":"read-a-page""#));
+
+        let draft = |id: &'static str, extra: &str| {
+            request(
+                id,
+                &format!(
+                    r#"use propose_skill {{"name": "read-a-web-page", "description": "Read a page.", "body": "1. Fetch."{extra}}}"#
+                ),
+            )
+        };
+        let refused = daemon.handle_request(UID, draft("d-2", "")).await;
+        assert!(reply_text(&refused).contains("close to `read-a-page`"));
+        let drafts = |response: Response| match response {
+            Response::Skills { drafts, .. } => drafts.len(),
+            _ => usize::MAX,
+        };
+        assert_eq!(
+            drafts(daemon.handle_request(UID, Request::Skills).await),
+            0,
+            "a refused draft is not stored"
+        );
+
+        // littleguy checked, and its skill is a different one.
+        let kept = daemon
+            .handle_request(
+                UID,
+                draft("d-3", r#", "not_a_duplicate_of": ["read-a-page"]"#),
+            )
+            .await;
+        assert!(reply_text(&kept).starts_with("log: "));
+        assert_eq!(drafts(daemon.handle_request(UID, Request::Skills).await), 1);
     }
 
     #[cfg(feature = "skills")]

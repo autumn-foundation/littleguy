@@ -58,6 +58,8 @@ impl Daemon {
     /// since the last sync. A failure goes to the log once: the next change
     /// of the folder tries again.
     pub(super) async fn sync_skills(&mut self) {
+        // The skill tools read the folder of the config that runs now.
+        self.kit.skills_dir.set(self.skills_dir());
         {
             let (Some(dir), Some(refine)) = (self.skills_dir(), self.refine.as_deref()) else {
                 return;

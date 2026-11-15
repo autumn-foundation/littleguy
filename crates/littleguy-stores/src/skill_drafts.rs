@@ -61,6 +61,23 @@ impl SqliteStores {
             {
                 return Ok(Ok(id));
             }
+            // A draft with the name of a waiting draft revises it, so one
+            // name waits once.
+            if let Some(id) = tx
+                .query_row(
+                    "SELECT id FROM skill_drafts WHERE name = ?1 AND status = 'draft'",
+                    params![name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+            {
+                tx.execute(
+                    "UPDATE skill_drafts SET description = ?1, body = ?2, created_ms = ?3, \
+                     key = ?4 WHERE id = ?5",
+                    params![description, body, now_ms, key, id],
+                )?;
+                return Ok(Ok(id));
+            }
             let waiting: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM skill_drafts WHERE status = 'draft'",
                 [],
@@ -136,6 +153,34 @@ impl SqliteStores {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_draft_with_the_name_of_a_waiting_draft_replaces_it() {
+        let stores = SqliteStores::open_in_memory().unwrap();
+        let first = stores
+            .add_skill_draft("k1", "deploy", "Ship the site.", "1. Build.", 1)
+            .unwrap();
+        let again = stores
+            .add_skill_draft(
+                "k2",
+                "deploy",
+                "Ship the site, then tag.",
+                "1. Build.\n2. Tag.",
+                2,
+            )
+            .unwrap();
+        assert_eq!(again, first, "the waiting draft is revised in place");
+        let drafts = stores.skill_drafts().unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].description, "Ship the site, then tag.");
+        // A retry of the second call finds its row.
+        assert_eq!(
+            stores
+                .add_skill_draft("k2", "deploy", "Ship the site, then tag.", "x", 3)
+                .unwrap(),
+            first
+        );
+    }
 
     #[test]
     fn a_draft_waits_once_and_closes_once() {

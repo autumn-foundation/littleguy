@@ -345,6 +345,34 @@ pub fn retire(dir: &Path, name: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// The small words that say nothing about what a skill does.
+const SMALL_WORDS: &[&str] = &[
+    "a", "an", "and", "for", "in", "my", "of", "on", "the", "to", "with",
+];
+
+/// The words of a skill name, without small words, each without a plural
+/// `s`.
+fn words(name: &str) -> std::collections::BTreeSet<&str> {
+    name.split('-')
+        .filter(|word| !word.is_empty() && !SMALL_WORDS.contains(word))
+        .map(|word| {
+            word.strip_suffix('s')
+                .filter(|stem| stem.len() >= 3 && !stem.ends_with('s'))
+                .unwrap_or(word)
+        })
+        .collect()
+}
+
+/// Whether the skill names `a` and `b` share at least half of their words,
+/// so they likely name one skill: `read-a-page` and `read-a-web-page`.
+#[must_use]
+pub fn near(a: &str, b: &str) -> bool {
+    let (a, b) = (words(a), words(b));
+    let shared = a.intersection(&b).count();
+    let all = a.union(&b).count();
+    shared > 0 && shared * 2 >= all
+}
+
 /// The change stamp of the folder `dir`: each `SKILL.md` with its time and
 /// length. The daemon syncs the skills when it changes.
 #[must_use]
@@ -370,6 +398,23 @@ mod tests {
 
     fn at() -> PathBuf {
         PathBuf::from("/s/x/SKILL.md")
+    }
+
+    #[test]
+    fn names_with_the_same_words_are_near() {
+        assert!(near("read-a-page", "read-a-web-page"));
+        assert!(
+            near("research-an-idea", "research-ideas"),
+            "a plural is the same word"
+        );
+        assert!(near("triage-inbox", "inbox-triage"));
+        assert!(!near("triage-inbox", "weekly-digest"));
+        assert!(!near("tidy-memory", "tidy-notes"));
+        assert!(!near("debug-myself", "debug-a-run"));
+        assert!(
+            !near("a-the", "an-of"),
+            "a name of small words only is near nothing"
+        );
     }
 
     #[test]

@@ -15,6 +15,9 @@
 //!   skips a tick with no model call when no goal is due and no idea waits.
 //! - **A reflection** wakes once, soon after a memory consolidation pass,
 //!   so the assistant files ideas from what the pass learned (ADR 0022).
+//! - **A follow-up** wakes at the next wake that the assistant booked with
+//!   `wake_me` (ADR 0023). Its prompt is fixed: the text of the wake stays
+//!   in the store, where `list_plans` shows it.
 //!
 //! When a one-shot wake ran and nothing else is planned, the plan turns the
 //! engine timer off. Otherwise the engine would book the same tick again.
@@ -51,6 +54,19 @@ pub const REFLECT_MARK: &str = "[littleguy reflection]";
 /// follows.
 pub const REFLECT_KEY: &str = "reflect:";
 
+/// The first line of the prompt of a follow-up tick.
+pub const FOLLOWUP_MARK: &str = "[littleguy follow-up]";
+
+/// The prefix of the op key that arms one follow-up.
+pub const FOLLOWUP_KEY: &str = "followup:";
+
+/// The instruction of a follow-up tick. It is fixed: the text that the
+/// model wrote stays in the store, so it never becomes a user message.
+pub const FOLLOWUP_PROMPT: &str = "A wake that you booked with wake_me is due. Call \
+     list_plans: each wake with `due` true says what to look at. Look, and note what you \
+     found on the goal or idea it concerns. Book another wake only if you must look again. \
+     Reply with exactly HEARTBEAT_OK unless the owner should know something now.";
+
 /// The instruction of a reflection tick.
 pub const REFLECT_PROMPT: &str = "Your memory was just consolidated: new facts are in \
      your notes. Read your notes and call list_plans. For anything worth planning or \
@@ -76,7 +92,7 @@ pub const GRACE: chrono::TimeDelta = chrono::TimeDelta::hours(1);
 /// Whether `text` is the prompt of a tick, not a message of a person.
 #[must_use]
 pub fn is_tick(text: &str) -> bool {
-    [BRIEF_MARK, HEARTBEAT_MARK, REFLECT_MARK]
+    [BRIEF_MARK, HEARTBEAT_MARK, REFLECT_MARK, FOLLOWUP_MARK]
         .iter()
         .any(|mark| text.starts_with(mark))
 }
@@ -121,6 +137,8 @@ pub enum Kind {
     Heartbeat,
     /// A reflection after a consolidation pass.
     Reflection,
+    /// A wake that the assistant booked.
+    Followup,
 }
 
 /// The wake that the engine timer aims at, and the tick count at the arm.
@@ -190,6 +208,8 @@ pub struct Wake {
     beat: Option<Beat>,
     /// The pass that waits for its reflection.
     reflect: Option<String>,
+    /// The next wake that the assistant booked.
+    followup: Option<DateTime<Utc>>,
     armed: Option<Armed>,
     /// Whether a brief is armed now. The brief delivery reads it, so a
     /// heartbeat answer never goes out as a brief.
@@ -257,6 +277,7 @@ impl Wake {
             brief,
             beat,
             reflect: None,
+            followup: None,
             armed: None,
             brief_armed,
         }))
@@ -269,9 +290,35 @@ impl Wake {
             brief: None,
             beat: None,
             reflect: None,
+            followup: None,
             armed: None,
             brief_armed,
         }
+    }
+
+    /// Sets the next wake that the assistant booked, at `now`. A sooner
+    /// wake replaces the arm that waits, and so does a change to the
+    /// follow-up that is armed.
+    pub fn set_followup(&mut self, next: Option<DateTime<Utc>>, now: DateTime<Utc>) {
+        if next == self.followup {
+            return;
+        }
+        self.followup = next;
+        let replace = self.armed.is_some_and(|armed| {
+            armed.at > now && (armed.kind == Kind::Followup || next.is_some_and(|at| at < armed.at))
+        });
+        if replace {
+            self.armed = None;
+        }
+    }
+
+    /// The time of the armed wake, when its tick ran: it passed, and the
+    /// tick count moved since the arm.
+    #[must_use]
+    pub fn ran(&self, now: DateTime<Utc>, ticks: u64) -> Option<DateTime<Utc>> {
+        self.armed
+            .filter(|armed| armed.at <= now && ticks > armed.ticks)
+            .map(|armed| armed.at)
     }
 
     /// The pass whose reflection is planned but not armed yet.
@@ -323,6 +370,7 @@ impl Wake {
         // time, so the daemon reads no state before the tick can run.
         let soonest = now + chrono::TimeDelta::seconds(MIN_CUSTOM_HEARTBEAT_SECS.cast_signed());
         let reflect = self.reflect.as_ref().map(|_| (soonest, Kind::Reflection));
+        let followup = self.followup.map(|at| (at.max(soonest), Kind::Followup));
         let brief = self
             .brief
             .as_ref()
@@ -332,7 +380,7 @@ impl Wake {
             .as_ref()
             .and_then(|beat| Some((beat.next(now)?, Kind::Heartbeat)));
         // The earliest wins, and a brief wins a tie with a heartbeat.
-        let next = [reflect, brief, beat]
+        let next = [reflect, followup, brief, beat]
             .into_iter()
             .flatten()
             .reduce(|first, other| if other.0 < first.0 { other } else { first });
@@ -362,6 +410,10 @@ impl Wake {
                     heartbeat(prompt, every).precheck(),
                 )
             }
+            Kind::Followup => (
+                format!("{FOLLOWUP_KEY}{}", at.to_rfc3339()),
+                heartbeat(&marked(FOLLOWUP_MARK, FOLLOWUP_PROMPT), every),
+            ),
             Kind::Reflection => {
                 let pass = self.reflect.take().unwrap_or_default();
                 (
@@ -639,7 +691,45 @@ mod tests {
     }
 
     #[test]
+    fn a_booked_wake_comes_before_the_heartbeat_and_reports_its_run() {
+        let now = at("2026-11-14T12:00:00Z");
+        let mut wake = plan(None, Some(&beat(60, None)), now);
+        assert!(wake.arm(now, 0).unwrap().key.starts_with(HEARTBEAT_KEY));
+        // A wake at 12:20 is sooner than the 13:00 beat, so it takes the arm.
+        wake.set_followup(Some(at("2026-11-14T12:20:00Z")), now);
+        let arm = wake.arm(now, 0).unwrap();
+        assert_eq!(arm.key, "followup:2026-11-14T12:20:00+00:00");
+        assert!(set(&arm).prompt.starts_with(FOLLOWUP_MARK));
+        assert!(
+            set(&arm).prompt.ends_with(FOLLOWUP_PROMPT),
+            "a fixed prompt"
+        );
+        assert!(!set(&arm).precheck);
+        // The same wake again changes nothing.
+        wake.set_followup(Some(at("2026-11-14T12:20:00Z")), now);
+        assert_eq!(wake.arm(now, 0), None);
+
+        let after = at("2026-11-14T12:20:30Z");
+        assert_eq!(wake.ran(after, 0), None, "the tick has not run");
+        assert_eq!(wake.ran(after, 1), Some(at("2026-11-14T12:20:00Z")));
+        // The daemon marks it done; no wake is left, so the beat is next.
+        wake.set_followup(None, after);
+        let arm = wake.arm(after, 1).unwrap();
+        assert_eq!(arm.key, "heartbeat:2026-11-14T13:20:30+00:00");
+    }
+
+    #[test]
+    fn a_wake_due_now_waits_the_engine_minimum() {
+        let now = at("2026-11-14T12:00:00Z");
+        let mut wake = Wake::idle(Arc::new(AtomicBool::new(false)));
+        wake.set_followup(Some(now), now);
+        let arm = wake.arm(now, 0).unwrap();
+        assert_eq!(arm.key, "followup:2026-11-14T12:01:00+00:00");
+    }
+
+    #[test]
     fn ticks_are_known_by_their_mark() {
+        assert!(is_tick(&marked(FOLLOWUP_MARK, "x")));
         assert!(is_tick(&marked(REFLECT_MARK, "x")));
         assert!(is_tick(&marked(HEARTBEAT_MARK, "x")));
         assert!(is_tick(&marked(BRIEF_MARK, "x")));

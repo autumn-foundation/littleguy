@@ -218,6 +218,14 @@ fn shown_text(data: &[u8]) -> Option<String> {
     std::str::from_utf8(data).ok().map(str::to_owned)
 }
 
+/// The time of the first pending wake in `stores`.
+fn next_wake(stores: &SqliteStores) -> Result<Option<DateTime<Utc>>> {
+    Ok(stores
+        .pending_wakes()?
+        .first()
+        .and_then(|wake| DateTime::from_timestamp_millis(wake.at_ms)))
+}
+
 /// How often the daemon looks for consolidation passes to reflect on.
 const PASS_LOOK_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
 
@@ -423,6 +431,7 @@ impl Daemon {
             watch_every: reload::WATCH_EVERY,
             live: Arc::clone(&live),
             brief_armed: Arc::default(),
+            wake_links: crate::plans::WakeLinks::default(),
         };
         let built = kit.assemble(config, &chats)?;
         sqlite::register(&mut rt, Arc::new(built.harness));
@@ -661,6 +670,11 @@ impl Daemon {
         if let Some(approval) = self.waiting {
             return Ok(Response::Busy { approval });
         }
+        // A person wrote, so a new chain of wakes may start.
+        self.kit.wake_links.last_person_ms.store(
+            (self.clock)().timestamp_millis(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
         let before = sqlite::state(&self.rt, &id).await?;
         let failures_before = before.as_ref().map_or(0, |state| state.failures);
         let key = inbound.message_id.as_str();
@@ -954,6 +968,7 @@ impl Daemon {
     pub async fn arm_wake(&mut self) -> Result<Option<String>> {
         let now = (self.clock)();
         let id = self.routing.assistant().clone();
+        self.read_wakes(now)?;
         let Some(wake) = self.wake.as_mut() else {
             if !std::mem::take(&mut self.disarm) {
                 return Ok(None);
@@ -978,12 +993,52 @@ impl Daemon {
         } else {
             0
         };
+        // A tick ran after the booked wakes up to its time: they are done.
+        if let Some(ran) = wake.ran(now, ticks)
+            && let Some(stores) = self.kit.stores.as_ref()
+        {
+            stores.finish_wakes(ran.timestamp_millis())?;
+            wake.set_followup(next_wake(stores)?, now);
+        }
         let Some(arm) = wake.arm(now, ticks) else {
             return Ok(None);
         };
         tracing::info!(wake = %arm.key, "the next wake");
         sqlite::send(&mut self.rt, &id, &arm.op, Some(&arm.key))?;
         Ok(Some(arm.key))
+    }
+
+    /// Reads the next booked wake into the plan, when a wake tool changed
+    /// the wakes, a reload made a new plan, or the daemon just started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot read.
+    fn read_wakes(&mut self, now: DateTime<Utc>) -> Result<()> {
+        let links = &self.kit.wake_links;
+        if !links
+            .changed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        let Some(stores) = self
+            .kit
+            .stores
+            .as_ref()
+            .filter(|_| self.kit.config.tools.plans)
+        else {
+            return Ok(());
+        };
+        let next = next_wake(stores)?;
+        if next.is_none() && self.wake.is_none() {
+            return Ok(());
+        }
+        let brief_armed = Arc::clone(&self.kit.brief_armed);
+        self.wake
+            .get_or_insert_with(|| Wake::idle(brief_armed))
+            .set_followup(next, now);
+        Ok(())
     }
 
     /// Plans one reflection when a consolidation pass completed that no
@@ -2912,7 +2967,7 @@ mod tests {
                 .as_str()
                 .map(|out| format!("ran: {}", out.trim()));
             let said = result.as_str().map(|text| format!("got: {text}"));
-            let logged = ["runs", "failures", "models", "idea", "goal"]
+            let logged = ["runs", "failures", "models", "idea", "goal", "wake"]
                 .iter()
                 .any(|key| result.get(key).is_some())
                 .then(|| format!("log: {result}"));
@@ -3351,6 +3406,76 @@ mod tests {
             daemon.tick().await.unwrap();
         }
         assert_eq!(model.calls.load(Ordering::SeqCst), after);
+        let booked = sqlite::state(&daemon.rt, daemon.assistant())
+            .await
+            .unwrap()
+            .and_then(|state| state.next_heartbeat_ms);
+        assert_eq!(booked, None);
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_booked_wake_runs_once_at_its_time_then_the_timer_stops() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        // The tool reads the wall clock, so the daemon clock starts there.
+        let start = Utc::now();
+        let clock = HandClock::at(&start.to_rfc3339());
+        let hand = clock.clone();
+        // No nightly pass: on the wall clock, one can fall in this test.
+        let mut quiet = config();
+        quiet.memory.enabled = false;
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &quiet,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        let booked = daemon
+            .handle_request(
+                UID,
+                request(
+                    "w-1",
+                    r#"use wake_me {"in_minutes": 10, "about": "check the deploy"}"#,
+                ),
+            )
+            .await;
+        assert!(reply_text(&booked).starts_with(r#"log: {"at":"#));
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let pending = stores.pending_wakes().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].about, "check the deploy");
+
+        // The next tick aims the timer at the wake.
+        daemon.tick().await.unwrap();
+        let (at, kind) = daemon.wake.as_ref().and_then(Wake::armed_at).unwrap();
+        assert_eq!(kind, crate::wake::Kind::Followup);
+        assert_eq!(at.timestamp_millis(), pending[0].at_ms);
+
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set(&(at + chrono::TimeDelta::seconds(1)).to_rfc3339());
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
+            panic!("no history");
+        };
+        let last = turns.last().unwrap();
+        assert_eq!(last.from, Speaker::Unprompted);
+        // The prompt is fixed. The text of the wake is not in it.
+        assert!(last.text.starts_with("ok: A wake that you booked"));
+        assert!(!last.text.contains("check the deploy"));
+
+        // The wake is done, it runs once, and the timer stops.
+        let after = model.calls.load(Ordering::SeqCst);
+        for seconds in [30, 90, 150] {
+            clock.set(&(at + chrono::TimeDelta::seconds(seconds)).to_rfc3339());
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), after);
+        assert_eq!(stores.pending_wakes().unwrap(), []);
         let booked = sqlite::state(&daemon.rt, daemon.assistant())
             .await
             .unwrap()

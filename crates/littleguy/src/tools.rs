@@ -132,6 +132,9 @@ impl Tools {
             // A note is no use when its path is forgotten.
             #[cfg(feature = "search-notes")]
             tools.push(littleguy_tools::search_notes_tool());
+            // Code is found by a line, not by a path (issue #75).
+            #[cfg(feature = "grep-files")]
+            tools.push(littleguy_tools::grep_files_tool());
         }
         #[cfg(feature = "self-debug")]
         if config.runs {
@@ -207,6 +210,9 @@ mod tests {
         let mut files = vec!["read_file", "write_file", "list_files", "delete_file"];
         if cfg!(feature = "search-notes") {
             files.push("search_notes");
+        }
+        if cfg!(feature = "grep-files") {
+            files.push("grep_files");
         }
         let runs: &[&str] = if cfg!(feature = "self-debug") {
             &["recent_runs", "failed_attempts", "model_usage"]

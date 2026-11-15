@@ -264,3 +264,87 @@ async fn an_offset_past_the_end_reads_nothing_and_gives_the_length() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Tool);
 }
+
+#[cfg(feature = "grep-files")]
+#[tokio::test]
+async fn grep_files_finds_each_matching_line_with_its_path_and_number() {
+    let handle = WorkspaceHandle::new(Workspace::default());
+    handle
+        .with(|files| {
+            files.write(
+                "crates/lg/src/daemon.rs",
+                "use x;\nfn begin_turn() {}\n// tick_log\nfn end_turn() {}\n",
+            )?;
+            files.write("crates/lg/src/tick.rs", "pub fn tick_log() {}\n")?;
+            files.write("notes/tick.md", "The TICK_LOG misses ticks.")?;
+            files.write("blob.bin", vec![0xff, 0xfe, b't', b'i', b'c', b'k'])
+        })
+        .unwrap();
+    let call = ctx(Some(handle.clone()));
+    let grep = crate::grep_files_tool();
+    assert_eq!(grep.effect(), ToolEffect::ReadOnly, "a tick may grep");
+
+    let found = grep
+        .execute(json!({"pattern": r"fn (begin|end)_turn"}), &call)
+        .await
+        .unwrap();
+    assert_eq!(found["searched"], 3, "the binary file has no lines");
+    assert_eq!(found["more"], false);
+    assert_eq!(
+        found["matches"],
+        json!([
+            {"path": "crates/lg/src/daemon.rs", "line": 2, "text": "fn begin_turn() {}"},
+            {"path": "crates/lg/src/daemon.rs", "line": 4, "text": "fn end_turn() {}"},
+        ])
+    );
+
+    // A path keeps only its files; the case is ignored on request.
+    let found = grep
+        .execute(
+            json!({"pattern": "tick_log", "ignore_case": true, "path": "crates/"}),
+            &call,
+        )
+        .await
+        .unwrap();
+    let at: Vec<(String, u64)> = found["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| {
+            (
+                hit["path"].as_str().unwrap().to_owned(),
+                hit["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        at,
+        [
+            (String::from("crates/lg/src/daemon.rs"), 3),
+            (String::from("crates/lg/src/tick.rs"), 1),
+        ]
+    );
+
+    // A limit stops the matches, and says more were found.
+    let found = grep
+        .execute(
+            json!({"pattern": "tick", "ignore_case": true, "limit": 1}),
+            &call,
+        )
+        .await
+        .unwrap();
+    assert_eq!(found["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(found["more"], true);
+
+    // A pattern as plain text, and a bad one.
+    let found = grep
+        .execute(json!({"pattern": "begin_turn()", "literal": true}), &call)
+        .await
+        .unwrap();
+    assert_eq!(found["matches"][0]["line"], 2);
+    let error = grep
+        .execute(json!({"pattern": "fn ("}), &call)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Tool);
+}

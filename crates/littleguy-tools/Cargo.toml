@@ -12,6 +12,8 @@ base64 = { version = "0.23", optional = true }
 autumn-harvest-agent = { version = "0.10.0", default-features = false }
 littleguy-core = { workspace = true }
 reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "rustls-no-provider"] }
+# Linear-time matching, so no pattern of a model can hang a call.
+regex = { version = "1", optional = true }
 rmcp = { version = "3.9", optional = true, default-features = false, features = [
     "client",
     "reqwest-tls-no-provider",
@@ -28,7 +30,7 @@ url = { version = "2", optional = true }
 axum = { version = "0.8", optional = true }
 
 [features]
-default = ["web", "mcp", "google", "search-notes"]
+default = ["web", "mcp", "google", "search-notes", "grep-files"]
 # `web_fetch` and `web_search`.
 web = ["dep:reqwest", "dep:rustls", "dep:url"]
 # The tools of each MCP server in the config.
@@ -37,6 +39,8 @@ mcp = ["dep:rmcp", "dep:rustls"]
 google = ["dep:base64"]
 # `search_notes`: find the files of the workspace that hold some words.
 search-notes = []
+# `grep_files`: find the lines of the workspace that match a pattern.
+grep-files = ["dep:regex"]
 # The MCP test server that the tests of this crate and of the daemon run against.
 testing = [
     "mcp",

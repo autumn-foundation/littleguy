@@ -48,8 +48,9 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `discord` | yes | Discord direct messages over the gateway. | `autumn-plugin-discord`, `reqwest`, `rustls` |
 | `fleet` | no | `[fleet]`: the memory, the episodes and the approvals in a tenant database, replicated to a directory or an S3-compatible store by autumn-web. The replication of autumn-web needs a database backend, so it takes `postgres`. | `tokio-util`, `autumn-web/http-client`, `autumn-web/postgres` |
 | `followups` | yes | `wake_me` and `cancel_wake`: the assistant books a wake to look at something again later. | none |
-| `full` | no | Every integration. | `autumn-harvest-plugin`, `autumn-plugin-discord`, `autumn-plugin-slack`, `axum`, `base64`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `futures-util`, `harvest-camel`, `reqwest`, `rmcp`, `rustls`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `tokio-tungstenite`, `tokio-util`, `url`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities`, `autumn-web/http-client`, `autumn-web/postgres` |
+| `full` | no | Every integration. | `autumn-harvest-plugin`, `autumn-plugin-discord`, `autumn-plugin-slack`, `axum`, `base64`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `futures-util`, `harvest-camel`, `regex`, `reqwest`, `rmcp`, `rustls`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `tokio-tungstenite`, `tokio-util`, `url`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities`, `autumn-web/http-client`, `autumn-web/postgres` |
 | `google` | no | `[google]`: the Gmail and Google Calendar tools. Needs `oauth`. | `axum`, `base64`, `san-mateo`, `san-mateo-sqlite` |
+| `grep-files` | yes | `grep_files`: the assistant finds the lines of its workspace that match a pattern. | `regex` |
 | `heartbeat` | yes | `[heartbeat]`: the assistant wakes on its own every so often. Its precheck skips a tick with no model call when no goal is due and no idea waits. | none |
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
@@ -94,6 +95,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | Feature | Default | What it builds | Crates it adds |
 |---|---|---|---|
 | `google` | yes | Gmail and Google Calendar, through a token proxy. | `base64` |
+| `grep-files` | yes | `grep_files`: find the lines of the workspace that match a pattern. | `regex` |
 | `mcp` | yes | The tools of each MCP server in the config. | `rmcp`, `rustls` |
 | `search-notes` | yes | `search_notes`: find the files of the workspace that hold some words. | none |
 | `testing` | no | The MCP test server that the tests of this crate and of the daemon run against. | `axum`, `rmcp`, `rustls`, `rmcp/server`, `rmcp/transport-io`, `rmcp/transport-streamable-http-server` |

@@ -218,6 +218,21 @@ fn shown_text(data: &[u8]) -> Option<String> {
     std::str::from_utf8(data).ok().map(str::to_owned)
 }
 
+/// How a tick went, in a few words. `skipped` is the verdict of the
+/// heartbeat precheck, and `finished` counts the booked wakes it ended.
+fn tick_outcome(skipped: Option<bool>, finished: usize) -> String {
+    let ran = if skipped == Some(true) {
+        String::from("skipped by the precheck: no goal due and no idea open; no model call")
+    } else {
+        String::from("ran")
+    };
+    match finished {
+        0 => ran,
+        1 => format!("{ran}; ended 1 booked wake"),
+        n => format!("{ran}; ended {n} booked wakes"),
+    }
+}
+
 /// The time of the first pending wake in `stores`.
 fn next_wake(stores: &SqliteStores) -> Result<Option<DateTime<Utc>>> {
     Ok(stores
@@ -436,6 +451,7 @@ impl Daemon {
             live: Arc::clone(&live),
             brief_armed: Arc::default(),
             wake_links: crate::plans::WakeLinks::default(),
+            verdict: Arc::default(),
         };
         let built = kit.assemble(config, &chats)?;
         sqlite::register(&mut rt, Arc::new(built.harness));
@@ -1008,12 +1024,22 @@ impl Daemon {
         } else {
             0
         };
-        // A tick ran after the booked wakes up to its time: they are done.
-        if let Some(ran) = wake.ran(now, ticks)
+        // A tick ran: the booked wakes up to its time are done, and the
+        // tick log gets a row.
+        if let Some((due, kind)) = wake.ran(now, ticks)
             && let Some(stores) = self.kit.stores.as_ref()
         {
-            stores.finish_wakes(ran.timestamp_millis())?;
+            let finished = stores.finish_wakes(due.timestamp_millis())?;
             wake.set_followup(next_wake(stores)?, now);
+            let skipped = (kind == crate::wake::Kind::Heartbeat)
+                .then(|| self.kit.verdict.take_skipped())
+                .flatten();
+            stores.record_tick(&littleguy_stores::tick_log::Tick {
+                kind: kind.label().to_owned(),
+                due_ms: due.timestamp_millis(),
+                seen_ms: now.timestamp_millis(),
+                outcome: tick_outcome(skipped, finished),
+            })?;
         }
         let Some(arm) = wake.arm(now, ticks) else {
             return Ok(None);
@@ -3007,6 +3033,7 @@ mod tests {
                 "goal",
                 "wake",
                 "skill_draft",
+                "ticks",
             ]
             .iter()
             .any(|key| result.get(key).is_some())
@@ -3364,6 +3391,11 @@ mod tests {
         }
         assert_eq!(model.calls.load(Ordering::SeqCst), 0);
         assert_eq!(armed(&daemon), Some(utc("2026-11-14T14:00:01Z")));
+        // The tick log says the precheck skipped it.
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let skipped = stores.recent_ticks(1).unwrap();
+        assert_eq!(skipped[0].kind, "heartbeat");
+        assert!(skipped[0].outcome.starts_with("skipped by the precheck"));
 
         // An idea waits, so the next heartbeat runs, and it speaks.
         daemon
@@ -3384,6 +3416,10 @@ mod tests {
         let last = turns.last().unwrap();
         assert_eq!(last.from, Speaker::Unprompted);
         assert_eq!(last.text, "ok: check in");
+        // This time the heartbeat ran. The log row comes at the next arm.
+        clock.set("2026-11-14T14:00:30Z");
+        daemon.tick().await.unwrap();
+        assert_eq!(stores.recent_ticks(1).unwrap()[0].outcome, "ran");
         // The message prints no turn, so a failure logs no conversation.
         assert!(
             !turns.iter().any(|turn| turn.text.contains("[littleguy")),
@@ -3521,6 +3557,81 @@ mod tests {
             .unwrap()
             .and_then(|state| state.next_heartbeat_ms);
         assert_eq!(booked, None);
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_booked_wake_survives_a_restart_and_fires_on_time() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let model = Arc::new(MemoryModel::default());
+        // The tool reads the wall clock, so the daemon clock starts there.
+        let clock = HandClock::at(&Utc::now().to_rfc3339());
+        // No nightly pass: on the wall clock, one can fall in this test.
+        let mut quiet = config();
+        quiet.memory.enabled = false;
+        let open = |clock: &HandClock| {
+            let hand = clock.clone();
+            Daemon::open(
+                &db,
+                &quiet,
+                Arc::clone(&model) as Arc<dyn AgentModel>,
+                UID,
+                false,
+            )
+            .unwrap()
+            .with_clock(move || hand.now())
+        };
+
+        // Book a wake, then stop the daemon before it is due.
+        {
+            let mut daemon = open(&clock);
+            daemon
+                .handle_request(
+                    UID,
+                    request(
+                        "r-1",
+                        r#"use wake_me {"in_minutes": 30, "about": "check CI"}"#,
+                    ),
+                )
+                .await;
+            daemon.tick().await.unwrap();
+        }
+
+        // The next start arms the wake at the time it was booked for.
+        let mut daemon = open(&clock);
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let booked = stores.pending_wakes().unwrap();
+        assert_eq!(
+            booked.len(),
+            1,
+            "the wake is still pending after the restart"
+        );
+        daemon.tick().await.unwrap();
+        let (at, kind) = daemon.wake.as_ref().and_then(Wake::armed_at).unwrap();
+        assert_eq!(kind, crate::wake::Kind::Followup);
+        assert_eq!(at.timestamp_millis(), booked[0].at_ms);
+
+        // At its time, it fires once.
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set(&(at + chrono::TimeDelta::seconds(1)).to_rfc3339());
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        for seconds in [30, 90] {
+            clock.set(&(at + chrono::TimeDelta::seconds(seconds)).to_rfc3339());
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(stores.pending_wakes().unwrap(), []);
+
+        // The tick log has it, and so does recent_wakes.
+        let ticks = stores.recent_ticks(5).unwrap();
+        assert_eq!(ticks[0].kind, "follow-up");
+        assert_eq!(ticks[0].due_ms, booked[0].at_ms);
+        assert_eq!(ticks[0].outcome, "ran; ended 1 booked wake");
+        let seen = daemon
+            .handle_request(UID, request("r-2", "use recent_wakes {}"))
+            .await;
+        assert!(reply_text(&seen).contains(r#""kind":"follow-up""#));
     }
 
     #[cfg(any(feature = "discord", feature = "sandbox"))]

@@ -61,6 +61,8 @@ pub(super) struct Kit {
     pub(super) brief_armed: Arc<std::sync::atomic::AtomicBool>,
     /// What the wake tools share with the daemon.
     pub(super) wake_links: crate::plans::WakeLinks,
+    /// What the precheck decided for the last heartbeat, for the tick log.
+    pub(super) verdict: Arc<crate::wake::Verdict>,
 }
 
 /// The parts of the daemon that a config shapes.
@@ -156,6 +158,7 @@ impl Kit {
         let precheck = config.heartbeat.as_ref().map(|beat| Due {
             plans: stores.clone().filter(|_| config.tools.plans),
             research: beat.research,
+            verdict: Arc::clone(&self.verdict),
         });
         let memory = stores
             .filter(|_| config.memory.enabled)

@@ -120,12 +120,13 @@ fn object(properties: &Value, required: &[&str]) -> Value {
 #[must_use]
 #[expect(
     clippy::too_many_lines,
-    reason = "eight tools, each a schema and a short body, read best in one list"
+    reason = "nine tools, each a schema and a short body, read best in one list"
 )]
 pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>> {
     let list = Arc::clone(stores);
     let book = (Arc::clone(stores), wakes.clone());
     let draft = Arc::clone(stores);
+    let ticks = Arc::clone(stores);
     let cancel = (Arc::clone(stores), wakes.clone());
     let file = Arc::clone(stores);
     let research = Arc::clone(stores);
@@ -345,6 +346,38 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
         .effect(ToolEffect::Internal)
         .shared(),
         FnTool::new(
+            "recent_wakes",
+            "List the newest times that you woke on your own, newest first: heartbeats, briefs, \
+             reflections and the wakes you booked. Each says when it was due, when it ended, \
+             and how it went, for example skipped by the precheck with no model call. Your \
+             run log cannot show these, because every op runs inside one long run.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "minimum": 1, "description": "The most rows. Default 20."},
+                },
+            }),
+            move |input| {
+                let stores = Arc::clone(&ticks);
+                async move {
+                    let limit = input["limit"]
+                        .as_u64()
+                        .and_then(|limit| u32::try_from(limit).ok())
+                        .unwrap_or(20)
+                        .max(1);
+                    let rows = stores.recent_ticks(limit)?;
+                    Ok(json!({"ticks": rows.iter().map(|tick| json!({
+                        "kind": tick.kind,
+                        "due": time(Some(tick.due_ms)),
+                        "ended": time(Some(tick.seen_ms)),
+                        "outcome": tick.outcome,
+                    })).collect::<Vec<_>>()}))
+                }
+            },
+        )
+        .effect(ToolEffect::ReadOnly)
+        .shared(),
+        FnTool::new(
             "cancel_wake",
             "Cancel a wake that you booked and no longer need.",
             object(&json!({"wake": {"type": "integer"}}), &["wake"]),
@@ -382,6 +415,7 @@ mod tests {
                 "goal_progress",
                 "wake_me",
                 "propose_skill",
+                "recent_wakes",
                 "cancel_wake"
             ]
         );

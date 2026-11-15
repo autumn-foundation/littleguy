@@ -261,6 +261,53 @@ fn answer_of(stop: Option<autumn_harvest_agent::AgentStop>, text: &str) -> Respo
     }
 }
 
+/// The run id of segment `segment` of the assistant, as the engine names
+/// it.
+fn run_id(state: &autumn_harvest_agent::AgentState, segment: u64) -> String {
+    format!("{}:s{segment}", state.incarnation)
+}
+
+/// The answer to the person who asked `asked`, from the transcript: the
+/// last text of the assistant after the newest message with that text, and
+/// before the next message of anyone. A tick prompt is such a message, so a
+/// tick answer never counts.
+fn answer_in(transcript: &[autumn_harvest_agent::ChatMessage], asked: &str) -> Response {
+    use autumn_harvest_agent::ChatRole;
+    let asked = asked.trim();
+    let answer = transcript
+        .iter()
+        .rposition(|message| message.role == ChatRole::User && message_text(message) == asked)
+        .and_then(|start| {
+            transcript[start + 1..]
+                .iter()
+                .take_while(|message| message.role != ChatRole::User)
+                .filter(|message| message.role == ChatRole::Assistant)
+                .map(message_text)
+                .filter(|text| !text.is_empty())
+                .last()
+        });
+    answer.map_or_else(
+        || Response::NoAnswer {
+            reason: String::from("the op ended without an answer"),
+        },
+        |text| Response::Reply { text },
+    )
+}
+
+/// The text parts of `message`, trimmed, with a blank line between them.
+fn message_text(message: &autumn_harvest_agent::ChatMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            autumn_harvest_agent::ContentPart::Text(text) => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// How a tick went, in a few words. `skipped` is the verdict of the
 /// heartbeat precheck, and `finished` counts the booked wakes it ended.
 #[cfg(feature = "self-debug")]
@@ -637,7 +684,7 @@ impl Daemon {
         let result = match request {
             Request::Chat { message_id, text } => match cli_inbound(uid, message_id, text) {
                 Ok(inbound) => {
-                    // Each piece of text in this drive belongs to this message.
+                    // The pieces of the op of this message go to its reader.
                     self.live.begin(inbound.message_id.as_str());
                     let answer = self.handle(&inbound, "").await;
                     self.live.end();
@@ -772,8 +819,17 @@ impl Daemon {
             (self.clock)().timestamp_millis(),
             std::sync::atomic::Ordering::SeqCst,
         );
+        // A tick that is due already runs first, so the op of this message
+        // is the next segment, and its run id is known before it starts.
+        sqlite::drive(&mut self.rt, &id).await?;
         let before = sqlite::state(&self.rt, &id).await?;
         let failures_before = before.as_ref().map_or(0, |state| state.failures);
+        // With no run yet, nothing can run before this op: the first run
+        // that writes is its run.
+        match &before {
+            Some(state) => self.live.expect(&run_id(state, state.segments)),
+            None => self.live.expect_first(),
+        }
         let key = inbound.message_id.as_str();
         let op = AgentOp::message_with_id(inbound.text.as_str(), key);
         let outcome = sqlite::send(&mut self.rt, &id, &op, Some(key))?;
@@ -795,6 +851,15 @@ impl Daemon {
                 reason: String::from("the assistant has no running run"),
             });
         };
+        // The state names the last op of the drive. When a tick ran after
+        // this message, its answer, stop and failures are the tick's. Then
+        // the answer of this message is in the transcript.
+        let alone = before.as_ref().map_or(state.segments == 1, |before| {
+            before.incarnation == state.incarnation && state.segments == before.segments + 1
+        });
+        if !alone {
+            return Ok(answer_in(&state.transcript, &inbound.text));
+        }
         if state.failures > failures_before {
             return Ok(Response::NoAnswer {
                 reason: state
@@ -1885,25 +1950,16 @@ pub use slack::SlackInbox;
 /// parts of one message. Tool calls, tool results and system text are not
 /// turns, and a message with no text is left out.
 fn turns(transcript: &[autumn_harvest_agent::ChatMessage]) -> Vec<Turn> {
-    use autumn_harvest_agent::{ChatRole, ContentPart};
+    use autumn_harvest_agent::ChatRole;
     let mut turns = Vec::new();
     // A tick prompt is not a person. The next answer is the assistant on
     // its own.
     let mut after_tick = false;
     for message in transcript {
-        let text: Vec<&str> = message
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text(text) => Some(text.trim()),
-                _ => None,
-            })
-            .filter(|text| !text.is_empty())
-            .collect();
+        let text = message_text(message);
         if text.is_empty() {
             continue;
         }
-        let text = text.join("\n\n");
         let from = match message.role {
             ChatRole::User if crate::wake::is_tick(&text) => {
                 after_tick = true;
@@ -3830,6 +3886,100 @@ mod tests {
                 .await;
             assert!(reply_text(&seen).contains(r#""kind":"follow-up""#));
         }
+    }
+
+    /// A model that moves the hand clock once, during the next call it
+    /// gets, so a timer comes due in the middle of an op.
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    #[derive(Debug)]
+    struct LateClockModel {
+        inner: MemoryModel,
+        clock: HandClock,
+        jump: std::sync::Mutex<Option<&'static str>>,
+    }
+
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    impl std::fmt::Debug for HandClock {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("HandClock")
+        }
+    }
+
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    impl AgentModel for LateClockModel {
+        fn chat<'a>(
+            &'a self,
+            request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            let jump = self.jump.lock().unwrap().take();
+            if let Some(at) = jump {
+                self.clock.set(at);
+            }
+            self.inner.chat(request)
+        }
+    }
+
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tick_in_the_same_drive_never_answers_for_a_person() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let model = Arc::new(LateClockModel {
+            inner: MemoryModel::default(),
+            clock: clock.clone(),
+            jump: std::sync::Mutex::new(None),
+        });
+        let hand = clock.clone();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &heartbeat_config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.tick().await.unwrap();
+        assert_eq!(armed(&daemon), Some(utc("2026-11-14T13:00:00Z")));
+        // An idea waits, so the heartbeat runs a model call.
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "t-1",
+                    r#"use add_idea {"title": "Docs", "body": "Links rot."}"#,
+                ),
+            )
+            .await;
+
+        // The heartbeat comes due while the model answers the person.
+        clock.set("2026-11-14T12:59:50Z");
+        *model.jump.lock().unwrap() = Some("2026-11-14T13:00:05Z");
+        let before = model.inner.calls.load(Ordering::SeqCst);
+        let answer = daemon.handle_request(UID, request("t-2", "hi")).await;
+        assert_eq!(
+            reply_text(&answer),
+            "ok: hi",
+            "the person gets their own answer"
+        );
+
+        // The tick ran, in that drive or the next, and it speaks on its own.
+        tick_until(&mut daemon, || {
+            model.inner.calls.load(Ordering::SeqCst) >= before + 2
+        })
+        .await;
+        let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
+            panic!("no history");
+        };
+        let last = turns.last().unwrap();
+        assert_eq!(last.from, Speaker::Unprompted);
+        assert_eq!(last.text, "ok: check in");
+        let hi = turns.iter().position(|turn| turn.text == "ok: hi").unwrap();
+        assert_eq!(turns[hi].from, Speaker::Assistant);
     }
 
     #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]

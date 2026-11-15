@@ -82,7 +82,7 @@ pub fn merge(current: &Config, mut next: Config) -> Merge {
     keep!(sandbox);
     live!(approvals, flow);
     keep!(mcp);
-    live!(refine);
+    live!(refine, council);
     keep!(ui, hooks, fleet);
     Merge {
         config: next,

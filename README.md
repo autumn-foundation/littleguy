@@ -336,6 +336,30 @@ assistant through the refine overlay, so they need a `[refine]` section.
 [ADR 0024](docs/adr/0024-skills.md) explains the design. Skills come with
 the `skills` feature, which is on by default and needs `refine`.
 
+## Council
+
+A `[council]` section lets model calls decide littleguy's proposals for
+you, when no outside text could have written them. It suits a daemon that
+plans on its own, such as a character at a table:
+
+```toml
+[council]
+accept = ["goals", "skills"]   # the default
+members = 3                    # independent votes; more than half accept
+charter = "Zara, a rogue who wants the crown."   # the default is the system prompt
+```
+
+When an op ends, each new proposal is marked tainted if the run had read a
+web page or another outside text. A tainted proposal waits for you, as
+before. On each tick, the council votes on the oldest clean one: an
+accepted goal becomes active with a note of why, an accepted draft becomes
+a skill by `council`, and a declined one closes. You can still drop a goal
+or retire a skill. The council needs the Rule of Two (`[flow]`, on by
+default) to see taint. Its votes are model calls outside the run, so they
+are not in `model_usage`; `memory.db` logs each decision.
+[ADR 0027](docs/adr/0027-a-council-accepts-for-the-owner.md) explains the
+design.
+
 ## Heartbeat
 
 A `[heartbeat]` section wakes littleguy on its own. On each tick it checks

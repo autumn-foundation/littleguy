@@ -269,6 +269,9 @@ pub enum ConfigError {
     /// The refine section is not valid.
     #[error("the refine section is not valid: {0}")]
     Refine(String),
+    /// The council section is not valid.
+    #[error("the council section is not valid: {0}")]
+    Council(String),
     /// The fleet section is not valid.
     #[error("the fleet section is not valid: {0}")]
     Fleet(String),
@@ -588,6 +591,59 @@ fn refine(raw: RawRefine) -> Result<RefineConfig, ConfigError> {
     Ok(RefineConfig {
         messages,
         dimension: raw.dimension.unwrap_or_default(),
+    })
+}
+
+/// The members of a council when the config names none.
+pub const DEFAULT_COUNCIL_MEMBERS: u32 = 3;
+
+/// What a council may decide for the owner (ADR 0027).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilAccepts {
+    /// Proposed goals.
+    Goals,
+    /// Skill drafts.
+    Skills,
+}
+
+/// A council of model calls that decides the proposals of the assistant
+/// for the owner, when no outside text could have written them (ADR 0027).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CouncilConfig {
+    /// What the council decides.
+    pub accept: Vec<CouncilAccepts>,
+    /// The independent model calls for each proposal. More than half must
+    /// accept.
+    pub members: u32,
+    /// What the agent is for. `None` is the system prompt.
+    pub charter: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCouncil {
+    accept: Option<Vec<CouncilAccepts>>,
+    members: Option<u32>,
+    charter: Option<String>,
+}
+
+/// Checks the council section. Only zero members cannot work.
+fn council(raw: RawCouncil) -> Result<CouncilConfig, ConfigError> {
+    let members = raw.members.unwrap_or(DEFAULT_COUNCIL_MEMBERS);
+    if members == 0 {
+        return Err(ConfigError::Council(String::from(
+            "members must be at least 1",
+        )));
+    }
+    let mut accept = raw
+        .accept
+        .unwrap_or_else(|| vec![CouncilAccepts::Goals, CouncilAccepts::Skills]);
+    accept.dedup();
+    Ok(CouncilConfig {
+        accept,
+        members,
+        charter: raw.charter.filter(|charter| !charter.trim().is_empty()),
     })
 }
 
@@ -1402,6 +1458,7 @@ struct Raw {
     #[serde(default)]
     mcp: RawMcp,
     refine: Option<RawRefine>,
+    council: Option<RawCouncil>,
     #[serde(default)]
     ui: RawUi,
     hooks: Option<RawHooks>,
@@ -1692,6 +1749,9 @@ pub struct Config {
     pub mcp: Vec<McpServer>,
     /// The refine loop, when the config has the section.
     pub refine: Option<RefineConfig>,
+    /// The council that decides for the owner, when the config has the
+    /// section.
+    pub council: Option<CouncilConfig>,
     /// The web pages.
     pub ui: UiConfig,
     /// The inbound hooks, when the config has the section.
@@ -1724,6 +1784,7 @@ impl Config {
             flow: FlowConfig::default(),
             mcp: Vec::new(),
             refine: None,
+            council: None,
             ui: UiConfig::default(),
             hooks: None,
             fleet: None,
@@ -1806,6 +1867,7 @@ impl Config {
             },
             mcp: mcp_servers(raw.mcp.server)?,
             refine: raw.refine.map(refine).transpose()?,
+            council: raw.council.map(council).transpose()?,
             ui: ui(raw.ui)?,
             hooks: raw.hooks.map(hooks).transpose()?,
             fleet: raw.fleet.map(fleet).transpose()?,
@@ -1965,6 +2027,33 @@ mod tests {
         for text in ["messages = 0", "messages = 501"] {
             let result = Config::parse(&format!("owner = \"mark\"\n[refine]\n{text}"));
             assert!(matches!(result, Err(ConfigError::Refine(_))), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_council_defaults_to_goals_and_skills_and_refuses_no_members() {
+        let plain = Config::parse("owner = \"mark\"\n[council]").unwrap();
+        let council = plain.council.unwrap();
+        assert_eq!(
+            council.accept,
+            [CouncilAccepts::Goals, CouncilAccepts::Skills]
+        );
+        assert_eq!(council.members, DEFAULT_COUNCIL_MEMBERS);
+        assert_eq!(council.charter, None);
+        let set = Config::parse(
+            "owner = \"mark\"\n[council]\naccept = [\"goals\"]\nmembers = 9\ncharter = \"Zara, a rogue.\"",
+        )
+        .unwrap()
+        .council
+        .unwrap();
+        assert_eq!(set.accept, [CouncilAccepts::Goals]);
+        assert_eq!(set.members, 9, "a big council is the owner's call");
+        assert_eq!(set.charter.as_deref(), Some("Zara, a rogue."));
+        for text in [
+            "owner = \"m\"\n[council]\nmembers = 0",
+            "owner = \"m\"\n[council]\naccept = [\"overlays\"]",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
         }
         assert!(Config::parse("owner = \"mark\"\n[refine]\nmessages = 500").is_ok());
         assert!(Config::parse("owner = \"mark\"\n[refine]\ndimension = \"all\"").is_err());

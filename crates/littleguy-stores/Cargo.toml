@@ -17,6 +17,8 @@ skills = []
 # The run log and the tick log that the assistant reads to debug itself
 # (`runlog`, `tick_log`).
 self-debug = []
+# What the council of the owner decided (`council`, ADR 0027).
+council = ["plans", "skills"]
 
 [dependencies]
 autumn-harvest-agent = { version = "0.10.0", default-features = false }

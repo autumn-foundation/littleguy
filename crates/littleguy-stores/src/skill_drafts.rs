@@ -76,6 +76,12 @@ impl SqliteStores {
                      key = ?4 WHERE id = ?5",
                     params![description, body, now_ms, key, id],
                 )?;
+                // New text needs a new mark: the op that wrote it may have
+                // read a page (ADR 0027).
+                tx.execute(
+                    "DELETE FROM council_marks WHERE kind = 'skill' AND item = ?1",
+                    params![id],
+                )?;
                 return Ok(Ok(id));
             }
             let waiting: i64 = tx.query_row(

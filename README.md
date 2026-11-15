@@ -294,7 +294,8 @@ again in 20 minutes". At that time it wakes on its own, read-only, looks,
 and tells you only what you should know. It can book at most 10 wakes in a
 row before you write again. `recent_wakes` shows each time it
 woke on its own (heartbeats, briefs, reflections and booked wakes) and how
-it went; [ADR 0025](docs/adr/0025-the-tick-log.md). [ADR 0023](docs/adr/0023-wakes-that-the-assistant-books.md)
+it went: the tools it called and the start of its answer;
+[ADR 0025](docs/adr/0025-the-tick-log.md) and [ADR 0028](docs/adr/0028-the-tick-log-says-what-a-tick-did.md). [ADR 0023](docs/adr/0023-wakes-that-the-assistant-books.md)
 explains the design. Booked wakes come with the `followups` feature, which
 is on by default.
 

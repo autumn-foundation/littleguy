@@ -24,7 +24,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use autumn_harvest_agent::Tool;
-#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
+#[cfg(any(
+    feature = "plans",
+    feature = "followups",
+    feature = "skills",
+    feature = "self-debug"
+))]
 use autumn_harvest_agent::flow::labels;
 #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 use autumn_harvest_agent::{AgentError, ErrorKind, ToolContext};
@@ -427,8 +432,9 @@ fn recent_wakes(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
         "recent_wakes",
         "List the newest times that you woke on your own, newest first: heartbeats, briefs, \
          reflections and the wakes you booked. Each says when it was due, when it ended, \
-         and how it went, for example skipped by the precheck with no model call. Your \
-         run log cannot show these, because every op runs inside one long run.",
+         and how it went: skipped by the precheck with no model call, or the tools it called \
+         and the start of its answer. Your run log cannot show these, because every op runs \
+         inside one long run.",
         json!({
             "type": "object",
             "properties": {
@@ -454,6 +460,8 @@ fn recent_wakes(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
         },
     )
     .effect(ToolEffect::ReadOnly)
+    // A tick answer can repeat what a page said (ADR 0028).
+    .label(labels::UNTRUSTED_INPUT)
     .shared()
 }
 
@@ -695,8 +703,12 @@ mod tests {
                 tool.name()
             );
         }
-        // `list_plans` shows text that a research read, so it is untrusted.
-        for tool in tools.iter().filter(|tool| tool.name() == "list_plans") {
+        // `list_plans` shows text that a research read, and `recent_wakes`
+        // the answers of ticks, so both are untrusted.
+        for tool in tools
+            .iter()
+            .filter(|tool| ["list_plans", "recent_wakes"].contains(&tool.name()))
+        {
             assert!(
                 tool.labels()
                     .iter()

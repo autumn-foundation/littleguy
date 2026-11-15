@@ -135,7 +135,9 @@ async fn a_code_call_waits_then_runs_once_approved() {
     assert_eq!(
         answer,
         Response::Reply {
-            text: String::from("ran: hi")
+            text: String::from("ran: hi"),
+            // A reply after an approval carries no usage.
+            usage: None,
         }
     );
     assert_eq!(backend.runs.load(Ordering::SeqCst), 1);

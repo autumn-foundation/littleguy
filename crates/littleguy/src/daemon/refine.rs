@@ -185,7 +185,7 @@ mod tests {
             text: String::from("hello"),
         };
         match daemon.handle_request(UID, request).await {
-            Response::Reply { text } => text,
+            Response::Reply { text, .. } => text,
             _ => panic!("expected a reply"),
         }
     }

@@ -732,6 +732,7 @@ impl Daemon {
         let before = sqlite::state(&self.rt, &id).await?;
         let failures_before = before.as_ref().map_or(0, |state| state.failures);
         let key = inbound.message_id.as_str();
+        let mark = usage::mark(&self.rt, &id)?;
         let op = AgentOp::message_with_id(inbound.text.as_str(), key);
         let outcome = sqlite::send(&mut self.rt, &id, &op, Some(key))?;
         if !outcome.signal_delivered {
@@ -759,12 +760,16 @@ impl Daemon {
                     .unwrap_or_else(|| String::from("the op failed")),
             });
         }
-        Ok(state.last_answer.map_or_else(
-            || Response::NoAnswer {
+        let Some(text) = state.last_answer else {
+            return Ok(Response::NoAnswer {
                 reason: String::from("the op ended without an answer"),
-            },
-            |text| Response::Reply { text },
-        ))
+            });
+        };
+        // The answer stands even when the ledger cannot be read.
+        let usage = usage::since(&self.rt, &id, mark)
+            .inspect_err(|error| tracing::warn!(%error, "the usage of an op is not known"))
+            .ok();
+        Ok(Response::Reply { text, usage })
     }
 
     /// Handles one Discord direct message, as [`Self::chat`] does.
@@ -812,7 +817,7 @@ impl Daemon {
         };
         let response = self.handle(&inbound, &message.channel_id).await?;
         let (text, track) = match response {
-            Response::Reply { text } => (text, true),
+            Response::Reply { text, .. } => (text, true),
             // The op ran before, but its reply did not go out.
             Response::Duplicate { last_answer } => (
                 last_answer.unwrap_or_else(|| String::from("(no answer yet)")),
@@ -1833,6 +1838,7 @@ mod refine;
 mod reload;
 #[cfg(feature = "skills")]
 mod skills;
+mod usage;
 #[cfg(feature = "discord")]
 pub use discord::DiscordLink;
 #[cfg(feature = "slack")]
@@ -1918,10 +1924,8 @@ mod tests {
         let mut daemon = open(&dir.path().join("lg.db"), Arc::clone(&model));
         let response = daemon.handle_request(UID, request("m-1", "hello")).await;
         assert_eq!(
-            response,
-            Response::Reply {
-                text: String::from("littleguy (offline): you said 'hello'")
-            }
+            reply_text(&response),
+            "littleguy (offline): you said 'hello'"
         );
         assert_eq!(model.calls(), 1);
         assert_eq!(daemon.assistant().as_str(), "assistant/mark");
@@ -2140,12 +2144,7 @@ mod tests {
             client
         );
         served.unwrap();
-        assert_eq!(
-            reply,
-            Response::Reply {
-                text: String::from("littleguy (offline): you said 'hi'")
-            }
-        );
+        assert_eq!(reply_text(&reply), "littleguy (offline): you said 'hi'");
         assert!(
             matches!(&bad_json, Response::Error { message } if message.contains("not valid")),
             "{bad_json:?}"
@@ -3244,7 +3243,7 @@ mod tests {
 
     fn reply_text(response: &Response) -> &str {
         match response {
-            Response::Reply { text } => text,
+            Response::Reply { text, .. } => text,
             _ => "",
         }
     }
@@ -4043,6 +4042,98 @@ mod tests {
                 Response::Error { message } if message == "only the owner of the daemon may do that"
             ));
         }
+    }
+
+    /// The usage of a reply. The failure does not print the response: some
+    /// responses carry a secret, such as the token of a link.
+    fn usage_of(response: &Response) -> crate::protocol::Usage {
+        match response {
+            Response::Reply {
+                usage: Some(usage), ..
+            } => *usage,
+            _ => panic!("the response is not a reply with usage"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_carries_the_usage_of_its_own_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        let first = daemon.handle_request(UID, request("u-1", "hello")).await;
+        assert_eq!(
+            usage_of(&first),
+            crate::protocol::Usage {
+                calls: 1,
+                input_tokens: 1,
+                output_tokens: 1,
+                cost_usd_micros: 0,
+                unpriced_calls: 1,
+            }
+        );
+        // A tool call takes two model calls. The usage counts this op only,
+        // not the op before it.
+        let second = daemon
+            .handle_request(UID, request("u-2", "remember tea"))
+            .await;
+        assert_eq!(usage_of(&second).calls, 2);
+        assert_eq!(usage_of(&second).input_tokens, 2);
+        // A duplicate ran nothing, so it carries no usage.
+        let again = daemon.handle_request(UID, request("u-1", "hello")).await;
+        assert!(
+            matches!(again, Response::Duplicate { .. }),
+            "a repeated id gets a duplicate"
+        );
+    }
+
+    /// A model with a price: 3 micro dollars per input token and 15 per
+    /// output token. Each call reads 100 tokens and writes 20.
+    #[derive(Debug)]
+    struct PricedModel;
+
+    impl AgentModel for PricedModel {
+        fn chat<'a>(
+            &'a self,
+            _request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            Box::pin(async move {
+                Ok(autumn_harvest_agent::ChatResponse {
+                    content: vec![autumn_harvest_agent::ContentPart::Text(String::from("ok"))],
+                    stop_reason: autumn_harvest_agent::StopReason::EndTurn,
+                    usage: autumn_harvest_agent::TokenUsage::new(100, 20),
+                })
+            })
+        }
+
+        fn model_id(&self) -> Option<&str> {
+            Some("priced-test")
+        }
+
+        fn cost_usd_micros(&self, usage: &autumn_harvest_agent::TokenUsage) -> Option<u64> {
+            Some(u64::from(usage.input_tokens) * 3 + u64::from(usage.output_tokens) * 15)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reply_carries_the_cost_of_a_priced_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon = Daemon::open(&db, &config(), Arc::new(PricedModel), UID, false).unwrap();
+        let reply = daemon.handle_request(UID, request("p-1", "hello")).await;
+        assert_eq!(
+            usage_of(&reply),
+            crate::protocol::Usage {
+                calls: 1,
+                input_tokens: 100,
+                output_tokens: 20,
+                cost_usd_micros: 100 * 3 + 20 * 15,
+                unpriced_calls: 0,
+            }
+        );
     }
 
     #[test]

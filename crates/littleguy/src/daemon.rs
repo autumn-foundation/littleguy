@@ -196,13 +196,17 @@ pub fn harness(
     let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
     if let Some(guard) = guard {
         (harness, profile) = guard.apply(harness, profile);
-    } else if config.council.is_some() {
-        // The council reads the taint of a run, and only flow rules record
-        // it. No tool here can complete a rule that asks, or the guard would
-        // be on, so the rules only keep the labels (ADR 0027).
-        let flow = config.flow.rules();
-        if !flow.is_empty() {
-            harness = harness.flow_rules(flow);
+    } else {
+        #[cfg(feature = "council")]
+        if config.council.is_some() {
+            // The council reads the taint of a run, and only flow rules
+            // record it. No tool here can complete a rule that asks, or the
+            // guard would be on, so the rules only keep the labels (ADR
+            // 0027).
+            let flow = config.flow.rules();
+            if !flow.is_empty() {
+                harness = harness.flow_rules(flow);
+            }
         }
     }
     if let Some((stores, db)) = memory {

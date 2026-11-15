@@ -38,6 +38,8 @@ mod features;
 mod fleet;
 mod guard;
 mod memory;
+#[cfg(feature = "notes")]
+mod notes;
 #[cfg(feature = "oauth")]
 mod oauth;
 mod pairs;

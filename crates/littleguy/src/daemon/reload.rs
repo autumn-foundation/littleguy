@@ -93,6 +93,35 @@ impl Kit {
         Ok(stores)
     }
 
+    /// `tools` and the assistant's own tools of `config`: its goals, ideas,
+    /// wakes and skills, and its notes. Each lives in the memory store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the memory store does not open.
+    fn own_tools(
+        &mut self,
+        config: &Config,
+        mut tools: crate::tools::Tools,
+    ) -> Result<crate::tools::Tools> {
+        if config.tools.plans {
+            tools = tools.with(crate::plans::tools(
+                &self.stores()?,
+                #[cfg(feature = "followups")]
+                &self.wake_links,
+                #[cfg(feature = "skills")]
+                &self.skills_dir,
+            ));
+        }
+        // Notes are memory, and the file switch covers them too. A daemon
+        // with memory off opens no memory file for them.
+        #[cfg(feature = "notes")]
+        if config.tools.files && config.memory.enabled {
+            tools = tools.with(crate::notes::tools(&self.stores()?));
+        }
+        Ok(tools)
+    }
+
     /// Builds the assistant and the parts around it from `config`.
     pub(super) fn assemble(&mut self, config: &Config, chats: &Arc<Chats>) -> Result<Assembled> {
         let db = self.db.clone();
@@ -116,16 +145,7 @@ impl Kit {
         )
         .with(self.mcp.clone())
         .with(google);
-        // The goals and ideas live in the memory store.
-        if config.tools.plans {
-            tools = tools.with(crate::plans::tools(
-                &self.stores()?,
-                #[cfg(feature = "followups")]
-                &self.wake_links,
-                #[cfg(feature = "skills")]
-                &self.skills_dir,
-            ));
-        }
+        tools = self.own_tools(config, tools)?;
         tracing::info!(tools = ?tools.names(), "the assistant tools");
         let flow = config.flow.rules();
         let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || google_on);

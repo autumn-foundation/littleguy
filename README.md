@@ -429,6 +429,50 @@ backend runs each call in a new microVM. The `process` backend runs code as
 a host process, so use it only for development.
 [ADR 0008](docs/adr/0008-sandbox-and-approvals.md) explains the design.
 
+## Run it in a container
+
+The `process` sandbox backend runs only on Linux. On a Mac, the container
+in this repository runs littleguy on Linux, so `run_code` works, and the
+container is the boundary of the code it runs. The same image suits a
+Linux host such as a Fly Sprite.
+
+```sh
+docker compose up -d --build                   # LG_MODEL picks the model, default offline
+docker compose cp lg.toml lg:/data/config/littleguy/lg.toml
+docker compose exec lg lg reload
+docker compose exec lg lg ui                   # a sign-in link for the pages
+docker compose exec lg lg chat "hi"
+```
+
+- **Keys.** Compose passes `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `LG_BRAVE_API_KEY` and the Discord and Slack tokens from
+  your shell by name, and `LG_MODEL` and `LG_MODEL_NAME` pick the model:
+  `LG_MODEL=openrouter LG_MODEL_NAME=deepseek/deepseek-v4.1-flash-1017
+  docker compose up -d`. No file holds a key.
+- **Data.** The config, `lg.db`, `memory.db`, the skills and the workspace
+  live in the `lg-data` volume, under `/data`. SQLite does not lock well
+  across the file sharing of Docker Desktop, so the data stays in the volume
+  and not in a folder of the Mac. To move a littleguy in, stop `lg serve` on
+  the Mac first, then copy `~/.local/share/littleguy` to
+  `/data/share/littleguy` and `~/.config/littleguy` to
+  `/data/config/littleguy` with `docker compose cp`. Only one daemon may run
+  on one database.
+- **Pages.** They serve on the loopback address of the container. A small
+  `pages` service shares its network and forwards to them, and compose
+  publishes it on `127.0.0.1:3004` of the Mac only. So the pages stay on
+  this machine, and the sign-in link from `lg ui` works in your browser.
+  `LG_PAGES_PORT` picks another port, for example while `lg serve` still
+  runs on the Mac; set the same port in `[ui] bind`.
+- **The CLI.** A Unix socket does not cross the file sharing of Docker
+  Desktop, so `lg chat`, `lg approve` and the rest run inside the container
+  with `docker compose exec lg lg ...`.
+- **Code.** Add `[sandbox]` with `backend = "process"`. Each call still
+  waits for your approval.
+
+On a host that sleeps, such as a Sprite, timers do not fire while it
+sleeps, so the heartbeat, the brief and booked wakes need a cron outside
+that calls `/hooks/tick` (see [Hooks](#hooks)).
+
 ## MCP servers
 
 Each `[[mcp.server]]` gives the assistant the tools of one MCP server. A

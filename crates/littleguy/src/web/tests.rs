@@ -32,6 +32,16 @@ impl Drop for Rig {
     }
 }
 
+/// The text of a reply, or nothing for any other response. A check prints
+/// only this text, never the whole response: some responses carry a
+/// secret, such as the token of a link.
+fn reply_text(response: &Response) -> &str {
+    match response {
+        Response::Reply { text, .. } => text,
+        _ => "",
+    }
+}
+
 fn config(refine: bool) -> Config {
     let mut config = Config::for_owner(OwnerName::new("mark").unwrap());
     if refine {
@@ -739,12 +749,7 @@ async fn the_workspace_page_lists_the_files_and_opens_one() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        saved,
-        Response::Reply {
-            text: String::from("saved")
-        }
-    );
+    assert_eq!(reply_text(&saved), "saved");
     rig.handle
         .ask(Request::Chat {
             message_id: String::from("w-2"),
@@ -846,12 +851,7 @@ async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {
             })
             .await
             .unwrap();
-        assert_eq!(
-            answer,
-            Response::Reply {
-                text: String::from("saved")
-            }
-        );
+        assert_eq!(reply_text(&answer), "saved");
     }
 
     // Every tab shows that a goal waits.
@@ -944,12 +944,7 @@ async fn the_owner_accepts_and_retires_a_skill_on_the_skills_tab() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        drafted,
-        Response::Reply {
-            text: String::from("saved")
-        }
-    );
+    assert_eq!(reply_text(&drafted), "saved");
 
     // Every tab counts the draft. The skills tab opens it as a document.
     let files = rig.client.get("/workspace").send().await;

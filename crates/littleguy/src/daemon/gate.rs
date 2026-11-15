@@ -67,7 +67,7 @@ async fn finish(
             .and_then(|state| state.last_answer.as_deref())
             .unwrap_or_default(),
     ) {
-        Response::Reply { text } => text,
+        Response::Reply { text, .. } => text,
         Response::NoAnswer { reason } => {
             format!("Request #{} ended without an answer: {reason}.", record.id)
         }
@@ -257,6 +257,7 @@ impl Daemon {
                 approval: record.id,
             });
         }
+        // The op ran over two drives, so its usage is not known here.
         let state = sqlite::state(&self.rt, &id).await?;
         Ok(super::answer_of(
             state.as_ref().and_then(|s| s.last_stop),
@@ -323,7 +324,7 @@ impl Daemon {
         channel: &str,
     ) {
         match self.resume(record).await {
-            Ok(Response::Reply { text } | Response::NoAnswer { reason: text }) => {
+            Ok(Response::Reply { text, .. } | Response::NoAnswer { reason: text }) => {
                 if let Err(error) = self.chats.send(service, channel, &text).await {
                     tracing::warn!(%error, "the answer of a request did not go out");
                 }

@@ -44,6 +44,10 @@ part pays for it at each build.
 - `followups` gates `wake_me`, `cancel_wake`, the wakes in `list_plans`,
   the follow-up part of the wake plan and the `wakes` module of
   `littleguy-stores`. A tick of a build without it ends no booked wake.
+- `reflection` gates the pass watch of the daemon and the reflection part
+  of the wake plan. It needs `plans`, since a reflection files ideas.
+  `reflect = true` under `[memory]` is the default, so a build without the
+  feature only logs that the reflection is off.
 - `[tools] plans` still switches the whole set of the assistant's own
   tools, also `wake_me`, `cancel_wake`, `propose_skill` and
   `recent_wakes`. Their own features split that switch.

@@ -208,7 +208,8 @@ After each pass that learned something, littleguy reflects once: it reads
 its notes and files [ideas](#goals-and-ideas) for anything worth planning
 or researching. The reflection is read-only, and it stays silent unless
 you should know something. [ADR 0022](docs/adr/0022-ideas-from-consolidation.md)
-explains the design.
+explains the design. The reflection comes with the `reflection` feature,
+which is on by default and needs `plans`.
 
 The notes and the log live in `memory.db`, next to `lg.db`, or in the
 tenant database of a [fleet](#fleet). The pass runs

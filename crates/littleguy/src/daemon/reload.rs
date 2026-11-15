@@ -288,12 +288,14 @@ impl Daemon {
         // does not go out again. A plan that went away turns the timer off.
         if config.brief != self.kit.config.brief || config.heartbeat != self.kit.config.heartbeat {
             // A reflection that waits for its arm survives the new plan.
+            #[cfg(feature = "reflection")]
             let pending = self
                 .wake
                 .as_ref()
                 .and_then(Wake::pending_reflection)
                 .map(str::to_owned);
             self.wake = built.wake;
+            #[cfg(feature = "reflection")]
             if let Some(pass) = pending {
                 let brief_armed = Arc::clone(&self.kit.brief_armed);
                 self.wake

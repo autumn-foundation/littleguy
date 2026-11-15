@@ -55,6 +55,7 @@ pub const REFLECT_MARK: &str = "[littleguy reflection]";
 
 /// The prefix of the op key that arms one reflection. The id of the pass
 /// follows.
+#[cfg(feature = "reflection")]
 pub const REFLECT_KEY: &str = "reflect:";
 
 /// The first line of the prompt of a follow-up tick.
@@ -73,6 +74,7 @@ pub const FOLLOWUP_PROMPT: &str = "A wake that you booked with wake_me is due. C
      Reply with exactly HEARTBEAT_OK unless the owner should know something now.";
 
 /// The instruction of a reflection tick.
+#[cfg(feature = "reflection")]
 pub const REFLECT_PROMPT: &str = "Your memory was just consolidated: new facts are in \
      your notes. Read your notes and call list_plans. For anything worth planning or \
      researching that is not an idea yet, file one with add_idea. Add what you now know \
@@ -144,6 +146,7 @@ pub enum Kind {
     #[cfg(feature = "heartbeat")]
     Heartbeat,
     /// A reflection after a consolidation pass.
+    #[cfg(feature = "reflection")]
     Reflection,
     /// A wake that the assistant booked.
     #[cfg(feature = "followups")]
@@ -158,6 +161,7 @@ impl Kind {
             Self::Brief => "brief",
             #[cfg(feature = "heartbeat")]
             Self::Heartbeat => "heartbeat",
+            #[cfg(feature = "reflection")]
             Self::Reflection => "reflection",
             #[cfg(feature = "followups")]
             Self::Followup => "follow-up",
@@ -264,6 +268,7 @@ pub struct Wake {
     #[cfg(feature = "heartbeat")]
     beat: Option<Beat>,
     /// The pass that waits for its reflection.
+    #[cfg(feature = "reflection")]
     reflect: Option<String>,
     /// The next wake that the assistant booked.
     #[cfg(feature = "followups")]
@@ -344,6 +349,7 @@ impl Wake {
             brief,
             #[cfg(feature = "heartbeat")]
             beat,
+            #[cfg(feature = "reflection")]
             reflect: None,
             #[cfg(feature = "followups")]
             followup: None,
@@ -352,13 +358,16 @@ impl Wake {
         }))
     }
 
-    /// A plan with no brief and no heartbeat, for a reflection alone.
+    /// A plan with no brief and no heartbeat, for a reflection or a booked
+    /// wake alone.
+    #[cfg(any(feature = "reflection", feature = "followups"))]
     #[must_use]
     pub const fn idle(brief_armed: Arc<AtomicBool>) -> Self {
         Self {
             brief: None,
             #[cfg(feature = "heartbeat")]
             beat: None,
+            #[cfg(feature = "reflection")]
             reflect: None,
             #[cfg(feature = "followups")]
             followup: None,
@@ -394,6 +403,7 @@ impl Wake {
     }
 
     /// The pass whose reflection is planned but not armed yet.
+    #[cfg(feature = "reflection")]
     #[must_use]
     pub fn pending_reflection(&self) -> Option<&str> {
         self.reflect.as_deref()
@@ -402,6 +412,7 @@ impl Wake {
     /// Plans one reflection on the consolidation pass `pass`, as the next
     /// wake. It replaces the arm that waits, which the next arm books
     /// again.
+    #[cfg(feature = "reflection")]
     pub fn reflect(&mut self, pass: &str) {
         self.reflect = Some(pass.to_owned());
         self.armed = None;
@@ -440,8 +451,12 @@ impl Wake {
         }
         // A reflection comes as soon as the engine allows. Its arm names that
         // time, so the daemon reads no state before the tick can run.
+        #[cfg(any(feature = "reflection", feature = "followups"))]
         let soonest = now + chrono::TimeDelta::seconds(MIN_CUSTOM_HEARTBEAT_SECS.cast_signed());
+        #[cfg(feature = "reflection")]
         let reflect = self.reflect.as_ref().map(|_| (soonest, Kind::Reflection));
+        #[cfg(not(feature = "reflection"))]
+        let reflect = None;
         #[cfg(feature = "followups")]
         let followup = self.followup.map(|at| (at.max(soonest), Kind::Followup));
         #[cfg(not(feature = "followups"))]
@@ -494,6 +509,7 @@ impl Wake {
                 format!("{FOLLOWUP_KEY}{}", at.to_rfc3339()),
                 heartbeat(&marked(FOLLOWUP_MARK, FOLLOWUP_PROMPT), every),
             ),
+            #[cfg(feature = "reflection")]
             Kind::Reflection => {
                 let pass = self.reflect.take().unwrap_or_default();
                 (
@@ -756,6 +772,7 @@ mod tests {
         assert!(error.to_string().contains("heartbeat.timezone"));
     }
 
+    #[cfg(feature = "reflection")]
     #[test]
     fn a_reflection_comes_first_runs_once_and_the_timer_stops_after_it() {
         let now = at("2026-11-14T03:05:00Z");
@@ -779,7 +796,7 @@ mod tests {
         assert_eq!(wake.arm(later, 1), None);
     }
 
-    #[cfg(feature = "heartbeat")]
+    #[cfg(all(feature = "heartbeat", feature = "reflection"))]
     #[test]
     fn a_reflection_goes_before_an_armed_heartbeat_which_comes_back() {
         let now = at("2026-11-14T03:00:00Z");

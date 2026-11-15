@@ -95,10 +95,11 @@ pub fn harness(harness: AgentHarness, stores: Arc<SqliteStores>, db: &Path) -> A
 /// Keeps the memory of the assistant in the store, and an episode log that
 /// the scheduled pass reads.
 #[must_use]
-pub fn profile(profile: AgentProfile) -> AgentProfile {
-    profile
-        .memory(AgentMemory::Store)
-        .episodes(EpisodeSettings::default())
+pub fn profile(profile: AgentProfile, config: &MemoryConfig) -> AgentProfile {
+    let mut episodes = EpisodeSettings::default();
+    // A batch that fits the engine's output cap of a pass (ADR 0030).
+    episodes.max_pass_episodes = config.pass_episodes;
+    profile.memory(AgentMemory::Store).episodes(episodes)
 }
 
 /// Puts the consolidation schedule in the runtime, or takes it out when

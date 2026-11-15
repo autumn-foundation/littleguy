@@ -321,18 +321,14 @@ impl Daemon {
         if config.brief != self.kit.config.brief || config.heartbeat != self.kit.config.heartbeat {
             // A reflection that waits for its arm survives the new plan.
             #[cfg(feature = "reflection")]
-            let pending = self
-                .wake
-                .as_ref()
-                .and_then(Wake::pending_reflection)
-                .map(str::to_owned);
+            let pending = self.wake.as_ref().and_then(Wake::pending_reflection);
             self.wake = built.wake;
             #[cfg(feature = "reflection")]
-            if let Some(pass) = pending {
+            if let Some((pass, prompt)) = pending {
                 let brief_armed = Arc::clone(&self.kit.brief_armed);
                 self.wake
                     .get_or_insert_with(|| Wake::idle(brief_armed))
-                    .reflect(&pass);
+                    .reflect(&pass, &prompt);
             }
             self.disarm = self.wake.is_none();
             // The new plan reads the booked wakes again.

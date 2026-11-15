@@ -76,20 +76,19 @@ pub const FOLLOWUP_PROMPT: &str = "A wake that you booked with wake_me is due. C
      found on the goal or idea it concerns. Book another wake only if you must look again. \
      Reply with exactly HEARTBEAT_OK unless the owner should know something now.";
 
-/// The instruction of a reflection tick.
+/// What a reflection tick does with the facts that its prompt lists. The
+/// prompt says what the pass did first ([`crate::reflection`]).
 #[cfg(all(feature = "reflection", feature = "skills"))]
-pub const REFLECT_PROMPT: &str = "Your memory was just consolidated: new facts are in \
-     your notes. Read your notes and call list_plans. For anything worth planning or \
+pub const REFLECT_PROMPT: &str = "Call list_plans. For anything worth planning or \
      researching that is not an idea yet, file one with add_idea. Add what you now know \
      to a related open idea with research_idea. Do not file an idea that exists. Propose \
      a goal only when an idea is clearly worth doing. If you found a way of doing \
      something that you will need again, draft a skill with propose_skill. Reply with \
      exactly HEARTBEAT_OK unless the owner should know something now.";
 
-/// The instruction of a reflection tick, in a build without skills.
+/// What a reflection tick does, in a build without skills.
 #[cfg(all(feature = "reflection", not(feature = "skills")))]
-pub const REFLECT_PROMPT: &str = "Your memory was just consolidated: new facts are in \
-     your notes. Read your notes and call list_plans. For anything worth planning or \
+pub const REFLECT_PROMPT: &str = "Call list_plans. For anything worth planning or \
      researching that is not an idea yet, file one with add_idea. Add what you now know \
      to a related open idea with research_idea. Do not file an idea that exists. Propose \
      a goal only when an idea is clearly worth doing. Reply with exactly HEARTBEAT_OK \
@@ -283,9 +282,10 @@ pub struct Wake {
     brief: Option<Brief>,
     #[cfg(feature = "heartbeat")]
     beat: Option<Beat>,
-    /// The pass that waits for its reflection.
+    /// The pass that waits for its reflection, and the prompt that says
+    /// what it did.
     #[cfg(feature = "reflection")]
-    reflect: Option<String>,
+    reflect: Option<(String, String)>,
     /// The next wake that the assistant booked.
     #[cfg(feature = "followups")]
     followup: Option<DateTime<Utc>>,
@@ -419,19 +419,20 @@ impl Wake {
             .map(|armed| (armed.at, armed.kind))
     }
 
-    /// The pass whose reflection is planned but not armed yet.
+    /// The pass whose reflection is planned but not armed yet, and its
+    /// prompt.
     #[cfg(feature = "reflection")]
     #[must_use]
-    pub fn pending_reflection(&self) -> Option<&str> {
-        self.reflect.as_deref()
+    pub fn pending_reflection(&self) -> Option<(String, String)> {
+        self.reflect.clone()
     }
 
-    /// Plans one reflection on the consolidation pass `pass`, as the next
-    /// wake. It replaces the arm that waits, which the next arm books
-    /// again.
+    /// Plans one reflection on the consolidation pass `pass` with `prompt`,
+    /// as the next wake. It replaces the arm that waits, which the next arm
+    /// books again.
     #[cfg(feature = "reflection")]
-    pub fn reflect(&mut self, pass: &str) {
-        self.reflect = Some(pass.to_owned());
+    pub fn reflect(&mut self, pass: &str, prompt: &str) {
+        self.reflect = Some((pass.to_owned(), prompt.to_owned()));
         self.armed = None;
     }
 
@@ -528,10 +529,10 @@ impl Wake {
             ),
             #[cfg(feature = "reflection")]
             Kind::Reflection => {
-                let pass = self.reflect.take().unwrap_or_default();
+                let (pass, prompt) = self.reflect.take().unwrap_or_default();
                 (
                     format!("{REFLECT_KEY}{pass}"),
-                    heartbeat(&marked(REFLECT_MARK, REFLECT_PROMPT), every),
+                    heartbeat(&marked(REFLECT_MARK, &prompt), every),
                 )
             }
         };
@@ -796,8 +797,11 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(true));
         let mut wake = Wake::idle(Arc::clone(&flag));
         assert_eq!(wake.arm(now, 0), None, "nothing planned, nothing armed");
-        wake.reflect("pass-7");
-        assert_eq!(wake.pending_reflection(), Some("pass-7"));
+        wake.reflect("pass-7", "Two facts.");
+        assert_eq!(
+            wake.pending_reflection(),
+            Some((String::from("pass-7"), String::from("Two facts.")))
+        );
         let arm = wake.arm(now, 0).unwrap();
         assert_eq!(wake.pending_reflection(), None);
         assert_eq!(arm.key, "reflect:pass-7");
@@ -819,7 +823,7 @@ mod tests {
         let now = at("2026-11-14T03:00:00Z");
         let mut wake = plan(None, Some(&beat(60, None)), now);
         assert!(wake.arm(now, 0).unwrap().key.starts_with(HEARTBEAT_KEY));
-        wake.reflect("p");
+        wake.reflect("p", "A fact.");
         let soon = at("2026-11-14T03:05:00Z");
         assert_eq!(wake.arm(soon, 0).unwrap().key, "reflect:p");
         let arm = wake.arm(at("2026-11-14T03:06:01Z"), 1).unwrap();

@@ -48,6 +48,8 @@ mod plans;
 mod protocol;
 #[cfg(feature = "refine")]
 mod refine;
+#[cfg(feature = "reflection")]
+mod reflection;
 #[cfg(feature = "self-debug")]
 mod runlog;
 mod sandbox;

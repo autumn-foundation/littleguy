@@ -392,9 +392,12 @@ deliver = "web"                 # where news goes: the web chat, for now
 # prompt = "..."                # the instruction of each tick
 ```
 
-A tick is read-only, as the brief is: it can file ideas, add notes and
-propose goals, but it cannot act outside or write anything that people
-see. When it has news, the answer waits in the web chat, labelled
+A tick runs with no one present. Its own bookkeeping persists: it can
+file ideas, add notes to them, propose goals and book wakes. The
+workspace is read-only on a tick: `write_file` and `delete_file` are
+refused there with "this run may only read data", rather than answering
+success for a change that the engine would not keep. It cannot act
+outside or write anything that people see. When it has news, the answer waits in the web chat, labelled
 "littleguy, on its own". The heartbeat and the morning brief share the
 engine timer, and a brief slot always comes first.
 [ADR 0021](docs/adr/0021-the-heartbeat.md) explains the design.

@@ -98,9 +98,9 @@ async fn the_file_tools_need_a_workspace() {
         effects,
         [
             ToolEffect::ReadOnly,
-            ToolEffect::Internal,
+            ToolEffect::Write,
             ToolEffect::ReadOnly,
-            ToolEffect::Internal
+            ToolEffect::Write
         ]
     );
 }

@@ -3712,6 +3712,7 @@ name = "littleguy-stores"
 version = "0.1.0"
 dependencies = [
  "autumn-harvest-agent",
+ "autumn-harvest-sqlite",
  "proptest",
  "rusqlite",
  "serde",

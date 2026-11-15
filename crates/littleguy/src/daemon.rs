@@ -2765,6 +2765,26 @@ mod tests {
                 .collect()
         }
 
+        /// The answer to a tool result: the text of a read, the output of
+        /// a run, a plain text result, or the whole result of a run-log
+        /// tool.
+        fn echo(result: &serde_json::Value) -> Option<String> {
+            let ran = result["stdout"]
+                .as_str()
+                .map(|out| format!("ran: {}", out.trim()));
+            let said = result.as_str().map(|text| format!("got: {text}"));
+            let logged = ["runs", "failures", "models"]
+                .iter()
+                .any(|key| result.get(key).is_some())
+                .then(|| format!("log: {result}"));
+            result["text"]
+                .as_str()
+                .map(str::to_owned)
+                .or(ran)
+                .or(said)
+                .or(logged)
+        }
+
         fn reply(request: &autumn_harvest_agent::ChatRequest) -> autumn_harvest_agent::ContentPart {
             use autumn_harvest_agent::{ChatRole, ContentPart};
             let system = request
@@ -2806,13 +2826,7 @@ mod tests {
                         }
                         _ => None,
                     })
-                    .and_then(|result| {
-                        let ran = result["stdout"]
-                            .as_str()
-                            .map(|out| format!("ran: {}", out.trim()));
-                        let said = result.as_str().map(|text| format!("got: {text}"));
-                        result["text"].as_str().map(str::to_owned).or(ran).or(said)
-                    });
+                    .and_then(|result| Self::echo(&result));
                 return ContentPart::Text(read.unwrap_or_else(|| String::from("noted")));
             }
             let file_call = |name: &str, arguments: serde_json::Value| ContentPart::ToolCall {
@@ -3346,6 +3360,51 @@ mod tests {
         assert_eq!(shown_text(&[0xff, 0xfe]), None);
         assert_eq!(shown_text(&vec![b'a'; MAX_SHOWN_BYTES + 1]), None);
         assert!(shown_text(&vec![b'a'; MAX_SHOWN_BYTES]).is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_assistant_reads_its_own_runs_and_usage_but_no_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "my secret is plum"))
+            .await;
+        let runs = daemon
+            .handle_request(UID, request("r-2", "use recent_runs {\"limit\": 5}"))
+            .await;
+        let runs: serde_json::Value =
+            serde_json::from_str(reply_text(&runs).strip_prefix("log: ").unwrap()).unwrap();
+        let first = &runs["runs"][0];
+        assert!(first["workflow"].is_string(), "{runs}");
+        assert!(first["state"].is_string(), "{runs}");
+        assert!(first["started"].is_string(), "{runs}");
+        assert!(
+            !runs.to_string().contains("plum"),
+            "a run shows no message: {runs}"
+        );
+
+        let usage = daemon
+            .handle_request(UID, request("r-3", "use model_usage {\"hours\": 1}"))
+            .await;
+        let usage: serde_json::Value =
+            serde_json::from_str(reply_text(&usage).strip_prefix("log: ").unwrap()).unwrap();
+        let calls: i64 = usage["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["calls"].as_i64().unwrap())
+            .sum();
+        assert!(
+            calls >= 4,
+            "each model turn so far is in the ledger: {usage}"
+        );
+
+        let failed = daemon
+            .handle_request(UID, request("r-4", "use failed_attempts {}"))
+            .await;
+        assert_eq!(reply_text(&failed), "log: {\"failures\":[]}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

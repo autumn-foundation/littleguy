@@ -20,6 +20,9 @@
 //!
 //! The file also keeps each tool call that waits for an approval
 //! ([`approvals`]).
+//!
+//! [`RunLog`] is the one reader of `lg.db` itself. It opens the file read
+//! only, so the runtime stays its one writer.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -34,8 +37,10 @@ use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub mod approvals;
+pub mod runlog;
 
 pub use approvals::{ApprovalRecord, Claim, Verdict};
+pub use runlog::RunLog;
 
 /// The schema version that [`SqliteStores::open`] writes.
 pub const SCHEMA_VERSION: i64 = 3;

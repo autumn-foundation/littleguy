@@ -76,6 +76,47 @@ fn a_memory_edit_survives_a_reopen() {
     assert!(other.iter().all(|block| block.entries.is_empty()));
 }
 
+/// The size of each block of the test scope, by label.
+fn limits(store: &SqliteStores) -> Vec<(String, usize)> {
+    now(MemoryStore::load(store, &scope()))
+        .unwrap()
+        .into_iter()
+        .map(|block| (block.label, block.limit_chars))
+        .collect()
+}
+
+#[test]
+fn set_limits_sizes_new_and_stored_blocks_and_never_drops_an_entry() {
+    let store = SqliteStores::open_in_memory().unwrap();
+    // A new scope takes the configured sizes.
+    store
+        .set_limits(&[("memory", 16_000), ("user", 4_000)])
+        .unwrap();
+    assert_eq!(
+        limits(&store),
+        [
+            (String::from("memory"), 16_000),
+            (String::from("user"), 4_000)
+        ]
+    );
+    // A stored scope grows, and an edit that the old size refused now fits.
+    let long = "x".repeat(3_000);
+    now(store.apply(&scope(), add(&long), &EditKey::new("k1"))).unwrap();
+    store.set_limits(&[("memory", 20_000)]).unwrap();
+    assert_eq!(limits(&store)[0], (String::from("memory"), 20_000));
+    assert_eq!(
+        limits(&store)[1],
+        (String::from("user"), 4_000),
+        "unnamed keeps"
+    );
+    // A smaller size stops at what the entries use, so nothing is lost.
+    store.set_limits(&[("memory", 100)]).unwrap();
+    assert_eq!(limits(&store)[0], (String::from("memory"), 3_000));
+    assert_eq!(entries(&store), [long]);
+    let full = now(store.apply(&scope(), add("one more"), &EditKey::new("k2")));
+    assert!(full.is_err(), "the block is full at its floor");
+}
+
 #[test]
 fn an_edit_key_applies_once() {
     let store = SqliteStores::open_in_memory().unwrap();

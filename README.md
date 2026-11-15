@@ -194,7 +194,15 @@ enabled = true                  # false keeps no notes
 consolidate = "0 3 * * *"       # cron, in the time zone below
 timezone = "Europe/London"      # IANA name; the default is UTC
 reflect = true                  # after a pass, file ideas from what it learned
+memory_chars = 16000            # the size of the `memory` block
+user_chars = 4000               # the size of the `user` block
 ```
+
+Both blocks go into every model call, about a token for each four
+characters. The engine default of 2,200 characters fills in a day, so
+littleguy starts at 16,000 and 4,000. Set any size but 0. A reload
+resizes the blocks at once, and a smaller size never drops an entry: a
+block keeps at least what it holds.
 
 After each pass that learned something, littleguy reflects once: it reads
 its notes and files [ideas](#goals-and-ideas) for anything worth planning

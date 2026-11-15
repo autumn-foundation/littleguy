@@ -123,6 +123,13 @@ impl Kit {
             } else {
                 None
             };
+        // The configured block sizes, for new scopes and the stored ones.
+        if let Some(stores) = &stores {
+            stores.set_limits(&[
+                ("memory", config.memory.memory_chars),
+                ("user", config.memory.user_chars),
+            ])?;
+        }
         let delivery = config
             .brief
             .as_ref()

@@ -3975,6 +3975,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn the_memory_blocks_take_their_size_from_the_config_and_a_reload() {
+        use autumn_harvest_agent::memory::{MemoryScope, MemoryStore};
+        /// The size of each block of `scope`, in order.
+        async fn sizes(stores: &SqliteStores, scope: &MemoryScope) -> Vec<usize> {
+            MemoryStore::load(stores, scope)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|block| block.limit_chars)
+                .collect()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut sized = config();
+        sized.memory.memory_chars = 9_000;
+        sized.memory.user_chars = 3_000;
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &sized,
+            Arc::new(OfflineModel::new()),
+            UID,
+            false,
+        )
+        .unwrap();
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let scope = MemoryScope::new("agent:test");
+        assert_eq!(sizes(&stores, &scope).await, [9_000, 3_000]);
+        let mut bigger = sized;
+        bigger.memory.memory_chars = 30_000;
+        daemon.reload(bigger).unwrap();
+        assert_eq!(sizes(&stores, &scope).await, [30_000, 3_000]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn files_off_gives_no_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("lg.db");

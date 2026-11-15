@@ -1,0 +1,42 @@
+# littleguy in a container (see "Run it in a container" in the README).
+#
+#   docker compose up -d --build
+#   docker compose exec lg lg ui        # a sign-in link for the pages
+#   docker compose exec lg lg chat "hi"
+#
+# The keys come from your shell by name. This file holds no value.
+
+services:
+  lg:
+    build: .
+    image: littleguy:local
+    command: ["serve", "--model", "${LG_MODEL:-offline}"]
+    environment:
+      - LG_MODEL_NAME
+      - OPENROUTER_API_KEY
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      - LG_BRAVE_API_KEY
+      - DISCORD_BOT_TOKEN
+      - SLACK_BOT_TOKEN
+      - SLACK_APP_TOKEN
+    volumes:
+      - lg-data:/data
+    # The pages serve on the loopback address of the container only. The
+    # forwarder below shares its network, and this port reaches the
+    # forwarder from the loopback address of this machine only. A port other
+    # than 3004 needs the same port in `[ui] bind` of lg.toml.
+    ports:
+      - "127.0.0.1:${LG_PAGES_PORT:-3004}:3005"
+    restart: unless-stopped
+
+  pages:
+    image: littleguy:local
+    network_mode: service:lg
+    entrypoint: ["socat", "TCP-LISTEN:3005,fork,reuseaddr", "TCP:127.0.0.1:${LG_PAGES_PORT:-3004}"]
+    depends_on:
+      - lg
+    restart: unless-stopped
+
+volumes:
+  lg-data:

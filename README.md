@@ -265,7 +265,7 @@ littleguy keeps **ideas**, things to plan and research, and **goals**,
 things to do. It files an idea when you mention something worth exploring,
 or when it notices one, and it adds research notes to it. When an idea is
 worth doing, it proposes a goal. A proposed goal does nothing until you
-accept it on the **Workspace** page, as a refine overlay does nothing until
+accept it on the **Goals** tab of the Workspace page, as a refine overlay does nothing until
 you activate it. An accepted goal can ask for a check every so often, and
 littleguy notes its progress and marks it done.
 

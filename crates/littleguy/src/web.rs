@@ -159,25 +159,43 @@ pub fn routes(plan: &Plan) -> Vec<autumn_web::Route> {
 /// The app of `plan`, with no lifecycle hooks. Tests build it too.
 #[must_use]
 pub fn app(web: Web, plan: &Plan) -> AppBuilder {
-    autumn_web::app()
+    let app = autumn_web::app()
         .with_config_loader(Fixed(settings(plan)))
         .with_telemetry_provider(Quiet)
         .routes(routes(plan))
-        .state_initializer(move |state| state.insert_extension(web))
+        .state_initializer(move |state| state.insert_extension(web));
+    with_assets(app, plan)
+}
+
+/// Gives `app` the script and style of the pages, when the pages serve. A
+/// public bind serves hooks only (ADR 0015), so it serves no files either.
+#[must_use]
+pub fn with_assets(app: AppBuilder, plan: &Plan) -> AppBuilder {
+    if plan.pages {
+        app.plugin(pages::Assets)
+    } else {
+        app
+    }
 }
 
 /// Runs `daemon` as a task of the app, and the app until a signal stops
 /// it. The app stops the daemon first, so the runtime closes cleanly.
+///
+/// The daemon starts in a startup hook. autumn-web starts to wait for the
+/// stop signals before it runs the hooks. So once the daemon answers, a
+/// SIGTERM stops the app cleanly and does not kill the process.
 ///
 /// # Errors
 ///
 /// Returns an error when the job loop fails.
 pub async fn serve<F>(web: Web, plan: &Plan, daemon: F) -> anyhow::Result<()>
 where
-    F: FnOnce(Arc<Notify>) -> JoinHandle<anyhow::Result<()>>,
+    F: FnOnce(Arc<Notify>) -> JoinHandle<anyhow::Result<()>> + Send + 'static,
 {
     let stop = Arc::new(Notify::new());
-    let task = Arc::new(Mutex::new(Some(daemon(Arc::clone(&stop)))));
+    let task: Arc<Mutex<Option<JoinHandle<anyhow::Result<()>>>>> = Arc::new(Mutex::new(None));
+    let start = Mutex::new(Some(daemon));
+    let (start_stop, start_task) = (Arc::clone(&stop), Arc::clone(&task));
     let (hook_stop, hook_task) = (Arc::clone(&stop), Arc::clone(&task));
     if plan.pages {
         tracing::info!(url = %base_url(plan.bind), "the pages serve; run `lg ui` to sign in");
@@ -187,6 +205,15 @@ where
     }
     Box::pin(
         app(web, plan)
+            .on_startup(move |_state| {
+                // The hook is `Fn`, and the daemon starts once.
+                let daemon = start.lock().unwrap_or_else(PoisonError::into_inner).take();
+                if let Some(daemon) = daemon {
+                    let running = daemon(Arc::clone(&start_stop));
+                    *start_task.lock().unwrap_or_else(PoisonError::into_inner) = Some(running);
+                }
+                async { Ok(()) }
+            })
             .on_shutdown(move || {
                 let stop = Arc::clone(&hook_stop);
                 let task = Arc::clone(&hook_task);

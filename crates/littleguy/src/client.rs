@@ -8,7 +8,9 @@ use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use crate::protocol::{ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response};
+use crate::protocol::{
+    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response, Speaker, Turn,
+};
 
 /// A fresh message id: the clock in nanoseconds and the process id.
 #[must_use]
@@ -138,8 +140,27 @@ pub fn render(response: &Response) -> (String, bool) {
             restart,
             profile,
         } => (render_reload(applied, restart, profile), true),
+        Response::History { turns } => (render_history(turns), true),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// One block per turn, oldest first.
+fn render_history(turns: &[Turn]) -> String {
+    if turns.is_empty() {
+        return String::from("no conversation yet");
+    }
+    turns
+        .iter()
+        .map(|turn| {
+            let who = match turn.from {
+                Speaker::Person => "you",
+                Speaker::Assistant => "littleguy",
+            };
+            format!("{who}: {}", turn.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The sections a reload applied, and the sections that wait.

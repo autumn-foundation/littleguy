@@ -5,7 +5,10 @@
 //! and answers with the section that it changed. So the pages hold no state
 //! of their own, and they can do nothing that `lg` cannot.
 
+use autumn_plugin_markstream::{Markstream, Mode, markstream_head};
 use autumn_web::AppState;
+use autumn_web::app::AppBuilder;
+use autumn_web::assets::PluginAssets;
 use autumn_web::htmx::HTMX_JS_PATH;
 use autumn_web::prelude::*;
 use autumn_web::reexports::axum::http::StatusCode;
@@ -17,7 +20,8 @@ use serde::Deserialize;
 use super::Web;
 use crate::client::render;
 use crate::protocol::{
-    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response as Answer,
+    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response as Answer, Speaker,
+    Turn,
 };
 
 /// The session key that marks the owner.
@@ -26,18 +30,44 @@ pub const OWNER_KEY: &str = "lg.owner";
 /// The text for a browser with no owner session.
 const SIGN_IN: &str = "Run `lg ui` on this machine and open the link that it prints.";
 
-/// The style of every page. It is small, so it sits in the page.
-const STYLE: &str = "body{font-family:system-ui,sans-serif;max-width:52rem;margin:2rem auto;\
-padding:0 1rem;line-height:1.5}section{border-top:1px solid #8884;padding:.5rem 0 1rem}\
-ul{padding-left:1.2rem}pre{white-space:pre-wrap;background:#8881;padding:.5rem}\
-textarea{width:100%}.note{color:#666}.error{color:#b00}button{margin-left:.3rem}";
+/// The script of the chat.
+const CHAT_JS: &str = "chat.js";
+
+/// The style of every page.
+const STYLE_CSS: &str = "lg.css";
+
+/// The script and the style of the pages. The binary holds them, and the app
+/// serves them from memory with a hashed URL. The page CSP allows no inline
+/// script, so the chat script is a file.
+static ASSETS: PluginAssets = PluginAssets::from_files(
+    "littleguy",
+    &[
+        (CHAT_JS, include_bytes!("assets/chat.js")),
+        (STYLE_CSS, include_bytes!("assets/lg.css")),
+    ],
+);
+
+/// Installs the assets of the pages: their own, and the markdown renderer.
+#[derive(Debug, Clone, Copy)]
+pub struct Assets;
+
+impl autumn_web::plugin::Plugin for Assets {
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("littleguy-pages")
+    }
+
+    fn build(self, app: AppBuilder) -> AppBuilder {
+        app.plugin_assets(&ASSETS)
+            .plugin(autumn_plugin_markstream::MarkstreamPlugin::new())
+    }
+}
 
 /// The routes of the pages.
 #[must_use]
 pub fn routes() -> Vec<autumn_web::Route> {
     routes![
-        index, login, logout, chat, approvals, approve, deny, pairs, pair, unpair, overlays,
-        overlay, propose, activate, rollback,
+        index, manage, login, logout, chat, approvals, approve, deny, pairs, pair, unpair,
+        overlays, overlay, propose, activate, rollback,
     ]
 }
 
@@ -59,7 +89,7 @@ fn unsigned(fragment: bool) -> Response {
         page(
             "Sign in",
             None,
-            &html! { h1 { "littleguy" } p { (SIGN_IN) } },
+            &html! { div.signin { h1 { "littleguy" } p { (SIGN_IN) } } },
         )
     };
     (StatusCode::UNAUTHORIZED, body).into_response()
@@ -84,8 +114,10 @@ fn page(title: &str, csrf: Option<&str>, body: &Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) " - littleguy" }
-                style { (STYLE) }
+                (ASSETS.stylesheet_tag(STYLE_CSS))
+                (markstream_head())
                 script src=(HTMX_JS_PATH) defer {}
+                (ASSETS.deferred_script_tag(CHAT_JS))
             }
             body hx-headers=[headers] { (body) }
         }
@@ -109,9 +141,89 @@ fn note(answer: &Answer) -> Markup {
     html! { p class=(class) { (text) } }
 }
 
-/// The page of the owner: chat, approvals, pairing, refine and connections.
+/// The bar on top of each page of the owner, with `current` marked.
+fn bar(csrf: &str, current: &str) -> Markup {
+    let mark = |path: &str| (path == current).then_some("page");
+    html! {
+        header.bar {
+            h1 { a href="/" { "littleguy" } }
+            nav {
+                a href="/" aria-current=[mark("/")] { "Chat" }
+                a href="/manage" aria-current=[mark("/manage")] { "Manage" }
+                form method="post" action="/logout" {
+                    input type="hidden" name="_csrf" value=(csrf);
+                    button type="submit" { "Sign out" }
+                }
+            }
+        }
+    }
+}
+
+/// One turn of the thread. The assistant writes markdown, so its turn
+/// renders as markdown, and raw HTML in it shows as text. A person's turn
+/// shows as it was typed.
+fn turn(turn: &Turn) -> Markup {
+    match turn.from {
+        Speaker::Person => html! { div.msg.you { div.body { (turn.text) } } },
+        Speaker::Assistant => answer_turn(&turn.text, true),
+    }
+}
+
+/// One answer of the assistant, or an error in its place.
+fn answer_turn(text: &str, ok: bool) -> Markup {
+    if ok {
+        let markdown = Markstream::new(text)
+            .mode(Mode::Chat)
+            .class("markstream body");
+        html! { div.msg.lg { (markdown) } }
+    } else {
+        html! { div.msg.lg.error { div.body { (text) } } }
+    }
+}
+
+/// The page of the owner: the conversation, and the box to write in.
 #[get("/")]
 async fn index(State(state): State<AppState>, session: Session, csrf: CsrfToken) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(false);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let history = ask(&web, Request::History).await;
+    let body = html! {
+        (bar(csrf.token(), "/"))
+        main.chat {
+            div #scroller {
+                div #thread aria-live="polite" {
+                    @match &history {
+                        Answer::History { turns } if turns.is_empty() => p.empty { "Say hi to littleguy." },
+                        Answer::History { turns } => @for each in turns { (turn(each)) },
+                        other => (note(other)),
+                    }
+                }
+                div #thinking aria-hidden="true" {
+                    span.dot {} span.dot {} span.dot {}
+                    span.label { "littleguy is thinking…" }
+                }
+            }
+            div.composer-wrap {
+                form #composer hx-post="/chat" hx-target="#thread" hx-swap="beforeend"
+                    hx-indicator="#thinking" hx-disabled-elt="find button" {
+                    textarea name="text" rows="1" required aria-label="Message"
+                        placeholder="Message littleguy" {}
+                    button type="submit" { "Send" }
+                }
+                p.hint { "Enter sends · Shift+Enter adds a line" }
+            }
+        }
+    };
+    page("Chat", Some(csrf.token()), &body).into_response()
+}
+
+/// The page of approvals, pairing, refine and connections.
+#[get("/manage")]
+async fn manage(State(state): State<AppState>, session: Session, csrf: CsrfToken) -> Response {
     if !is_owner(&session).await {
         return unsigned(false);
     }
@@ -123,27 +235,15 @@ async fn index(State(state): State<AppState>, session: Session, csrf: CsrfToken)
     let overlays = overlays_section(&web, None).await;
     let connections = connections_section(&web).await;
     let body = html! {
-        header {
-            h1 { "littleguy" }
-            form method="post" action="/logout" {
-                input type="hidden" name="_csrf" value=(csrf.token());
-                button type="submit" { "Sign out" }
-            }
+        (bar(csrf.token(), "/manage"))
+        main.manage {
+            (approvals)
+            (pairs)
+            (overlays)
+            (connections)
         }
-        section {
-            h2 { "Chat" }
-            form hx-post="/chat" hx-target="#answer" hx-disabled-elt="button" {
-                textarea name="text" rows="3" required aria-label="Message" {}
-                button type="submit" { "Send" }
-            }
-            div #answer {}
-        }
-        (approvals)
-        (pairs)
-        (overlays)
-        (connections)
     };
-    page("Home", Some(csrf.token()), &body).into_response()
+    page("Manage", Some(csrf.token()), &body).into_response()
 }
 
 /// The form of a sign-in link.
@@ -208,8 +308,7 @@ async fn chat(
     };
     let answer = ask(&web, request).await;
     let (text, ok) = render(&answer);
-    let class = if ok { "reply" } else { "error" };
-    html! { pre class=(class) { (text) } }.into_response()
+    answer_turn(&text, ok).into_response()
 }
 
 /// The approvals section, with `notice` on top.

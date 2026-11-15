@@ -230,8 +230,14 @@ fn a_link_from_lg_ui_signs_a_browser_in() -> TestResult {
     let (head, body) = get(paths.port, "/", Some(&session))?;
     assert!(head.starts_with("HTTP/1.1 200"), "{head}");
     assert!(
+        body.contains("id=\"composer\""),
+        "the home page is the chat"
+    );
+    let (head, body) = get(paths.port, "/manage", Some(&session))?;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(
         body.contains("Approvals"),
-        "the home page lists the approvals"
+        "the manage page lists the approvals"
     );
     let (again, _) = get(paths.port, path, None)?;
     assert!(again.starts_with("HTTP/1.1 403"), "a link works once");

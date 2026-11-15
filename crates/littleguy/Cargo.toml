@@ -48,6 +48,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio-util = { version = "0.7", optional = true }
+autumn-plugin-markstream = "0.3"
 
 [features]
 default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine"]

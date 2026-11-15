@@ -4,6 +4,10 @@
 //! JSON object tagged by `kind`. The socket is local and private, so the
 //! protocol has no version field yet. The client and the daemon ship in one
 //! binary.
+//!
+//! Other programs of the same user read it too, such as a table that runs
+//! each character as an `lg serve`. So a new field is optional: an older
+//! reader ignores it, and a reply from an older daemon leaves it out.
 
 use serde::{Deserialize, Serialize};
 
@@ -313,6 +317,22 @@ pub struct PairEntry {
     pub source: String,
 }
 
+/// What one op spent: the model calls that its drive recorded in the cost
+/// ledger.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    /// The model calls.
+    pub calls: u64,
+    /// The input tokens.
+    pub input_tokens: u64,
+    /// The output tokens.
+    pub output_tokens: u64,
+    /// The cost of the priced calls, in millionths of a US dollar.
+    pub cost_usd_micros: u64,
+    /// The calls with no price. When it is not zero, the cost is a floor.
+    pub unpriced_calls: u64,
+}
+
 /// The answer of the daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -321,6 +341,10 @@ pub enum Response {
     Reply {
         /// The answer text.
         text: String,
+        /// What the op spent, from the cost ledger. A daemon that does not
+        /// report it, and a reply after an approval, leave it out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
     },
     /// The message id was delivered before. Nothing ran again.
     Duplicate {
@@ -494,6 +518,7 @@ mod tests {
     fn a_response_carries_its_kind() {
         let json = serde_json::to_value(Response::Reply {
             text: String::from("hi"),
+            usage: None,
         })
         .unwrap();
         assert_eq!(json, serde_json::json!({"kind": "reply", "text": "hi"}));
@@ -501,9 +526,35 @@ mod tests {
         assert_eq!(
             back,
             Response::Reply {
-                text: String::from("hi")
+                text: String::from("hi"),
+                usage: None,
             }
         );
+    }
+
+    #[test]
+    fn a_reply_carries_its_usage_on_the_wire() {
+        let usage = Usage {
+            calls: 2,
+            input_tokens: 1830,
+            output_tokens: 212,
+            cost_usd_micros: 4100,
+            unpriced_calls: 0,
+        };
+        let json = serde_json::to_value(Response::Reply {
+            text: String::from("hi"),
+            usage: Some(usage),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "reply", "text": "hi", "usage": {
+                "calls": 2, "input_tokens": 1830, "output_tokens": 212,
+                "cost_usd_micros": 4100, "unpriced_calls": 0,
+            }})
+        );
+        let back: Response = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, Response::Reply { usage: Some(read), .. } if read == usage));
     }
 
     #[test]

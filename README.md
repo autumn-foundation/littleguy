@@ -679,6 +679,13 @@ The socket has mode 0600. The daemon also reads the peer credentials of each
 connection. Only the user who runs the daemon reaches the assistant from the
 socket, and only that user may pair, list or unpair.
 
+A `reply` on the socket carries the `usage` of its op: the model calls that
+its drive recorded in the cost ledger, their tokens, the cost of the priced
+calls in millionths of a dollar, and the count of unpriced calls. A program
+that drives the assistant over the socket can cap its spend with it. A
+`duplicate` ran nothing, so it has no usage. A reply after an approval spans
+two drives, so it leaves the usage out.
+
 On Discord and Slack, a sender reaches the assistant when the config file allows them
 or a pairing code added them. Anyone else gets a code, or nothing when
 `pairing = false`. The routing kernel makes each decision, and

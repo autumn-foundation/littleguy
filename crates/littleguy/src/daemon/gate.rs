@@ -254,7 +254,8 @@ impl Daemon {
             || Response::NoAnswer {
                 reason: String::from("the op ended without an answer"),
             },
-            |text| Response::Reply { text },
+            // The op ran over two drives, so its usage is not known here.
+            |text| Response::Reply { text, usage: None },
         ))
     }
 
@@ -314,7 +315,7 @@ impl Daemon {
         channel: &str,
     ) {
         match self.resume(record).await {
-            Ok(Response::Reply { text } | Response::NoAnswer { reason: text }) => {
+            Ok(Response::Reply { text, .. } | Response::NoAnswer { reason: text }) => {
                 if let Err(error) = self.chats.send(service, channel, &text).await {
                     tracing::warn!(%error, "the answer of a request did not go out");
                 }

@@ -61,7 +61,7 @@ pub async fn send(socket: &Path, request: &Request) -> Result<Response> {
 )]
 pub fn render(response: &Response) -> (String, bool) {
     match response {
-        Response::Reply { text } => (text.clone(), true),
+        Response::Reply { text, .. } => (text.clone(), true),
         Response::Duplicate { last_answer } => (
             format!(
                 "(already delivered) {}",
@@ -355,6 +355,7 @@ mod tests {
     fn only_an_answer_or_a_duplicate_succeeds() {
         let reply = Response::Reply {
             text: String::from("hi"),
+            usage: None,
         };
         assert_eq!(render(&reply), (String::from("hi"), true));
         assert!(render(&Response::Duplicate { last_answer: None }).1);

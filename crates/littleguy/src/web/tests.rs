@@ -739,11 +739,9 @@ async fn the_workspace_page_lists_the_files_and_opens_one() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        saved,
-        Response::Reply {
-            text: String::from("saved")
-        }
+    assert!(
+        matches!(&saved, Response::Reply { text, .. } if text == "saved"),
+        "{saved:?}"
     );
     rig.handle
         .ask(Request::Chat {
@@ -846,11 +844,9 @@ async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {
             })
             .await
             .unwrap();
-        assert_eq!(
-            answer,
-            Response::Reply {
-                text: String::from("saved")
-            }
+        assert!(
+            matches!(&answer, Response::Reply { text, .. } if text == "saved"),
+            "{answer:?}"
         );
     }
 
@@ -944,11 +940,9 @@ async fn the_owner_accepts_and_retires_a_skill_on_the_skills_tab() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        drafted,
-        Response::Reply {
-            text: String::from("saved")
-        }
+    assert!(
+        matches!(&drafted, Response::Reply { text, .. } if text == "saved"),
+        "{drafted:?}"
     );
 
     // Every tab counts the draft. The skills tab opens it as a document.

@@ -3222,9 +3222,10 @@ mod tests {
         let last = turns.last().unwrap();
         assert_eq!(last.from, Speaker::Unprompted);
         assert_eq!(last.text, "ok: check in");
+        // The message prints no turn, so a failure logs no conversation.
         assert!(
             !turns.iter().any(|turn| turn.text.contains("[littleguy")),
-            "a tick prompt never shows: {turns:?}"
+            "a tick prompt shows in the history"
         );
     }
 

@@ -719,6 +719,12 @@ that drives the assistant over the socket can cap its spend with it. A
 `duplicate` ran nothing, so it has no usage. A reply after an approval spans
 two drives, so it leaves the usage out.
 
+A `chat_stream` request is a `chat` that also gets the answer while the model
+writes it: a `{"kind": "delta", "text": ...}` line for each piece, and a
+`{"kind": "restart"}` line when a new model call starts, then the response
+line. The pieces are a preview, as on the web page. The response line is the
+answer that counts. A plain `chat` still gets one line.
+
 On Discord and Slack, a sender reaches the assistant when the config file allows them
 or a pairing code added them. Anyone else gets a code, or nothing when
 `pairing = false`. The routing kernel makes each decision, and

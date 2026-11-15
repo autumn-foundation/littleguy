@@ -67,6 +67,9 @@ pub(super) struct Kit {
     /// What the precheck decided for the last heartbeat, for the tick log.
     #[cfg(feature = "heartbeat")]
     pub(super) verdict: Arc<crate::wake::Verdict>,
+    /// The skills folder that the skill tools read, set at each sync.
+    #[cfg(feature = "skills")]
+    pub(super) skills_dir: crate::plans::SkillsDir,
 }
 
 /// The parts of the daemon that a config shapes.
@@ -119,6 +122,8 @@ impl Kit {
                 &self.stores()?,
                 #[cfg(feature = "followups")]
                 &self.wake_links,
+                #[cfg(feature = "skills")]
+                &self.skills_dir,
             ));
         }
         tracing::info!(tools = ?tools.names(), "the assistant tools");

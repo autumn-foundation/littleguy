@@ -127,6 +127,32 @@ fn idea_json(idea: &Idea) -> Value {
     })
 }
 
+/// The skills folder, which the daemon sets at each sync of the skills. The
+/// skill tools read it at each call, so a reload or a default folder that
+/// comes after the tools reaches them.
+#[cfg(feature = "skills")]
+#[derive(Debug, Clone, Default)]
+pub struct SkillsDir(Arc<std::sync::RwLock<Option<std::path::PathBuf>>>);
+
+#[cfg(feature = "skills")]
+impl SkillsDir {
+    /// Sets the folder.
+    pub fn set(&self, dir: Option<std::path::PathBuf>) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+    }
+
+    /// The folder now.
+    fn get(&self) -> Option<std::path::PathBuf> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// What the wake tools share with the daemon.
 #[cfg(feature = "followups")]
 #[derive(Debug, Clone)]
@@ -169,7 +195,7 @@ fn list_plans_description() -> String {
         what.push("wakes");
     }
     if cfg!(feature = "skills") {
-        what.push("skill drafts");
+        what.push("skills and skill drafts");
     }
     let last = what.pop().unwrap_or_default();
     let mut text = if what.is_empty() {
@@ -198,17 +224,22 @@ fn list_plans_description() -> String {
 pub fn tools(
     stores: &Arc<SqliteStores>,
     #[cfg(feature = "followups")] wakes: &WakeLinks,
+    #[cfg(feature = "skills")] skills: &SkillsDir,
 ) -> Vec<Arc<dyn Tool>> {
     let tools = std::iter::empty::<Arc<dyn Tool>>();
     #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
-    let tools = tools.chain(std::iter::once(list_plans(stores)));
+    let tools = tools.chain(std::iter::once(list_plans(
+        stores,
+        #[cfg(feature = "skills")]
+        skills,
+    )));
     // The goal and idea tools come right after `list_plans`.
     #[cfg(feature = "plans")]
     let tools = tools.chain(goal_tools(stores));
     #[cfg(feature = "self-debug")]
     let tools = tools.chain(std::iter::once(recent_wakes(stores)));
     #[cfg(feature = "skills")]
-    let tools = tools.chain(std::iter::once(propose_skill(stores)));
+    let tools = tools.chain(std::iter::once(propose_skill(stores, skills)));
     #[cfg(feature = "followups")]
     let tools = tools.chain(wake_tools(stores, wakes));
     // A build with none of the tool groups has no tools here.
@@ -224,14 +255,21 @@ pub fn tools(
 
 /// `list_plans`: the goals, ideas, wakes and skill drafts of this build.
 #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
-fn list_plans(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
+fn list_plans(
+    stores: &Arc<SqliteStores>,
+    #[cfg(feature = "skills")] skills: &SkillsDir,
+) -> Arc<dyn Tool> {
     let list = Arc::clone(stores);
+    #[cfg(feature = "skills")]
+    let shelf = skills.clone();
     FnTool::new(
         "list_plans",
         list_plans_description(),
         json!({"type": "object", "properties": {}}),
         move |_input| {
             let stores = Arc::clone(&list);
+            #[cfg(feature = "skills")]
+            let shelf = shelf.clone();
             async move {
                 #[cfg(any(feature = "plans", feature = "followups"))]
                 let now = now_ms();
@@ -239,6 +277,13 @@ fn list_plans(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
                 #[cfg(feature = "skills")]
                 let listing = {
                     let mut listing = listing;
+                    // The skills that load now, so a draft does not repeat one.
+                    listing["skills"] = active_skills(shelf.get().as_deref())
+                        .into_iter()
+                        .map(
+                            |(name, description)| json!({"name": name, "description": description}),
+                        )
+                        .collect();
                     listing["skill_drafts"] = stores
                         .skill_drafts()?
                         .iter()
@@ -292,28 +337,61 @@ fn list_plans(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
 
 /// `propose_skill`: a draft that the owner accepts or declines.
 #[cfg(feature = "skills")]
-fn propose_skill(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
+fn propose_skill(stores: &Arc<SqliteStores>, skills: &SkillsDir) -> Arc<dyn Tool> {
     let draft = Arc::clone(stores);
+    let shelf = skills.clone();
     FnTool::with_context(
         "propose_skill",
         "Draft a skill: know-how that you will load on demand later, written as the body \
          of a SKILL.md. Draft one when you find a way of doing something that you will \
-         need again. It does nothing until the owner accepts it on the Skills tab; tell \
-         them you drafted it. A draft with the name of an existing skill revises it.",
+         need again, and after a task that took many tool rounds, so the next time is \
+         shorter. It does nothing until the owner accepts it on the Skills tab; tell them \
+         you drafted it. Check list_plans first: a draft with the name of a skill or of a \
+         waiting draft revises it. A name close to another one is refused, so revise that \
+         one, or name it in not_a_duplicate_of when yours is a different skill.",
         object(
             &json!({
                 "name": {"type": "string", "description": "lowercase-with-dashes, for example triage-inbox."},
                 "description": {"type": "string", "description": "One line: when to load the skill."},
                 "body": {"type": "string", "description": "The know-how, in markdown."},
+                "not_a_duplicate_of": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Names of skills or drafts with a close name that you checked, and that are different skills.",
+                },
             }),
             &["name", "description", "body"],
         ),
         move |input, ctx| {
             let stores = Arc::clone(&draft);
+            let shelf = shelf.clone();
             async move {
+                let name = text(&input, "name")?.trim();
+                let checked: Vec<&str> = input["not_a_duplicate_of"]
+                    .as_array()
+                    .map(|names| names.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                let drafts = stores.skill_drafts()?;
+                let others = active_skills(shelf.get().as_deref()).into_iter().chain(
+                    drafts
+                        .into_iter()
+                        .map(|draft| (draft.name, draft.description)),
+                );
+                for (other, about) in others {
+                    if other != name
+                        && crate::skills::near(name, &other)
+                        && !checked.contains(&other.as_str())
+                    {
+                        return Err(refuse(format!(
+                            "`{name}` is close to `{other}` ({about}). To revise it, draft with \
+                             the name `{other}`. If yours is a different skill, call again with \
+                             not_a_duplicate_of: [\"{other}\"]"
+                        )));
+                    }
+                }
                 let id = stores.add_skill_draft(
                     &call_key(&ctx),
-                    text(&input, "name")?,
+                    name,
                     text(&input, "description")?,
                     text(&input, "body")?,
                     now_ms(),
@@ -324,6 +402,21 @@ fn propose_skill(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
     )
     .effect(ToolEffect::Internal)
     .shared()
+}
+
+/// The name and description of each skill that loads from `dir`. A folder
+/// that does not read has none: the check is a help, not a gate.
+#[cfg(feature = "skills")]
+fn active_skills(dir: Option<&std::path::Path>) -> Vec<(String, String)> {
+    dir.and_then(|dir| crate::skills::load(dir).ok())
+        .map(|shelf| {
+            shelf
+                .skills
+                .into_iter()
+                .map(|skill| (skill.name, skill.description))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `recent_wakes`: the tick log, newest first.
@@ -562,6 +655,8 @@ mod tests {
             &stores,
             #[cfg(feature = "followups")]
             &WakeLinks::default(),
+            #[cfg(feature = "skills")]
+            &SkillsDir::default(),
         );
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         let goals: &[&str] = if cfg!(feature = "plans") {

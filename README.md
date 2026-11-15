@@ -327,7 +327,11 @@ second: its prompt lists each name and description, and it loads a body
 when it needs one. littleguy also drafts skills for itself when it finds a
 way of doing something that it will need again. A draft waits on the
 **Skills** tab of the Workspace page; accepting it writes the `SKILL.md`.
-Retiring a skill moves its folder to `.retired/`. Skills reach the
+Retiring a skill moves its folder to `.retired/`. `list_plans` shows
+littleguy its skills and its drafts. A draft with the name of a skill or
+of a waiting draft revises it, and a name close to another one, such as
+`read-a-web-page` next to `read-a-page`, is refused unless littleguy says
+that the two differ. Skills reach the
 assistant through the refine overlay, so they need a `[refine]` section.
 [ADR 0024](docs/adr/0024-skills.md) explains the design. Skills come with
 the `skills` feature, which is on by default and needs `refine`.

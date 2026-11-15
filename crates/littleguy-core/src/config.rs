@@ -18,6 +18,8 @@
 //! consolidate = "0 3 * * *"
 //! timezone = "Europe/London"
 //! reflect = true
+//! memory_chars = 16000
+//! user_chars = 4000
 //!
 //! [brief]
 //! schedule = "30 7 * * 1-5"
@@ -208,6 +210,9 @@ pub enum ConfigError {
     /// The brief prompt is empty.
     #[error("brief.prompt must not be empty")]
     BriefPrompt,
+    /// A memory block size is 0.
+    #[error("memory.{0} must be at least 1 character")]
+    BlockSize(&'static str),
     /// The heartbeat interval is zero.
     #[error("heartbeat.every_minutes must be at least 1")]
     HeartbeatEvery,
@@ -592,7 +597,19 @@ pub struct MemoryConfig {
     /// After a consolidation pass, wake the assistant once to file ideas
     /// from what it learned. It needs the goals and ideas of `[tools]`.
     pub reflect: bool,
+    /// The size of the `memory` block, in characters. It goes into every
+    /// model call, so it costs about a token for each four characters.
+    pub memory_chars: usize,
+    /// The size of the `user` block, in characters.
+    pub user_chars: usize,
 }
+
+/// The default size of the `memory` block. The engine default is 2 200,
+/// which fills in a day.
+pub const DEFAULT_MEMORY_CHARS: usize = 16_000;
+
+/// The default size of the `user` block.
+pub const DEFAULT_USER_CHARS: usize = 4_000;
 
 impl Default for MemoryConfig {
     fn default() -> Self {
@@ -601,6 +618,8 @@ impl Default for MemoryConfig {
             consolidate: String::from(DEFAULT_CONSOLIDATE),
             reflect: true,
             timezone: String::from(DEFAULT_TIMEZONE),
+            memory_chars: DEFAULT_MEMORY_CHARS,
+            user_chars: DEFAULT_USER_CHARS,
         }
     }
 }
@@ -612,6 +631,8 @@ struct RawMemory {
     consolidate: Option<String>,
     timezone: Option<String>,
     reflect: Option<bool>,
+    memory_chars: Option<usize>,
+    user_chars: Option<usize>,
 }
 
 /// Checks the memory section. The engine checks each cron field and the
@@ -632,7 +653,18 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
         consolidate,
         timezone,
         reflect: raw.reflect.unwrap_or(defaults.reflect),
+        memory_chars: block_size("memory_chars", raw.memory_chars, defaults.memory_chars)?,
+        user_chars: block_size("user_chars", raw.user_chars, defaults.user_chars)?,
     })
+}
+
+/// A block size. The owner picks it and the model that pays for it, so
+/// any size works but 0: a block of 0 characters holds no entry.
+fn block_size(key: &'static str, raw: Option<usize>, default: usize) -> Result<usize, ConfigError> {
+    match raw.unwrap_or(default) {
+        0 => Err(ConfigError::BlockSize(key)),
+        size => Ok(size),
+    }
 }
 
 /// The default page size of the fetch tool, in characters.
@@ -2093,9 +2125,27 @@ mod tests {
                 consolidate: String::from("30 2 * * 1-5"),
                 timezone: String::from("Europe/London"),
                 reflect: false,
+                memory_chars: DEFAULT_MEMORY_CHARS,
+                user_chars: DEFAULT_USER_CHARS,
             }
         );
         assert!(Config::parse("owner = \"mark\"").unwrap().memory.reflect);
+        let sized =
+            Config::parse("owner = \"mark\"\n[memory]\nmemory_chars = 50000\nuser_chars = 8000")
+                .unwrap()
+                .memory;
+        assert_eq!((sized.memory_chars, sized.user_chars), (50_000, 8_000));
+        for zero in ["memory_chars = 0", "user_chars = 0"] {
+            assert!(matches!(
+                Config::parse(&format!("owner = \"mark\"\n[memory]\n{zero}")),
+                Err(ConfigError::BlockSize(_))
+            ));
+        }
+        // Any other size is the owner's choice.
+        let huge = Config::parse("owner = \"mark\"\n[memory]\nmemory_chars = 4000000")
+            .unwrap()
+            .memory;
+        assert_eq!(huge.memory_chars, 4_000_000);
     }
 
     #[test]

@@ -174,7 +174,8 @@ enum Source {
 /// personal data.
 pub struct SqliteStores {
     source: Mutex<Source>,
-    template: Vec<MemoryBlock>,
+    /// The blocks of a new scope. [`SqliteStores::set_limits`] sizes them.
+    template: Mutex<Vec<MemoryBlock>>,
 }
 
 impl std::fmt::Debug for SqliteStores {
@@ -222,7 +223,7 @@ impl SqliteStores {
         prepare(&shared_connection(&path)?)?;
         Ok(Self {
             source: Mutex::new(Source::Shared(path)),
-            template: MemoryBlock::defaults(),
+            template: Mutex::new(MemoryBlock::defaults()),
         })
     }
 
@@ -249,7 +250,7 @@ impl SqliteStores {
         prepare(&conn)?;
         Ok(Self {
             source: Mutex::new(Source::Held(conn)),
-            template: MemoryBlock::defaults(),
+            template: Mutex::new(MemoryBlock::defaults()),
         })
     }
 
@@ -318,6 +319,49 @@ impl SqliteStores {
     /// Runs `f` on the connection, for a read.
     fn read<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Failure>) -> Result<T, AgentError> {
         self.connected(|conn| f(conn)).map_err(Failure::into_agent)
+    }
+
+    /// Sets the size of each block that `limits` names, in characters: for
+    /// a new scope, and for every scope that the file holds. A stored block
+    /// never shrinks below what its entries use, so no entry is lost. A
+    /// block that `limits` does not name keeps its size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot write or a scope does not
+    /// decode.
+    pub fn set_limits(&self, limits: &[(&str, usize)]) -> Result<(), AgentError> {
+        let resize = |blocks: &mut Vec<MemoryBlock>, keep_used: bool| {
+            for block in blocks {
+                if let Some((_, limit)) = limits.iter().find(|(label, _)| *label == block.label) {
+                    block.limit_chars = if keep_used {
+                        (*limit).max(block.used_chars())
+                    } else {
+                        *limit
+                    };
+                }
+            }
+        };
+        resize(
+            &mut self.template.lock().unwrap_or_else(PoisonError::into_inner),
+            false,
+        );
+        self.write(|tx| {
+            let scopes: Vec<(String, String)> = {
+                let mut statement = tx.prepare("SELECT scope, blocks FROM memory_scopes")?;
+                let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            for (scope, text) in scopes {
+                let mut blocks: Vec<MemoryBlock> = decode(&text)?;
+                resize(&mut blocks, true);
+                tx.execute(
+                    "UPDATE memory_scopes SET blocks = ?2 WHERE scope = ?1",
+                    params![scope, encode(&blocks)?],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Whether a delivery sent the report with `key`.
@@ -412,7 +456,16 @@ impl SqliteStores {
                 |row| row.get(0),
             )
             .optional()?;
-        stored.map_or_else(|| Ok(self.template.clone()), |text| decode(&text))
+        stored.map_or_else(
+            || {
+                Ok(self
+                    .template
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone())
+            },
+            |text| decode(&text),
+        )
     }
 
     /// Changes the episode log of `scope` with `f`, in one transaction.

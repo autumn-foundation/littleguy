@@ -3731,6 +3731,7 @@ dependencies = [
  "littleguy-core",
  "littleguy-tools",
  "proptest",
+ "regex",
  "reqwest 0.13.5",
  "rmcp",
  "rustls",

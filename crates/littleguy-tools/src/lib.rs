@@ -8,14 +8,17 @@
 //!   the agent.
 //! - [`search_notes_tool`] finds the files of the workspace that hold some
 //!   words, so the agent can recall a note whose path it forgot.
+//! - [`grep_files_tool`] finds the lines of the workspace that match a
+//!   pattern, with their paths and line numbers, as `rg` does.
 //! - [`mcp::connect`] turns the tools of each MCP server in the config into
 //!   tools of the agent.
 //! - [`google::google_tools`] read and send Gmail, and read and add Google
 //!   Calendar events, through a token proxy.
 //!
 //! Feature `web` builds the fetch and search tools, feature `mcp` the MCP
-//! tools, feature `google` the Google tools and feature `search-notes` the
-//! note search. All four are on by default. The file tools are always on.
+//! tools, feature `google` the Google tools, feature `search-notes` the
+//! note search and feature `grep-files` the line search. All five are on by
+//! default. The file tools are always on.
 //!
 //! The web tools read only, and label their results as untrusted input,
 //! so flow rules can fence what follows them. The file tools change only
@@ -26,6 +29,8 @@ mod fetch;
 mod files;
 #[cfg(feature = "google")]
 pub mod google;
+#[cfg(feature = "grep-files")]
+mod grep;
 pub mod html;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -41,6 +46,8 @@ mod tests;
 #[cfg(feature = "web")]
 pub use fetch::{FetchTool, MAX_BODY_BYTES, MAX_REDIRECTS};
 pub use files::{MAX_READ_CHARS, file_tools};
+#[cfg(feature = "grep-files")]
+pub use grep::{DEFAULT_GREP_MATCHES, MAX_GREP_MATCHES, grep_files_tool};
 #[cfg(feature = "search-notes")]
 pub use notes::{DEFAULT_MATCHES, search_notes_tool};
 #[cfg(feature = "web")]

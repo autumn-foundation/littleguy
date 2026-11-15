@@ -247,7 +247,7 @@ in its own workspace. Each tool is on by default:
 [tools]
 web_fetch = true                # read one http or https page as text
 web_search = true               # needs LG_BRAVE_API_KEY
-files = true                    # read_file, write_file, list_files, delete_file, search_notes
+files = true                    # read_file, write_file, list_files, delete_file, search_notes, grep_files
 runs = true                     # recent_runs, failed_attempts, model_usage
 plans = true                    # goals and ideas; see below
 fetch_max_chars = 20000         # the most text of one page
@@ -263,7 +263,10 @@ fetch_max_chars = 20000         # the most text of one page
   survive a restart. A path stays inside the workspace. `search_notes`
   finds the files that hold some words, so littleguy can recall a note
   whose path it forgot. It only reads, so a heartbeat may use it. It comes
-  with the `search-notes` feature, on by default.
+  with the `search-notes` feature, on by default. `grep_files` finds the
+  lines that match a pattern, with their paths and line numbers, as `rg`
+  does, so littleguy can find where code is defined or used. It comes with
+  the `grep-files` feature, on by default.
 - `read_file` and `web_fetch` read a long text in windows. Each result
   gives the `length` of the whole text in characters, and an `offset`
   starts a window further in. An offset past the end gives an empty text

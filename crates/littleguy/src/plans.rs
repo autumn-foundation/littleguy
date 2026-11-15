@@ -8,8 +8,12 @@
 //! Every tool here is `ReadOnly` or `Internal`, so an unattended run, such as
 //! a heartbeat tick, may call each one. The texts can hold what a research
 //! read, so `list_plans` carries the `untrusted_input` label.
+//!
+//! `wake_me` books a wake: a look at something again at a later time
+//! (ADR 0023). The daemon aims the engine timer at the next one.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use autumn_harvest_agent::flow::labels;
 use autumn_harvest_agent::{AgentError, ErrorKind, FnTool, Tool, ToolContext, ToolEffect};
@@ -81,18 +85,43 @@ fn idea_json(idea: &Idea) -> Value {
     })
 }
 
+/// What the wake tools share with the daemon.
+#[derive(Debug, Clone)]
+pub struct WakeLinks {
+    /// Set when a wake is booked or cancelled. The daemon then plans again.
+    pub changed: Arc<AtomicBool>,
+    /// When a person last wrote, in epoch milliseconds. A chain of wakes
+    /// counts from there.
+    pub last_person_ms: Arc<AtomicI64>,
+}
+
+impl Default for WakeLinks {
+    /// Changed at first, so the daemon reads the wakes of an earlier start.
+    fn default() -> Self {
+        Self {
+            changed: Arc::new(AtomicBool::new(true)),
+            last_person_ms: Arc::default(),
+        }
+    }
+}
+
+/// The longest wait that `wake_me` takes, in minutes.
+const MAX_WAKE_MINUTES: i64 = littleguy_stores::wakes::MAX_AHEAD_MS / 60_000;
+
 fn object(properties: &Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required})
 }
 
-/// The goal and idea tools over `stores`.
+/// The goal, idea and wake tools over `stores`.
 #[must_use]
 #[expect(
     clippy::too_many_lines,
-    reason = "five tools, each a schema and a short body, read best in one list"
+    reason = "seven tools, each a schema and a short body, read best in one list"
 )]
-pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
+pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>> {
     let list = Arc::clone(stores);
+    let book = (Arc::clone(stores), wakes.clone());
+    let cancel = (Arc::clone(stores), wakes.clone());
     let file = Arc::clone(stores);
     let research = Arc::clone(stores);
     let propose = Arc::clone(stores);
@@ -100,18 +129,26 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
     vec![
         FnTool::new(
             "list_plans",
-            "List your goals and ideas. An active goal is yours to work on; a goal with \
-             `due` true needs a check now. A proposed goal waits for the owner to accept it. \
-             An idea is something to plan and research.",
+            "List your goals, ideas and wakes. An active goal is yours to work on; a goal \
+             with `due` true needs a check now. A proposed goal waits for the owner to accept \
+             it. An idea is something to plan and research. A wake with `due` true is one you \
+             booked with wake_me, and its time has come.",
             json!({"type": "object", "properties": {}}),
             move |_input| {
                 let stores = Arc::clone(&list);
                 async move {
                     let plans = stores.plans()?;
+                    let wakes = stores.pending_wakes()?;
                     let now = now_ms();
                     Ok(json!({
                         "goals": plans.goals.iter().map(|goal| goal_json(goal, now)).collect::<Vec<_>>(),
                         "ideas": plans.ideas.iter().map(idea_json).collect::<Vec<_>>(),
+                        "wakes": wakes.iter().map(|wake| json!({
+                            "id": wake.id,
+                            "at": time(Some(wake.at_ms)),
+                            "due": wake.at_ms <= now,
+                            "about": wake.about,
+                        })).collect::<Vec<_>>(),
                     }))
                 }
             },
@@ -232,6 +269,56 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
         )
         .effect(ToolEffect::Internal)
         .shared(),
+        FnTool::with_context(
+            "wake_me",
+            "Book a wake: you wake on your own later and look at something again, for example \
+             a deploy, a reply or a page. Say what to look at. The wake shows in list_plans. \
+             It runs read-only, as a heartbeat does.",
+            object(
+                &json!({
+                    "in_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_WAKE_MINUTES},
+                    "about": {"type": "string", "description": "What to look at, and why."},
+                }),
+                &["in_minutes", "about"],
+            ),
+            move |input, ctx| {
+                let (stores, links) = book.clone();
+                async move {
+                    let minutes = input["in_minutes"]
+                        .as_i64()
+                        .ok_or_else(|| refuse("`in_minutes` must be a whole number"))?;
+                    let now = now_ms();
+                    let at = now.saturating_add(minutes.saturating_mul(60_000));
+                    let id = stores.add_wake(
+                        &call_key(&ctx),
+                        at,
+                        text(&input, "about")?,
+                        now,
+                        links.last_person_ms.load(Ordering::SeqCst),
+                    )?;
+                    links.changed.store(true, Ordering::SeqCst);
+                    Ok(json!({"wake": id, "at": time(Some(at))}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
+        FnTool::new(
+            "cancel_wake",
+            "Cancel a wake that you booked and no longer need.",
+            object(&json!({"wake": {"type": "integer"}}), &["wake"]),
+            move |input| {
+                let (stores, links) = cancel.clone();
+                async move {
+                    let wake = id(&input, "wake")?;
+                    let cancelled = stores.cancel_wake(wake)?;
+                    links.changed.store(true, Ordering::SeqCst);
+                    Ok(json!({"wake": wake, "cancelled": cancelled}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
     ]
 }
 
@@ -242,7 +329,7 @@ mod tests {
     #[test]
     fn every_tool_is_safe_unattended_and_none_accepts() {
         let stores = Arc::new(SqliteStores::open_in_memory().unwrap());
-        let tools = tools(&stores);
+        let tools = tools(&stores, &WakeLinks::default());
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         assert_eq!(
             names,
@@ -251,7 +338,9 @@ mod tests {
                 "add_idea",
                 "research_idea",
                 "propose_goal",
-                "goal_progress"
+                "goal_progress",
+                "wake_me",
+                "cancel_wake"
             ]
         );
         for tool in &tools {

@@ -59,6 +59,8 @@ pub(super) struct Kit {
     pub(super) live: Arc<super::live::Live>,
     /// Whether the wake plan armed a brief. The brief delivery reads it.
     pub(super) brief_armed: Arc<std::sync::atomic::AtomicBool>,
+    /// What the wake tools share with the daemon.
+    pub(super) wake_links: crate::plans::WakeLinks,
 }
 
 /// The parts of the daemon that a config shapes.
@@ -107,7 +109,7 @@ impl Kit {
         .with(google);
         // The goals and ideas live in the memory store.
         if config.tools.plans {
-            tools = tools.with(crate::plans::tools(&self.stores()?));
+            tools = tools.with(crate::plans::tools(&self.stores()?, &self.wake_links));
         }
         tracing::info!(tools = ?tools.names(), "the assistant tools");
         let flow = config.flow.rules();
@@ -279,6 +281,11 @@ impl Daemon {
                     .reflect(&pass);
             }
             self.disarm = self.wake.is_none();
+            // The new plan reads the booked wakes again.
+            self.kit
+                .wake_links
+                .changed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         self.approvals = built.approvals;
         self.approver = built.approver;

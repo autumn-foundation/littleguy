@@ -269,6 +269,12 @@ accept it on the **Workspace** page, as a refine overlay does nothing until
 you activate it. An accepted goal can ask for a check every so often, and
 littleguy notes its progress and marks it done.
 
+littleguy can also book a **wake** with `wake_me`: "look at the deploy
+again in 20 minutes". At that time it wakes on its own, read-only, looks,
+and tells you only what you should know. It can book at most 10 wakes in a
+row before you write again. [ADR 0023](docs/adr/0023-wakes-that-the-assistant-books.md)
+explains the design.
+
 littleguy cannot accept, decline or drop anything; only you can. Every
 tool it has works on a run with no one present, so a later heartbeat can
 research ideas and check goals on its own. [ADR 0020](docs/adr/0020-goals-and-ideas.md)

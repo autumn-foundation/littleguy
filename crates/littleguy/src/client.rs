@@ -194,6 +194,7 @@ fn render_history(turns: &[Turn]) -> String {
             let who = match turn.from {
                 Speaker::Person => "you",
                 Speaker::Assistant => "littleguy",
+                Speaker::Unprompted => "littleguy (on its own)",
             };
             format!("{who}: {}", turn.text)
         })

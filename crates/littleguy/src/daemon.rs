@@ -42,7 +42,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::approvals::Requester;
-use crate::brief::{BriefDelivery, Calendar};
+use crate::brief::BriefDelivery;
 use crate::camel::Camel;
 use crate::chats::Chats;
 #[cfg(feature = "oauth")]
@@ -51,6 +51,7 @@ use crate::pairs::{Entry, PairStore};
 use crate::protocol::{
     MAX_REQUEST_BYTES, PairEntry, Request, Response, Speaker, Turn, WorkspaceEntry,
 };
+use crate::wake::Wake;
 
 /// The channel id of the local socket.
 pub const CLI_CHANNEL: &str = "cli";
@@ -217,6 +218,13 @@ fn shown_text(data: &[u8]) -> Option<String> {
     std::str::from_utf8(data).ok().map(str::to_owned)
 }
 
+/// How often the daemon looks for consolidation passes to reflect on.
+const PASS_LOOK_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
+
+/// How far back the daemon looks for a pass. A pass from before stays
+/// without a reflection.
+const PASS_LOOK_BACK: chrono::TimeDelta = chrono::TimeDelta::days(2);
+
 /// The seconds since the Unix epoch.
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -303,7 +311,13 @@ pub struct Daemon {
     store: PairStore,
     #[cfg(feature = "oauth")]
     connections: Option<Connections>,
-    brief: Option<Calendar>,
+    /// The plan of the brief and the heartbeat.
+    wake: Option<Wake>,
+    /// Whether the engine timer may still tick for a plan that went away.
+    /// The next arm checks once.
+    disarm: bool,
+    /// When the daemon last looked for consolidation passes to reflect on.
+    passes_seen: Option<DateTime<Utc>>,
     chats: Arc<Chats>,
     clock: Clock,
     /// The store of the calls that wait, when a call can wait.
@@ -408,6 +422,7 @@ impl Daemon {
             file: None,
             watch_every: reload::WATCH_EVERY,
             live: Arc::clone(&live),
+            brief_armed: Arc::default(),
         };
         let built = kit.assemble(config, &chats)?;
         sqlite::register(&mut rt, Arc::new(built.harness));
@@ -428,7 +443,9 @@ impl Daemon {
             store,
             #[cfg(feature = "oauth")]
             connections: None,
-            brief: built.brief,
+            wake: built.wake,
+            disarm: true,
+            passes_seen: None,
             chats,
             clock: Arc::new(Utc::now),
             approvals: built.approvals,
@@ -923,34 +940,105 @@ impl Daemon {
         Ok(Response::Unpaired { removed })
     }
 
-    /// Aims the engine timer at the next brief slot, when it needs an arm.
-    /// It returns the op key of the arm that it sent. The key names the
-    /// slot, so a slot is armed once.
+    /// Aims the engine timer at the next wake of the brief or the
+    /// heartbeat, when it needs an arm. It returns the op key of the arm
+    /// that it sent. The key names the wake, so a wake is armed once.
+    ///
+    /// With no plan, it checks once whether an earlier plan left the timer
+    /// booked, and turns it off.
     ///
     /// # Errors
     ///
     /// Returns an error when the state does not read or the runtime does
     /// not take the op.
-    pub async fn arm_brief(&mut self) -> Result<Option<String>> {
+    pub async fn arm_wake(&mut self) -> Result<Option<String>> {
         let now = (self.clock)();
         let id = self.routing.assistant().clone();
-        let Some(calendar) = self.brief.as_mut() else {
-            return Ok(None);
+        let Some(wake) = self.wake.as_mut() else {
+            if !std::mem::take(&mut self.disarm) {
+                return Ok(None);
+            }
+            // The state query replays the run, so it runs once per plan.
+            let booked = sqlite::state(&self.rt, &id)
+                .await?
+                .and_then(|state| state.next_heartbeat_ms);
+            if booked.is_none() {
+                return Ok(None);
+            }
+            let arm = crate::wake::off(now);
+            tracing::info!("no brief and no heartbeat: the engine timer stops");
+            sqlite::send(&mut self.rt, &id, &arm.op, Some(&arm.key))?;
+            return Ok(Some(arm.key));
         };
-        // The state query replays the run, so it runs only after a slot.
-        let ticks = if calendar.waits_for_tick(now) {
+        // The state query replays the run, so it runs only after a wake.
+        let ticks = if wake.waits_for_tick(now) {
             sqlite::state(&self.rt, &id)
                 .await?
                 .map_or(0, |state| state.ticks)
         } else {
             0
         };
-        let Some(arm) = calendar.arm(now, ticks) else {
+        let Some(arm) = wake.arm(now, ticks) else {
             return Ok(None);
         };
-        tracing::info!(slot = %arm.key, "the next morning brief");
+        tracing::info!(wake = %arm.key, "the next wake");
         sqlite::send(&mut self.rt, &id, &arm.op, Some(&arm.key))?;
         Ok(Some(arm.key))
+    }
+
+    /// Plans one reflection when a consolidation pass completed that no
+    /// reflection saw yet (ADR 0022). It looks at most once a minute. Each
+    /// pass counts once, also across a restart: `memory.db` keeps its key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime or the store cannot read.
+    fn notice_passes(&mut self) -> Result<()> {
+        let config = &self.kit.config;
+        if !(config.memory.enabled && config.memory.reflect && config.tools.plans) {
+            return Ok(());
+        }
+        let now = (self.clock)();
+        if self
+            .passes_seen
+            .is_some_and(|seen| now - seen < PASS_LOOK_EVERY)
+        {
+            return Ok(());
+        }
+        self.passes_seen = Some(now);
+        let Some(stores) = self.kit.stores.clone() else {
+            return Ok(());
+        };
+        let filter = autumn_harvest_sqlite::ExecutionFilter {
+            workflow_name: Some(String::from(
+                autumn_harvest_agent::consolidate::CONSOLIDATE_WORKFLOW_NAME,
+            )),
+            states: vec![String::from("COMPLETED")],
+            started_after: Some(now - PASS_LOOK_BACK),
+            limit: Some(10),
+            ..autumn_harvest_sqlite::ExecutionFilter::default()
+        };
+        let mut newest = None;
+        for pass in self.rt.list_executions(&filter)?.executions {
+            let autumn_harvest_sqlite::Stored::Value(id) = pass.exec_id else {
+                continue;
+            };
+            let key = format!("{}{id}", crate::wake::REFLECT_KEY);
+            if stores.was_sent(&key)? {
+                continue;
+            }
+            stores.mark_sent(&key)?;
+            // The listing is newest first. One reflection covers them all.
+            newest.get_or_insert(id);
+        }
+        if let Some(pass) = newest {
+            tracing::info!(%pass, "a consolidation pass ended: the assistant reflects");
+            let brief_armed = Arc::clone(&self.kit.brief_armed);
+            self.wake
+                .get_or_insert_with(|| Wake::idle(brief_armed))
+                .reflect(&pass);
+        }
+        Ok(())
     }
 
     /// Drives the assistant until it blocks, so a due timer fires. Then it
@@ -964,9 +1052,11 @@ impl Daemon {
         // and drives every run once.
         self.rt.poll_once().await?;
         let first = sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
+        // A consolidation pass that just ended plans a reflection.
+        self.notice_passes()?;
         // The arm comes after the drive, so a due brief tick runs first. A
         // second drive books the armed tick at once.
-        let run = if self.arm_brief().await?.is_some() {
+        let run = if self.arm_wake().await?.is_some() {
             sqlite::drive(&mut self.rt, self.routing.assistant()).await?
         } else {
             first
@@ -1589,29 +1679,40 @@ pub use slack::SlackInbox;
 /// turns, and a message with no text is left out.
 fn turns(transcript: &[autumn_harvest_agent::ChatMessage]) -> Vec<Turn> {
     use autumn_harvest_agent::{ChatRole, ContentPart};
-    transcript
-        .iter()
-        .filter_map(|message| {
-            let from = match message.role {
-                ChatRole::User => Speaker::Person,
-                ChatRole::Assistant => Speaker::Assistant,
-                ChatRole::System | ChatRole::Tool => return None,
-            };
-            let text: Vec<&str> = message
-                .content
-                .iter()
-                .filter_map(|part| match part {
-                    ContentPart::Text(text) => Some(text.trim()),
-                    _ => None,
-                })
-                .filter(|text| !text.is_empty())
-                .collect();
-            (!text.is_empty()).then(|| Turn {
-                from,
-                text: text.join("\n\n"),
+    let mut turns = Vec::new();
+    // A tick prompt is not a person. The next answer is the assistant on
+    // its own.
+    let mut after_tick = false;
+    for message in transcript {
+        let text: Vec<&str> = message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text(text) => Some(text.trim()),
+                _ => None,
             })
-        })
-        .collect()
+            .filter(|text| !text.is_empty())
+            .collect();
+        if text.is_empty() {
+            continue;
+        }
+        let text = text.join("\n\n");
+        let from = match message.role {
+            ChatRole::User if crate::wake::is_tick(&text) => {
+                after_tick = true;
+                continue;
+            }
+            ChatRole::User => {
+                after_tick = false;
+                Speaker::Person
+            }
+            ChatRole::Assistant if std::mem::take(&mut after_tick) => Speaker::Unprompted,
+            ChatRole::Assistant => Speaker::Assistant,
+            ChatRole::System | ChatRole::Tool => continue,
+        };
+        turns.push(Turn { from, text });
+    }
+    turns
 }
 
 #[cfg(test)]
@@ -1754,6 +1855,41 @@ mod tests {
                     from: Speaker::Assistant,
                     text: String::from("One file."),
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tick_answer_speaks_on_its_own_and_its_prompt_is_hidden() {
+        use autumn_harvest_agent::{ChatMessage, ChatRole, ContentPart};
+        let tick = format!("{}\nCheck your goals.", crate::wake::HEARTBEAT_MARK);
+        let call = ChatMessage {
+            role: ChatRole::Assistant,
+            content: vec![ContentPart::ToolCall {
+                id: String::from("c1"),
+                name: String::from("list_plans"),
+                arguments: serde_json::json!({}),
+            }],
+        };
+        let transcript = vec![
+            ChatMessage::text(ChatRole::User, "hi"),
+            ChatMessage::text(ChatRole::Assistant, "hello"),
+            ChatMessage::text(ChatRole::User, tick),
+            call,
+            ChatMessage::text(ChatRole::Tool, "{}"),
+            ChatMessage::text(ChatRole::Assistant, "Goal 1 shipped."),
+            ChatMessage::text(ChatRole::User, "nice"),
+            ChatMessage::text(ChatRole::Assistant, "thanks"),
+        ];
+        let from: Vec<Speaker> = turns(&transcript).iter().map(|turn| turn.from).collect();
+        assert_eq!(
+            from,
+            [
+                Speaker::Person,
+                Speaker::Assistant,
+                Speaker::Unprompted,
+                Speaker::Person,
+                Speaker::Assistant
             ]
         );
     }
@@ -2798,6 +2934,13 @@ mod tests {
                 .unwrap_or_default();
             let last = request.messages.last();
             let user = last.map(Self::text).unwrap_or_default();
+            // A tick prompt starts with its mark line. The model reads past it.
+            let user = if crate::wake::is_tick(&user) {
+                user.split_once('\n')
+                    .map_or_else(String::new, |(_, rest)| rest.to_owned())
+            } else {
+                user
+            };
             if system == autumn_harvest_agent::consolidate::PASS_SYSTEM {
                 let facts: Vec<serde_json::Value> = user
                     .lines()
@@ -3070,6 +3213,189 @@ mod tests {
     }
 
     #[cfg(any(feature = "discord", feature = "sandbox"))]
+    fn heartbeat_config() -> Config {
+        let mut config = config();
+        config.heartbeat = Some(littleguy_core::HeartbeatConfig {
+            every_minutes: 60,
+            quiet: None,
+            timezone: String::from("UTC"),
+            research: true,
+            deliver: littleguy_core::HeartbeatDelivery::Web,
+            prompt: String::from("check in"),
+        });
+        config
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    fn armed(daemon: &Daemon) -> Option<DateTime<Utc>> {
+        daemon
+            .wake
+            .as_ref()
+            .and_then(Wake::armed_at)
+            .map(|(at, _)| at)
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    fn utc(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_heartbeat_wakes_the_model_only_with_work_and_speaks_in_the_chat() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let hand = clock.clone();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &heartbeat_config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.tick().await.unwrap();
+        assert_eq!(armed(&daemon), Some(utc("2026-11-14T13:00:00Z")));
+
+        // No goal is due and no idea waits: the tick costs no model call.
+        clock.set("2026-11-14T13:00:01Z");
+        for _ in 0..3 {
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(armed(&daemon), Some(utc("2026-11-14T14:00:01Z")));
+
+        // An idea waits, so the next heartbeat runs, and it speaks.
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "h-1",
+                    r#"use add_idea {"title": "Docs", "body": "Links rot."}"#,
+                ),
+            )
+            .await;
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set("2026-11-14T14:00:02Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
+            panic!("no history");
+        };
+        let last = turns.last().unwrap();
+        assert_eq!(last.from, Speaker::Unprompted);
+        assert_eq!(last.text, "ok: check in");
+        // The message prints no turn, so a failure logs no conversation.
+        assert!(
+            !turns.iter().any(|turn| turn.text.contains("[littleguy")),
+            "a tick prompt shows in the history"
+        );
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_consolidation_pass_wakes_one_reflection_then_the_timer_stops() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-14T03:00:00Z");
+        let hand = clock.clone();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        assert_eq!(model.passes.load(Ordering::SeqCst), 1);
+
+        // The tick sees the pass and plans the reflection at the engine minimum.
+        daemon.tick().await.unwrap();
+        assert_eq!(armed(&daemon), Some(utc("2026-11-14T03:01:00Z")));
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set("2026-11-14T03:01:01Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
+            panic!("no history");
+        };
+        let last = turns.last().unwrap();
+        assert_eq!(last.from, Speaker::Unprompted);
+        // The assertion prints no turn, so a failure logs no conversation.
+        assert!(
+            last.text
+                .starts_with("ok: Your memory was just consolidated")
+        );
+
+        // The pass counts once, and nothing else is planned: the timer stops.
+        let after = model.calls.load(Ordering::SeqCst);
+        for minute in 3..6 {
+            clock.set(&format!("2026-11-14T03:0{minute}:30Z"));
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), after);
+        let booked = sqlite::state(&daemon.rt, daemon.assistant())
+            .await
+            .unwrap()
+            .and_then(|state| state.next_heartbeat_ms);
+        assert_eq!(booked, None);
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_heartbeat_that_goes_away_stops_the_engine_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let hand = clock.clone();
+        let config = heartbeat_config();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config,
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.tick().await.unwrap();
+        let booked = || async {
+            sqlite::state(&daemon.rt, daemon.assistant())
+                .await
+                .unwrap()
+                .and_then(|state| state.next_heartbeat_ms)
+        };
+        assert!(booked().await.is_some());
+
+        let mut without = config;
+        without.heartbeat = None;
+        let merge = daemon.reload(without).unwrap();
+        assert_eq!(merge.applied, ["heartbeat"]);
+        daemon.tick().await.unwrap();
+        let booked = sqlite::state(&daemon.rt, daemon.assistant())
+            .await
+            .unwrap()
+            .and_then(|state| state.next_heartbeat_ms);
+        assert_eq!(booked, None, "no plan, no tick");
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
     /// Ticks until `done` holds, at most twenty times.
     async fn tick_until(daemon: &mut Daemon, done: impl Fn() -> bool) {
         for _ in 0..20 {
@@ -3144,13 +3470,13 @@ mod tests {
         let config = brief_config("Morning.", Some("discord:555"));
         let mut daemon = brief_daemon(&dir.path().join("lg.db"), &config, &model, &clock, &fake);
 
-        let armed = daemon.arm_brief().await.unwrap();
+        let armed = daemon.arm_wake().await.unwrap();
         assert_eq!(armed.as_deref(), Some("brief:2026-11-09T08:00:00+00:00"));
         // Before the slot, ticks send nothing and arm nothing new.
         for _ in 0..3 {
             daemon.tick().await.unwrap();
         }
-        assert_eq!(daemon.arm_brief().await.unwrap(), None);
+        assert_eq!(daemon.arm_wake().await.unwrap(), None);
         assert_eq!(fake.sent().len(), 0);
         assert_eq!(model.calls.load(Ordering::SeqCst), 0);
 
@@ -3160,7 +3486,11 @@ mod tests {
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].channel_id, "dm555");
         assert_eq!(sent[0].content, "ok: Morning.");
-        let next = daemon.brief.as_ref().and_then(Calendar::slot);
+        let next = daemon
+            .wake
+            .as_ref()
+            .and_then(Wake::armed_at)
+            .map(|(at, _)| at);
         assert_eq!(
             next.map(|slot| slot.to_rfc3339()).as_deref(),
             Some("2026-11-10T08:00:00+00:00")
@@ -3262,7 +3592,7 @@ mod tests {
         clock.set("2026-11-09T07:30:00Z");
         let mut daemon = brief_daemon(&db, &config, &model, &clock, &fake);
         // The new daemon arms the same slot. The engine takes it once.
-        assert!(daemon.arm_brief().await.unwrap().is_some());
+        assert!(daemon.arm_wake().await.unwrap().is_some());
         clock.set("2026-11-09T08:00:01Z");
         tick_until(&mut daemon, || fake.sent().len() == 1).await;
         for _ in 0..3 {

@@ -17,6 +17,7 @@
 //! [memory]
 //! consolidate = "0 3 * * *"
 //! timezone = "Europe/London"
+//! reflect = true
 //!
 //! [brief]
 //! schedule = "30 7 * * 1-5"
@@ -105,6 +106,12 @@
 //! in `timezone`, the assistant writes a short brief. It sends the brief as
 //! a direct message to the user `to`, and stays silent when nothing needs the
 //! owner. The time zone defaults to the memory time zone.
+//!
+//! The `[heartbeat]` section wakes the assistant every `every_minutes`,
+//! outside the `quiet` hours of `timezone`. It checks the goals that are due
+//! and researches open ideas. A tick with nothing to do costs no model call.
+//! `deliver` says where a tick that has news speaks: `web`, the chat of the
+//! web pages, for now.
 //!
 //! The `[tools]` section is optional. By default the assistant can read a
 //! public web page, search the web when `LG_BRAVE_API_KEY` is set, and keep
@@ -201,6 +208,18 @@ pub enum ConfigError {
     /// The brief prompt is empty.
     #[error("brief.prompt must not be empty")]
     BriefPrompt,
+    /// The heartbeat interval is zero.
+    #[error("heartbeat.every_minutes must be at least 1")]
+    HeartbeatEvery,
+    /// The quiet hours are not two times such as "22:00-08:00".
+    #[error("heartbeat.quiet `{0}` is not two times such as \"22:00-08:00\"")]
+    HeartbeatQuiet(String),
+    /// The heartbeat prompt is empty.
+    #[error("heartbeat.prompt must not be empty")]
+    HeartbeatPrompt,
+    /// The heartbeat delivers somewhere that this build cannot.
+    #[error("heartbeat.deliver `{0}` is not known. Use \"web\"; Discord and Slack come later")]
+    HeartbeatDeliver(String),
     /// The page size of the fetch tool is zero.
     #[error("tools.fetch_max_chars must be at least 1")]
     FetchMaxChars,
@@ -570,6 +589,9 @@ pub struct MemoryConfig {
     pub consolidate: String,
     /// The IANA time zone of `consolidate`.
     pub timezone: String,
+    /// After a consolidation pass, wake the assistant once to file ideas
+    /// from what it learned. It needs the goals and ideas of `[tools]`.
+    pub reflect: bool,
 }
 
 impl Default for MemoryConfig {
@@ -577,6 +599,7 @@ impl Default for MemoryConfig {
         Self {
             enabled: true,
             consolidate: String::from(DEFAULT_CONSOLIDATE),
+            reflect: true,
             timezone: String::from(DEFAULT_TIMEZONE),
         }
     }
@@ -588,6 +611,7 @@ struct RawMemory {
     enabled: Option<bool>,
     consolidate: Option<String>,
     timezone: Option<String>,
+    reflect: Option<bool>,
 }
 
 /// Checks the memory section. The engine checks each cron field and the
@@ -607,6 +631,7 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
         enabled: raw.enabled.unwrap_or(defaults.enabled),
         consolidate,
         timezone,
+        reflect: raw.reflect.unwrap_or(defaults.reflect),
     })
 }
 
@@ -730,6 +755,117 @@ fn brief(raw: RawBrief, memory_timezone: &str) -> Result<BriefConfig, ConfigErro
         timezone,
         prompt,
         to: raw.to.as_deref().map(chat_user).transpose()?,
+    })
+}
+
+/// The default time between two heartbeat ticks.
+pub const DEFAULT_HEARTBEAT_MINUTES: u32 = 60;
+
+/// The default instruction of a heartbeat tick. It names the tools of goals
+/// and ideas, and the silent answer.
+pub const DEFAULT_HEARTBEAT_PROMPT: &str = "This is a heartbeat: no one is here, and you \
+     cannot act outside or write anything that people see. Call list_plans. Check on each \
+     goal whose `due` is true, and record what you found with goal_progress. If no goal is \
+     due, pick one open idea, research it a little, and add what you learned with \
+     research_idea. Propose a goal when the research shows that the idea is worth doing. \
+     Tell the owner only what they should know now. If nothing needs them, reply with \
+     exactly HEARTBEAT_OK.";
+
+/// Where a heartbeat that has news speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeartbeatDelivery {
+    /// The chat of the web pages. The answer waits in the conversation.
+    #[default]
+    Web,
+}
+
+/// A daily window, in minutes after midnight. It can wrap past midnight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuietHours {
+    /// The start, in minutes after midnight.
+    pub start: u16,
+    /// The end, in minutes after midnight.
+    pub end: u16,
+}
+
+/// The settings of the heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartbeatConfig {
+    /// The time between two ticks, in minutes.
+    pub every_minutes: u32,
+    /// The hours with no tick, in `timezone`.
+    pub quiet: Option<QuietHours>,
+    /// The IANA time zone of `quiet`.
+    pub timezone: String,
+    /// Research open ideas when no goal is due.
+    pub research: bool,
+    /// Where a tick with news speaks.
+    pub deliver: HeartbeatDelivery,
+    /// The instruction that starts each tick.
+    pub prompt: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHeartbeat {
+    every_minutes: Option<u32>,
+    quiet: Option<String>,
+    timezone: Option<String>,
+    research: Option<bool>,
+    deliver: Option<String>,
+    prompt: Option<String>,
+}
+
+/// The minutes after midnight of `H:MM` or `HH:MM`.
+fn clock(text: &str) -> Option<u16> {
+    let (hours, minutes) = text.trim().split_once(':')?;
+    let digits = |part: &str| part.chars().all(|c| c.is_ascii_digit());
+    if !(1..=2).contains(&hours.len()) || minutes.len() != 2 || !digits(hours) || !digits(minutes) {
+        return None;
+    }
+    let (hours, minutes): (u16, u16) = (hours.parse().ok()?, minutes.parse().ok()?);
+    (hours < 24 && minutes < 60).then_some(hours * 60 + minutes)
+}
+
+/// The quiet hours of `HH:MM-HH:MM`. The two times differ.
+fn quiet_hours(text: &str) -> Result<QuietHours, ConfigError> {
+    let bad = || ConfigError::HeartbeatQuiet(text.to_owned());
+    let (start, end) = text.split_once('-').ok_or_else(bad)?;
+    let (start, end) = (clock(start).ok_or_else(bad)?, clock(end).ok_or_else(bad)?);
+    if start == end {
+        return Err(bad());
+    }
+    Ok(QuietHours { start, end })
+}
+
+/// Checks the heartbeat section. Its time zone defaults to
+/// `memory_timezone`.
+fn heartbeat(raw: RawHeartbeat, memory_timezone: &str) -> Result<HeartbeatConfig, ConfigError> {
+    let every_minutes = raw.every_minutes.unwrap_or(DEFAULT_HEARTBEAT_MINUTES);
+    if every_minutes == 0 {
+        return Err(ConfigError::HeartbeatEvery);
+    }
+    let timezone = raw.timezone.unwrap_or_else(|| memory_timezone.to_owned());
+    if timezone.trim().is_empty() || timezone.chars().any(char::is_whitespace) {
+        return Err(ConfigError::Timezone(timezone));
+    }
+    let prompt = raw
+        .prompt
+        .unwrap_or_else(|| String::from(DEFAULT_HEARTBEAT_PROMPT));
+    if prompt.trim().is_empty() {
+        return Err(ConfigError::HeartbeatPrompt);
+    }
+    let deliver = match raw.deliver.as_deref() {
+        None | Some("web") => HeartbeatDelivery::Web,
+        Some(other) => return Err(ConfigError::HeartbeatDeliver(other.to_owned())),
+    };
+    Ok(HeartbeatConfig {
+        every_minutes,
+        quiet: raw.quiet.as_deref().map(quiet_hours).transpose()?,
+        timezone,
+        research: raw.research.unwrap_or(true),
+        deliver,
+        prompt,
     })
 }
 
@@ -1194,6 +1330,7 @@ struct Raw {
     #[serde(default)]
     memory: RawMemory,
     brief: Option<RawBrief>,
+    heartbeat: Option<RawHeartbeat>,
     #[serde(default)]
     tools: RawTools,
     sandbox: Option<RawSandbox>,
@@ -1475,6 +1612,8 @@ pub struct Config {
     pub memory: MemoryConfig,
     /// The morning brief, when the config has the section.
     pub brief: Option<BriefConfig>,
+    /// The heartbeat, when the config has the section.
+    pub heartbeat: Option<HeartbeatConfig>,
     /// The tools of the assistant.
     pub tools: ToolsConfig,
     /// The `run_code` tool, when the config has the section.
@@ -1510,6 +1649,7 @@ impl Config {
             google: None,
             memory: MemoryConfig::default(),
             brief: None,
+            heartbeat: None,
             tools: ToolsConfig::default(),
             sandbox: None,
             approvals: ApprovalsConfig::default(),
@@ -1557,6 +1697,10 @@ impl Config {
             .brief
             .map(|raw| brief(raw, &memory.timezone))
             .transpose()?;
+        let heartbeat = raw
+            .heartbeat
+            .map(|raw| heartbeat(raw, &memory.timezone))
+            .transpose()?;
         Ok(Self {
             owner: OwnerName::new(raw.owner)?,
             system: raw.system.unwrap_or_else(|| String::from(DEFAULT_SYSTEM)),
@@ -1574,6 +1718,7 @@ impl Config {
             google: google_section,
             memory,
             brief,
+            heartbeat,
             tools: tools(&raw.tools)?,
             sandbox: raw.sandbox.map(sandbox).transpose()?,
             approvals: approvals(&raw.approvals)?,
@@ -1938,7 +2083,7 @@ mod tests {
     #[test]
     fn the_memory_section_is_read() {
         let config = Config::parse(
-            "owner = \"mark\"\n[memory]\nenabled = false\nconsolidate = \"30 2 * * 1-5\"\ntimezone = \"Europe/London\"",
+            "owner = \"mark\"\n[memory]\nenabled = false\nconsolidate = \"30 2 * * 1-5\"\ntimezone = \"Europe/London\"\nreflect = false",
         )
         .unwrap();
         assert_eq!(
@@ -1947,8 +2092,10 @@ mod tests {
                 enabled: false,
                 consolidate: String::from("30 2 * * 1-5"),
                 timezone: String::from("Europe/London"),
+                reflect: false,
             }
         );
+        assert!(Config::parse("owner = \"mark\"").unwrap().memory.reflect);
     }
 
     #[test]
@@ -1986,6 +2133,85 @@ mod tests {
         let brief = bare.brief.unwrap();
         assert_eq!(brief.timezone, DEFAULT_TIMEZONE);
         assert_eq!(brief.to, None);
+    }
+
+    #[test]
+    fn the_heartbeat_section_is_read_with_its_defaults() {
+        let bare = Config::parse(
+            "owner = \"mark\"\n[memory]\ntimezone = \"America/Chicago\"\n[heartbeat]",
+        )
+        .unwrap();
+        assert_eq!(
+            bare.heartbeat,
+            Some(HeartbeatConfig {
+                every_minutes: DEFAULT_HEARTBEAT_MINUTES,
+                quiet: None,
+                timezone: String::from("America/Chicago"),
+                research: true,
+                deliver: HeartbeatDelivery::Web,
+                prompt: String::from(DEFAULT_HEARTBEAT_PROMPT),
+            })
+        );
+        let set = Config::parse(
+            "owner = \"mark\"\n[heartbeat]\nevery_minutes = 30\nquiet = \"22:00-07:30\"\nresearch = false\ndeliver = \"web\"",
+        )
+        .unwrap()
+        .heartbeat
+        .unwrap();
+        assert_eq!(set.every_minutes, 30);
+        assert_eq!(
+            set.quiet,
+            Some(QuietHours {
+                start: 22 * 60,
+                end: 7 * 60 + 30
+            })
+        );
+        assert!(!set.research);
+        assert!(
+            Config::parse("owner = \"mark\"")
+                .unwrap()
+                .heartbeat
+                .is_none()
+        );
+        assert!(DEFAULT_HEARTBEAT_PROMPT.contains("HEARTBEAT_OK"));
+    }
+
+    #[test]
+    fn a_bad_heartbeat_section_is_refused() {
+        let parse =
+            |section: &str| Config::parse(&format!("owner = \"mark\"\n[heartbeat]\n{section}"));
+        assert!(matches!(
+            parse("every_minutes = 0"),
+            Err(ConfigError::HeartbeatEvery)
+        ));
+        for quiet in [
+            "22-08",
+            "25:00-08:00",
+            "22:00-22:00",
+            "22:60-08:00",
+            "7:5-08:00",
+            "night",
+        ] {
+            assert!(
+                matches!(
+                    parse(&format!("quiet = \"{quiet}\"")),
+                    Err(ConfigError::HeartbeatQuiet(_))
+                ),
+                "{quiet}"
+            );
+        }
+        assert!(matches!(
+            parse("deliver = \"discord\""),
+            Err(ConfigError::HeartbeatDeliver(_))
+        ));
+        assert!(matches!(
+            parse("prompt = \" \""),
+            Err(ConfigError::HeartbeatPrompt)
+        ));
+        assert!(matches!(
+            parse("timezone = \"Not A Zone\""),
+            Err(ConfigError::Timezone(_))
+        ));
     }
 
     #[test]

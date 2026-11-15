@@ -77,7 +77,7 @@ pub fn merge(current: &Config, mut next: Config) -> Merge {
     profile!(system, window);
     live!(discord, slack, camel);
     keep!(san_mateo, google);
-    live!(memory, brief);
+    live!(memory, brief, heartbeat);
     profile!(tools);
     keep!(sandbox);
     live!(approvals, flow);

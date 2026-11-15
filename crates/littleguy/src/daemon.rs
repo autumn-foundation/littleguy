@@ -1923,9 +1923,9 @@ mod tests {
         let model = Arc::new(OfflineModel::new());
         let mut daemon = open(&dir.path().join("lg.db"), Arc::clone(&model));
         let response = daemon.handle_request(UID, request("m-1", "hello")).await;
-        assert!(
-            matches!(&response, Response::Reply { text, .. } if text == "littleguy (offline): you said 'hello'"),
-            "{response:?}"
+        assert_eq!(
+            reply_text(&response),
+            "littleguy (offline): you said 'hello'"
         );
         assert_eq!(model.calls(), 1);
         assert_eq!(daemon.assistant().as_str(), "assistant/mark");
@@ -2144,10 +2144,7 @@ mod tests {
             client
         );
         served.unwrap();
-        assert!(
-            matches!(&reply, Response::Reply { text, .. } if text == "littleguy (offline): you said 'hi'"),
-            "{reply:?}"
-        );
+        assert_eq!(reply_text(&reply), "littleguy (offline): you said 'hi'");
         assert!(
             matches!(&bad_json, Response::Error { message } if message.contains("not valid")),
             "{bad_json:?}"
@@ -4047,13 +4044,14 @@ mod tests {
         }
     }
 
-    /// The usage of a reply, or a failure that names the response.
+    /// The usage of a reply. The failure does not print the response: some
+    /// responses carry a secret, such as the token of a link.
     fn usage_of(response: &Response) -> crate::protocol::Usage {
         match response {
             Response::Reply {
                 usage: Some(usage), ..
             } => *usage,
-            other => panic!("no reply with usage: {other:?}"),
+            _ => panic!("the response is not a reply with usage"),
         }
     }
 
@@ -4079,11 +4077,14 @@ mod tests {
         let second = daemon
             .handle_request(UID, request("u-2", "remember tea"))
             .await;
-        assert_eq!(usage_of(&second).calls, 2, "{second:?}");
+        assert_eq!(usage_of(&second).calls, 2);
         assert_eq!(usage_of(&second).input_tokens, 2);
         // A duplicate ran nothing, so it carries no usage.
         let again = daemon.handle_request(UID, request("u-1", "hello")).await;
-        assert!(matches!(again, Response::Duplicate { .. }), "{again:?}");
+        assert!(
+            matches!(again, Response::Duplicate { .. }),
+            "a repeated id gets a duplicate"
+        );
     }
 
     /// A model with a price: 3 micro dollars per input token and 15 per

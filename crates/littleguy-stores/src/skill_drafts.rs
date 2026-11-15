@@ -77,7 +77,9 @@ impl SqliteStores {
                     params![description, body, now_ms, key, id],
                 )?;
                 // New text needs a new mark: the op that wrote it may have
-                // read a page (ADR 0027).
+                // read a page (ADR 0027). This runs in every build, so a
+                // build without the council never leaves a stale mark for a
+                // build with it.
                 tx.execute(
                     "DELETE FROM council_marks WHERE kind = 'skill' AND item = ?1",
                     params![id],

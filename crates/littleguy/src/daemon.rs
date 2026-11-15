@@ -234,6 +234,7 @@ fn tick_outcome(skipped: Option<bool>, finished: usize) -> String {
 }
 
 /// The time of the first pending wake in `stores`.
+#[cfg(feature = "followups")]
 fn next_wake(stores: &SqliteStores) -> Result<Option<DateTime<Utc>>> {
     Ok(stores
         .pending_wakes()?
@@ -450,6 +451,7 @@ impl Daemon {
             watch_every: reload::WATCH_EVERY,
             live: Arc::clone(&live),
             brief_armed: Arc::default(),
+            #[cfg(feature = "followups")]
             wake_links: crate::plans::WakeLinks::default(),
             #[cfg(feature = "heartbeat")]
             verdict: Arc::default(),
@@ -713,6 +715,7 @@ impl Daemon {
             return Ok(Response::Busy { approval });
         }
         // A person wrote, so a new chain of wakes may start.
+        #[cfg(feature = "followups")]
         self.kit.wake_links.last_person_ms.store(
             (self.clock)().timestamp_millis(),
             std::sync::atomic::Ordering::SeqCst,
@@ -1010,6 +1013,7 @@ impl Daemon {
     pub async fn arm_wake(&mut self) -> Result<Option<String>> {
         let now = (self.clock)();
         let id = self.routing.assistant().clone();
+        #[cfg(feature = "followups")]
         self.read_wakes(now)?;
         let Some(wake) = self.wake.as_mut() else {
             if !std::mem::take(&mut self.disarm) {
@@ -1040,8 +1044,15 @@ impl Daemon {
         if let Some((due, kind)) = wake.ran(now, ticks)
             && let Some(stores) = self.kit.stores.as_ref()
         {
-            let finished = stores.finish_wakes(due.timestamp_millis())?;
-            wake.set_followup(next_wake(stores)?, now);
+            #[cfg(feature = "followups")]
+            let finished = {
+                let finished = stores.finish_wakes(due.timestamp_millis())?;
+                wake.set_followup(next_wake(stores)?, now);
+                finished
+            };
+            // With no booked wakes, a tick ends none.
+            #[cfg(not(feature = "followups"))]
+            let finished = 0;
             #[cfg(feature = "heartbeat")]
             let skipped = (kind == crate::wake::Kind::Heartbeat)
                 .then(|| self.kit.verdict.take_skipped())
@@ -1070,6 +1081,7 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns an error when the store cannot read.
+    #[cfg(feature = "followups")]
     fn read_wakes(&mut self, now: DateTime<Utc>) -> Result<()> {
         let links = &self.kit.wake_links;
         if !links
@@ -3511,6 +3523,7 @@ mod tests {
     }
 
     #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(feature = "followups")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_booked_wake_runs_once_at_its_time_then_the_timer_stops() {
         use std::sync::atomic::Ordering;
@@ -3581,6 +3594,7 @@ mod tests {
     }
 
     #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(feature = "followups")]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_booked_wake_survives_a_restart_and_fires_on_time() {
         use std::sync::atomic::Ordering;

@@ -61,10 +61,12 @@ pub const REFLECT_KEY: &str = "reflect:";
 pub const FOLLOWUP_MARK: &str = "[littleguy follow-up]";
 
 /// The prefix of the op key that arms one follow-up.
+#[cfg(feature = "followups")]
 pub const FOLLOWUP_KEY: &str = "followup:";
 
 /// The instruction of a follow-up tick. It is fixed: the text that the
 /// model wrote stays in the store, so it never becomes a user message.
+#[cfg(feature = "followups")]
 pub const FOLLOWUP_PROMPT: &str = "A wake that you booked with wake_me is due. Call \
      list_plans: each wake with `due` true says what to look at. Look, and note what you \
      found on the goal or idea it concerns. Book another wake only if you must look again. \
@@ -144,6 +146,7 @@ pub enum Kind {
     /// A reflection after a consolidation pass.
     Reflection,
     /// A wake that the assistant booked.
+    #[cfg(feature = "followups")]
     Followup,
 }
 
@@ -156,6 +159,7 @@ impl Kind {
             #[cfg(feature = "heartbeat")]
             Self::Heartbeat => "heartbeat",
             Self::Reflection => "reflection",
+            #[cfg(feature = "followups")]
             Self::Followup => "follow-up",
         }
     }
@@ -262,6 +266,7 @@ pub struct Wake {
     /// The pass that waits for its reflection.
     reflect: Option<String>,
     /// The next wake that the assistant booked.
+    #[cfg(feature = "followups")]
     followup: Option<DateTime<Utc>>,
     armed: Option<Armed>,
     /// Whether a brief is armed now. The brief delivery reads it, so a
@@ -340,6 +345,7 @@ impl Wake {
             #[cfg(feature = "heartbeat")]
             beat,
             reflect: None,
+            #[cfg(feature = "followups")]
             followup: None,
             armed: None,
             brief_armed,
@@ -354,6 +360,7 @@ impl Wake {
             #[cfg(feature = "heartbeat")]
             beat: None,
             reflect: None,
+            #[cfg(feature = "followups")]
             followup: None,
             armed: None,
             brief_armed,
@@ -363,6 +370,7 @@ impl Wake {
     /// Sets the next wake that the assistant booked, at `now`. A sooner
     /// wake replaces the arm that waits, and so does a change to the
     /// follow-up that is armed.
+    #[cfg(feature = "followups")]
     pub fn set_followup(&mut self, next: Option<DateTime<Utc>>, now: DateTime<Utc>) {
         if next == self.followup {
             return;
@@ -434,7 +442,10 @@ impl Wake {
         // time, so the daemon reads no state before the tick can run.
         let soonest = now + chrono::TimeDelta::seconds(MIN_CUSTOM_HEARTBEAT_SECS.cast_signed());
         let reflect = self.reflect.as_ref().map(|_| (soonest, Kind::Reflection));
+        #[cfg(feature = "followups")]
         let followup = self.followup.map(|at| (at.max(soonest), Kind::Followup));
+        #[cfg(not(feature = "followups"))]
+        let followup = None;
         let brief = self
             .brief
             .as_ref()
@@ -478,6 +489,7 @@ impl Wake {
                     heartbeat(prompt, every).precheck(),
                 )
             }
+            #[cfg(feature = "followups")]
             Kind::Followup => (
                 format!("{FOLLOWUP_KEY}{}", at.to_rfc3339()),
                 heartbeat(&marked(FOLLOWUP_MARK, FOLLOWUP_PROMPT), every),
@@ -781,6 +793,7 @@ mod tests {
     }
 
     #[cfg(feature = "heartbeat")]
+    #[cfg(feature = "followups")]
     #[test]
     fn a_booked_wake_comes_before_the_heartbeat_and_reports_its_run() {
         let now = at("2026-11-14T12:00:00Z");
@@ -812,6 +825,7 @@ mod tests {
         assert_eq!(arm.key, "heartbeat:2026-11-14T13:20:30+00:00");
     }
 
+    #[cfg(feature = "followups")]
     #[test]
     fn a_wake_due_now_waits_the_engine_minimum() {
         let now = at("2026-11-14T12:00:00Z");

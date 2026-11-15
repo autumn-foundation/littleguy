@@ -283,7 +283,8 @@ and tells you only what you should know. It can book at most 10 wakes in a
 row before you write again. `recent_wakes` shows each time it
 woke on its own (heartbeats, briefs, reflections and booked wakes) and how
 it went; [ADR 0025](docs/adr/0025-the-tick-log.md). [ADR 0023](docs/adr/0023-wakes-that-the-assistant-books.md)
-explains the design.
+explains the design. Booked wakes come with the `followups` feature, which
+is on by default.
 
 littleguy cannot accept, decline or drop anything; only you can. Every
 tool it has works on a run with no one present, so a later heartbeat can

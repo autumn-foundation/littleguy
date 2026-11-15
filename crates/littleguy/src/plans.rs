@@ -20,6 +20,7 @@
 //! so no tool turns one on.
 
 use std::sync::Arc;
+#[cfg(feature = "followups")]
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use autumn_harvest_agent::flow::labels;
@@ -56,6 +57,7 @@ fn text<'a>(input: &'a Value, name: &str) -> Result<&'a str, AgentError> {
         .ok_or_else(|| refuse(format!("`{name}` must be text")))
 }
 
+#[cfg(any(feature = "plans", feature = "followups"))]
 fn id(input: &Value, name: &str) -> Result<i64, AgentError> {
     input[name]
         .as_i64()
@@ -97,6 +99,7 @@ fn idea_json(idea: &Idea) -> Value {
 }
 
 /// What the wake tools share with the daemon.
+#[cfg(feature = "followups")]
 #[derive(Debug, Clone)]
 pub struct WakeLinks {
     /// Set when a wake is booked or cancelled. The daemon then plans again.
@@ -106,6 +109,7 @@ pub struct WakeLinks {
     pub last_person_ms: Arc<AtomicI64>,
 }
 
+#[cfg(feature = "followups")]
 impl Default for WakeLinks {
     /// Changed at first, so the daemon reads the wakes of an earlier start.
     fn default() -> Self {
@@ -117,23 +121,43 @@ impl Default for WakeLinks {
 }
 
 /// The longest wait that `wake_me` takes, in minutes.
+#[cfg(feature = "followups")]
 const MAX_WAKE_MINUTES: i64 = littleguy_stores::wakes::MAX_AHEAD_MS / 60_000;
 
 fn object(properties: &Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required})
 }
 
-/// What `list_plans` says it lists.
-#[cfg(feature = "plans")]
-const LIST_PLANS: &str = "List your goals, ideas and wakes. An active goal is yours to work on; \
-     a goal with `due` true needs a check now. A proposed goal waits for the owner to accept \
-     it. An idea is something to plan and research. A wake with `due` true is one you booked \
-     with wake_me, and its time has come.";
-
-/// What `list_plans` says it lists, in a build without goals and ideas.
-#[cfg(not(feature = "plans"))]
-const LIST_PLANS: &str = "List your wakes and skill drafts. A wake with `due` true is one you \
-     booked with wake_me, and its time has come.";
+/// What `list_plans` says it lists, from the parts of this build.
+fn list_plans_description() -> String {
+    let mut what = Vec::new();
+    if cfg!(feature = "plans") {
+        what.extend(["goals", "ideas"]);
+    }
+    if cfg!(feature = "followups") {
+        what.push("wakes");
+    }
+    what.push("skill drafts");
+    let last = what.pop().unwrap_or_default();
+    let mut text = if what.is_empty() {
+        format!("List your {last}.")
+    } else {
+        format!("List your {} and {last}.", what.join(", "))
+    };
+    if cfg!(feature = "plans") {
+        text.push_str(
+            " An active goal is yours to work on; a goal with `due` true needs a check now. \
+             A proposed goal waits for the owner to accept it. An idea is something to plan \
+             and research.",
+        );
+    }
+    if cfg!(feature = "followups") {
+        text.push_str(
+            " A wake with `due` true is one you booked with wake_me, and its time has come.",
+        );
+    }
+    text
+}
 
 /// The goal, idea, wake and skill tools over `stores`.
 #[must_use]
@@ -141,22 +165,23 @@ const LIST_PLANS: &str = "List your wakes and skill drafts. A wake with `due` tr
     clippy::too_many_lines,
     reason = "the tools, each a schema and a short body, read best in one list"
 )]
-pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>> {
+pub fn tools(
+    stores: &Arc<SqliteStores>,
+    #[cfg(feature = "followups")] wakes: &WakeLinks,
+) -> Vec<Arc<dyn Tool>> {
     let list = Arc::clone(stores);
-    let book = (Arc::clone(stores), wakes.clone());
     let draft = Arc::clone(stores);
     let ticks = Arc::clone(stores);
-    let cancel = (Arc::clone(stores), wakes.clone());
     let tools = vec![
         FnTool::new(
             "list_plans",
-            LIST_PLANS,
+            list_plans_description(),
             json!({"type": "object", "properties": {}}),
             move |_input| {
                 let stores = Arc::clone(&list);
                 async move {
-                    let wakes = stores.pending_wakes()?;
                     let drafts = stores.skill_drafts()?;
+                    #[cfg(any(feature = "plans", feature = "followups"))]
                     let now = now_ms();
                     let listing = json!({
                         "skill_drafts": drafts.iter().map(|draft| json!({
@@ -164,13 +189,24 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
                             "name": draft.name,
                             "description": draft.description,
                         })).collect::<Vec<_>>(),
-                        "wakes": wakes.iter().map(|wake| json!({
-                            "id": wake.id,
-                            "at": time(Some(wake.at_ms)),
-                            "due": wake.at_ms <= now,
-                            "about": wake.about,
-                        })).collect::<Vec<_>>(),
                     });
+                    #[cfg(feature = "followups")]
+                    let listing = {
+                        let mut listing = listing;
+                        listing["wakes"] = stores
+                            .pending_wakes()?
+                            .iter()
+                            .map(|wake| {
+                                json!({
+                                    "id": wake.id,
+                                    "at": time(Some(wake.at_ms)),
+                                    "due": wake.at_ms <= now,
+                                    "about": wake.about,
+                                })
+                            })
+                            .collect();
+                        listing
+                    };
                     #[cfg(feature = "plans")]
                     let listing = {
                         let mut listing = listing;
@@ -186,40 +222,6 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
         )
         .effect(ToolEffect::ReadOnly)
         .label(labels::UNTRUSTED_INPUT)
-        .shared(),
-        FnTool::with_context(
-            "wake_me",
-            "Book a wake: you wake on your own later and look at something again, for example \
-             a deploy, a reply or a page. Say what to look at. The wake shows in list_plans. \
-             It runs read-only, as a heartbeat does.",
-            object(
-                &json!({
-                    "in_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_WAKE_MINUTES},
-                    "about": {"type": "string", "description": "What to look at, and why."},
-                }),
-                &["in_minutes", "about"],
-            ),
-            move |input, ctx| {
-                let (stores, links) = book.clone();
-                async move {
-                    let minutes = input["in_minutes"]
-                        .as_i64()
-                        .ok_or_else(|| refuse("`in_minutes` must be a whole number"))?;
-                    let now = now_ms();
-                    let at = now.saturating_add(minutes.saturating_mul(60_000));
-                    let id = stores.add_wake(
-                        &call_key(&ctx),
-                        at,
-                        text(&input, "about")?,
-                        now,
-                        links.last_person_ms.load(Ordering::SeqCst),
-                    )?;
-                    links.changed.store(true, Ordering::SeqCst);
-                    Ok(json!({"wake": id, "at": time(Some(at))}))
-                }
-            },
-        )
-        .effect(ToolEffect::Internal)
         .shared(),
         FnTool::with_context(
             "propose_skill",
@@ -283,6 +285,63 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
         )
         .effect(ToolEffect::ReadOnly)
         .shared(),
+    ];
+    // The goal and idea tools come right after `list_plans`.
+    #[cfg(feature = "plans")]
+    let tools = {
+        let mut tools = tools;
+        tools.splice(1..1, goal_tools(stores));
+        tools
+    };
+    #[cfg(feature = "followups")]
+    let tools = {
+        let mut tools = tools;
+        tools.extend(wake_tools(stores, wakes));
+        tools
+    };
+    tools
+}
+
+/// The tools that book and cancel a wake.
+#[cfg(feature = "followups")]
+fn wake_tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>> {
+    let book = (Arc::clone(stores), wakes.clone());
+    let cancel = (Arc::clone(stores), wakes.clone());
+    vec![
+        FnTool::with_context(
+            "wake_me",
+            "Book a wake: you wake on your own later and look at something again, for example \
+             a deploy, a reply or a page. Say what to look at. The wake shows in list_plans. \
+             It runs read-only, as a heartbeat does.",
+            object(
+                &json!({
+                    "in_minutes": {"type": "integer", "minimum": 1, "maximum": MAX_WAKE_MINUTES},
+                    "about": {"type": "string", "description": "What to look at, and why."},
+                }),
+                &["in_minutes", "about"],
+            ),
+            move |input, ctx| {
+                let (stores, links) = book.clone();
+                async move {
+                    let minutes = input["in_minutes"]
+                        .as_i64()
+                        .ok_or_else(|| refuse("`in_minutes` must be a whole number"))?;
+                    let now = now_ms();
+                    let at = now.saturating_add(minutes.saturating_mul(60_000));
+                    let id = stores.add_wake(
+                        &call_key(&ctx),
+                        at,
+                        text(&input, "about")?,
+                        now,
+                        links.last_person_ms.load(Ordering::SeqCst),
+                    )?;
+                    links.changed.store(true, Ordering::SeqCst);
+                    Ok(json!({"wake": id, "at": time(Some(at))}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
         FnTool::new(
             "cancel_wake",
             "Cancel a wake that you booked and no longer need.",
@@ -299,15 +358,7 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
         )
         .effect(ToolEffect::Internal)
         .shared(),
-    ];
-    // The goal and idea tools come right after `list_plans`.
-    #[cfg(feature = "plans")]
-    let tools = {
-        let mut tools = tools;
-        tools.splice(1..1, goal_tools(stores));
-        tools
-    };
-    tools
+    ]
 }
 
 /// The tools that file and research ideas, and propose and work on goals.
@@ -445,16 +496,26 @@ mod tests {
     #[test]
     fn every_tool_is_safe_unattended_and_none_accepts() {
         let stores = Arc::new(SqliteStores::open_in_memory().unwrap());
-        let tools = tools(&stores, &WakeLinks::default());
+        let tools = tools(
+            &stores,
+            #[cfg(feature = "followups")]
+            &WakeLinks::default(),
+        );
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         let goals: &[&str] = if cfg!(feature = "plans") {
             &["add_idea", "research_idea", "propose_goal", "goal_progress"]
         } else {
             &[]
         };
+        let wakes: &[&str] = if cfg!(feature = "followups") {
+            &["wake_me", "cancel_wake"]
+        } else {
+            &[]
+        };
         let want: Vec<&str> = std::iter::once("list_plans")
             .chain(goals.iter().copied())
-            .chain(["wake_me", "propose_skill", "recent_wakes", "cancel_wake"])
+            .chain(["propose_skill", "recent_wakes"])
+            .chain(wakes.iter().copied())
             .collect();
         assert_eq!(names, want);
         for tool in &tools {

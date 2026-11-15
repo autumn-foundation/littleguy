@@ -10,6 +10,8 @@ repository.workspace = true
 [features]
 # The goals and ideas of the assistant (`plans`).
 plans = []
+# The wakes that the assistant books (`wakes`).
+followups = []
 
 [dependencies]
 autumn-harvest-agent = { version = "0.10.0", default-features = false }

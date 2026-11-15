@@ -243,10 +243,12 @@ fn next_wake(stores: &SqliteStores) -> Result<Option<DateTime<Utc>>> {
 }
 
 /// How often the daemon looks for consolidation passes to reflect on.
+#[cfg(feature = "reflection")]
 const PASS_LOOK_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
 
 /// How far back the daemon looks for a pass. A pass from before stays
 /// without a reflection.
+#[cfg(feature = "reflection")]
 const PASS_LOOK_BACK: chrono::TimeDelta = chrono::TimeDelta::days(2);
 
 /// The seconds since the Unix epoch.
@@ -341,6 +343,7 @@ pub struct Daemon {
     /// The next arm checks once.
     disarm: bool,
     /// When the daemon last looked for consolidation passes to reflect on.
+    #[cfg(feature = "reflection")]
     passes_seen: Option<DateTime<Utc>>,
     /// The skills folder of a config with no `[skills] dir`.
     skills_default: Option<std::path::PathBuf>,
@@ -477,6 +480,7 @@ impl Daemon {
             connections: None,
             wake: built.wake,
             disarm: true,
+            #[cfg(feature = "reflection")]
             passes_seen: None,
             skills_default: None,
             skills_stamp: None,
@@ -1116,14 +1120,10 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns an error when the runtime or the store cannot read.
+    #[cfg(feature = "reflection")]
     fn notice_passes(&mut self) -> Result<()> {
         let config = &self.kit.config;
-        // A reflection files ideas, so it needs them in this build.
-        if !(cfg!(feature = "plans")
-            && config.memory.enabled
-            && config.memory.reflect
-            && config.tools.plans)
-        {
+        if !(config.memory.enabled && config.memory.reflect && config.tools.plans) {
             return Ok(());
         }
         let now = (self.clock)();
@@ -1181,6 +1181,7 @@ impl Daemon {
         self.rt.poll_once().await?;
         let first = sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
         // A consolidation pass that just ended plans a reflection.
+        #[cfg(feature = "reflection")]
         self.notice_passes()?;
         // A change to the skills folder reaches the overlay.
         self.sync_skills().await;
@@ -3460,7 +3461,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
+    #[cfg(all(feature = "reflection", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_consolidation_pass_wakes_one_reflection_then_the_timer_stops() {
         use std::sync::atomic::Ordering;

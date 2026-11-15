@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 15] = [
+pub const ALL: [Feature; 16] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -67,6 +67,10 @@ pub const ALL: [Feature; 15] = [
     Feature {
         name: "followups",
         on: cfg!(feature = "followups"),
+    },
+    Feature {
+        name: "reflection",
+        on: cfg!(feature = "reflection"),
     },
     Feature {
         name: "camel",
@@ -123,6 +127,11 @@ pub fn check(config: &Config) -> Result<()> {
         bail!(
             "{}. Build lg with those features, or remove the sections",
             problems.join("; ")
+        );
+    }
+    if !has("reflection") && config.memory.enabled && config.memory.reflect {
+        tracing::info!(
+            "the reflection after consolidation is off: this lg is built without the `reflection` feature"
         );
     }
     if !has("plans") && config.tools.plans {

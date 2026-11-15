@@ -23,15 +23,36 @@ use std::sync::Arc;
 #[cfg(feature = "followups")]
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+use autumn_harvest_agent::Tool;
 #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 use autumn_harvest_agent::flow::labels;
 #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 use autumn_harvest_agent::{AgentError, ErrorKind, ToolContext};
-use autumn_harvest_agent::{FnTool, Tool, ToolEffect};
-use chrono::{DateTime, Utc};
+#[cfg(any(
+    feature = "plans",
+    feature = "followups",
+    feature = "skills",
+    feature = "self-debug"
+))]
+use autumn_harvest_agent::{FnTool, ToolEffect};
+#[cfg(any(feature = "plans", feature = "followups", feature = "self-debug"))]
+use chrono::DateTime;
+#[cfg(any(
+    feature = "plans",
+    feature = "followups",
+    feature = "skills",
+    feature = "self-debug"
+))]
+use chrono::Utc;
 use littleguy_stores::SqliteStores;
 #[cfg(feature = "plans")]
 use littleguy_stores::plans::{Goal, Idea, Note};
+#[cfg(any(
+    feature = "plans",
+    feature = "followups",
+    feature = "skills",
+    feature = "self-debug"
+))]
 use serde_json::{Value, json};
 
 /// The key of one tool call. A retried call has the same key, so the store
@@ -47,6 +68,7 @@ fn now_ms() -> i64 {
 }
 
 /// An epoch millisecond as RFC 3339, in UTC.
+#[cfg(any(feature = "plans", feature = "followups", feature = "self-debug"))]
 fn time(ms: Option<i64>) -> Value {
     ms.and_then(DateTime::<Utc>::from_timestamp_millis)
         .map_or(Value::Null, |at| json!(at.to_rfc3339()))
@@ -183,11 +205,20 @@ pub fn tools(
     // The goal and idea tools come right after `list_plans`.
     #[cfg(feature = "plans")]
     let tools = tools.chain(goal_tools(stores));
+    #[cfg(feature = "self-debug")]
     let tools = tools.chain(std::iter::once(recent_wakes(stores)));
     #[cfg(feature = "skills")]
     let tools = tools.chain(std::iter::once(propose_skill(stores)));
     #[cfg(feature = "followups")]
     let tools = tools.chain(wake_tools(stores, wakes));
+    // A build with none of the tool groups has no tools here.
+    #[cfg(not(any(
+        feature = "plans",
+        feature = "followups",
+        feature = "skills",
+        feature = "self-debug"
+    )))]
+    let _ = stores;
     tools.collect()
 }
 
@@ -296,6 +327,7 @@ fn propose_skill(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
 }
 
 /// `recent_wakes`: the tick log, newest first.
+#[cfg(feature = "self-debug")]
 fn recent_wakes(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
     let ticks = Arc::clone(stores);
     FnTool::new(
@@ -556,14 +588,14 @@ mod tests {
             .then_some("list_plans")
             .into_iter()
             .chain(goals.iter().copied())
-            .chain(["recent_wakes"])
+            .chain(cfg!(feature = "self-debug").then_some("recent_wakes"))
             .chain(skills.iter().copied())
             .chain(wakes.iter().copied())
             .collect();
         assert_eq!(names, want);
         for tool in &tools {
             assert!(
-                tool.effect() <= ToolEffect::Internal,
+                tool.effect() <= autumn_harvest_agent::ToolEffect::Internal,
                 "{} must run on a read-only tick",
                 tool.name()
             );

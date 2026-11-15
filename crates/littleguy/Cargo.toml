@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.3"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug"]
 # Every integration.
 full = ["default", "camel", "google", "fleet"]
 # Discord direct messages over the gateway.
@@ -83,6 +83,9 @@ reflection = ["plans"]
 # `[skills]`: SKILL.md files that reach the assistant through its profile
 # overlay, `propose_skill`, and the Skills tab.
 skills = ["refine", "littleguy-stores/skills"]
+# `recent_runs`, `failed_attempts`, `model_usage` and `recent_wakes`: the
+# assistant reads its own run log and tick log to debug itself.
+self-debug = ["littleguy-stores/self-debug"]
 # `[refine]` and `lg refine`: profile overlays that the model proposes and
 # the owner activates. It adds no crate.
 refine = []

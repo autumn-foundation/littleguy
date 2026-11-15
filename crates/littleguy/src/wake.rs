@@ -164,6 +164,7 @@ pub enum Kind {
 
 impl Kind {
     /// The name in the tick log.
+    #[cfg(feature = "self-debug")]
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -185,6 +186,8 @@ pub struct Verdict(std::sync::atomic::AtomicU8);
 
 #[cfg(feature = "heartbeat")]
 impl Verdict {
+    /// No verdict since the last read. Only the tick log reads one.
+    #[cfg(any(feature = "self-debug", test))]
     const UNKNOWN: u8 = 0;
     const RAN: u8 = 1;
     const SKIPPED: u8 = 2;
@@ -196,6 +199,7 @@ impl Verdict {
 
     /// Whether the precheck skipped the last heartbeat tick, and forgets it.
     /// `None` when no precheck ran since.
+    #[cfg(any(feature = "self-debug", test))]
     #[must_use]
     pub fn take_skipped(&self) -> Option<bool> {
         match self.0.swap(Self::UNKNOWN, Ordering::SeqCst) {
@@ -404,6 +408,7 @@ impl Wake {
 
     /// The time of the armed wake, when its tick ran: it passed, and the
     /// tick count moved since the arm.
+    #[cfg(any(feature = "followups", feature = "self-debug"))]
     #[must_use]
     pub fn ran(&self, now: DateTime<Utc>, ticks: u64) -> Option<(DateTime<Utc>, Kind)> {
         self.armed

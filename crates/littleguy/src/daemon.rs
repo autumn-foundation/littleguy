@@ -220,6 +220,7 @@ fn shown_text(data: &[u8]) -> Option<String> {
 
 /// How a tick went, in a few words. `skipped` is the verdict of the
 /// heartbeat precheck, and `finished` counts the booked wakes it ended.
+#[cfg(feature = "self-debug")]
 fn tick_outcome(skipped: Option<bool>, finished: usize) -> String {
     let ran = if skipped == Some(true) {
         String::from("skipped by the precheck: no goal due and no idea open; no model call")
@@ -1049,6 +1050,7 @@ impl Daemon {
         };
         // A tick ran: the booked wakes up to its time are done, and the
         // tick log gets a row.
+        #[cfg(any(feature = "followups", feature = "self-debug"))]
         if let Some((due, kind)) = wake.ran(now, ticks)
             && let Some(stores) = self.kit.stores.as_ref()
         {
@@ -1061,19 +1063,25 @@ impl Daemon {
             // With no booked wakes, a tick ends none.
             #[cfg(not(feature = "followups"))]
             let finished = 0;
-            #[cfg(feature = "heartbeat")]
-            let skipped = (kind == crate::wake::Kind::Heartbeat)
-                .then(|| self.kit.verdict.take_skipped())
-                .flatten();
-            // With no heartbeat there is no precheck to skip a tick.
-            #[cfg(not(feature = "heartbeat"))]
-            let skipped = None;
-            stores.record_tick(&littleguy_stores::tick_log::Tick {
-                kind: kind.label().to_owned(),
-                due_ms: due.timestamp_millis(),
-                seen_ms: now.timestamp_millis(),
-                outcome: tick_outcome(skipped, finished),
-            })?;
+            #[cfg(feature = "self-debug")]
+            {
+                #[cfg(feature = "heartbeat")]
+                let skipped = (kind == crate::wake::Kind::Heartbeat)
+                    .then(|| self.kit.verdict.take_skipped())
+                    .flatten();
+                // With no heartbeat there is no precheck to skip a tick.
+                #[cfg(not(feature = "heartbeat"))]
+                let skipped = None;
+                stores.record_tick(&littleguy_stores::tick_log::Tick {
+                    kind: kind.label().to_owned(),
+                    due_ms: due.timestamp_millis(),
+                    seen_ms: now.timestamp_millis(),
+                    outcome: tick_outcome(skipped, finished),
+                })?;
+            }
+            // Only the tick log reads the kind and the count.
+            #[cfg(not(feature = "self-debug"))]
+            let _ = (kind, finished);
         }
         let Some(arm) = wake.arm(now, ticks) else {
             return Ok(None);
@@ -3454,10 +3462,14 @@ mod tests {
         assert_eq!(model.calls.load(Ordering::SeqCst), 0);
         assert_eq!(armed(&daemon), Some(utc("2026-11-14T14:00:01Z")));
         // The tick log says the precheck skipped it.
+        #[cfg(feature = "self-debug")]
         let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
-        let skipped = stores.recent_ticks(1).unwrap();
-        assert_eq!(skipped[0].kind, "heartbeat");
-        assert!(skipped[0].outcome.starts_with("skipped by the precheck"));
+        #[cfg(feature = "self-debug")]
+        {
+            let skipped = stores.recent_ticks(1).unwrap();
+            assert_eq!(skipped[0].kind, "heartbeat");
+            assert!(skipped[0].outcome.starts_with("skipped by the precheck"));
+        }
 
         // An idea waits, so the next heartbeat runs, and it speaks.
         daemon
@@ -3481,6 +3493,7 @@ mod tests {
         // This time the heartbeat ran. The log row comes at the next arm.
         clock.set("2026-11-14T14:00:30Z");
         daemon.tick().await.unwrap();
+        #[cfg(feature = "self-debug")]
         assert_eq!(stores.recent_ticks(1).unwrap()[0].outcome, "ran");
         // The message prints no turn, so a failure logs no conversation.
         assert!(
@@ -3688,14 +3701,17 @@ mod tests {
         assert_eq!(stores.pending_wakes().unwrap(), []);
 
         // The tick log has it, and so does recent_wakes.
-        let ticks = stores.recent_ticks(5).unwrap();
-        assert_eq!(ticks[0].kind, "follow-up");
-        assert_eq!(ticks[0].due_ms, booked[0].at_ms);
-        assert_eq!(ticks[0].outcome, "ran; ended 1 booked wake");
-        let seen = daemon
-            .handle_request(UID, request("r-2", "use recent_wakes {}"))
-            .await;
-        assert!(reply_text(&seen).contains(r#""kind":"follow-up""#));
+        #[cfg(feature = "self-debug")]
+        {
+            let ticks = stores.recent_ticks(5).unwrap();
+            assert_eq!(ticks[0].kind, "follow-up");
+            assert_eq!(ticks[0].due_ms, booked[0].at_ms);
+            assert_eq!(ticks[0].outcome, "ran; ended 1 booked wake");
+            let seen = daemon
+                .handle_request(UID, request("r-2", "use recent_wakes {}"))
+                .await;
+            assert!(reply_text(&seen).contains(r#""kind":"follow-up""#));
+        }
     }
 
     #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
@@ -4037,6 +4053,7 @@ mod tests {
         assert!(shown_text(&vec![b'a'; MAX_SHOWN_BYTES]).is_some());
     }
 
+    #[cfg(feature = "self-debug")]
     #[tokio::test(flavor = "multi_thread")]
     async fn the_assistant_reads_its_own_runs_and_usage_but_no_message() {
         let dir = tempfile::tempdir().unwrap();

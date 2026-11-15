@@ -55,6 +55,11 @@ part pays for it at each build.
   without it refuses `[skills] dir` at start. A reflection then does not
   ask for a skill draft. A build with none of `plans`, `followups` and
   `skills` has no `list_plans`.
+- `self-debug` gates `recent_runs`, `failed_attempts`, `model_usage` and
+  `recent_wakes`, the tick log that the daemon writes, and the `runlog` and
+  `tick_log` modules of `littleguy-stores`. `runs = true` under `[tools]`
+  is the default, so a build without it only logs that the tools are off.
+  The heartbeat precheck still runs, but nothing reads its verdict.
 - `[tools] plans` still switches the whole set of the assistant's own
   tools, also `wake_me`, `cancel_wake`, `propose_skill` and
   `recent_wakes`. Their own features split that switch.

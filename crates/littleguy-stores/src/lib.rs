@@ -22,7 +22,7 @@
 //! ([`approvals`]), and the goals and ideas of the assistant (`plans`,
 //! with the `plans` feature).
 //!
-//! [`RunLog`] is the one reader of `lg.db` itself. It opens the file read
+//! `RunLog`, with the `self-debug` feature, is the one reader of `lg.db` itself. It opens the file read
 //! only, so the runtime stays its one writer.
 
 use std::collections::BTreeSet;
@@ -40,14 +40,17 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 pub mod approvals;
 #[cfg(feature = "plans")]
 pub mod plans;
+#[cfg(feature = "self-debug")]
 pub mod runlog;
 #[cfg(feature = "skills")]
 pub mod skill_drafts;
+#[cfg(feature = "self-debug")]
 pub mod tick_log;
 #[cfg(feature = "followups")]
 pub mod wakes;
 
 pub use approvals::{ApprovalRecord, Claim, Verdict};
+#[cfg(feature = "self-debug")]
 pub use runlog::RunLog;
 
 /// The schema version that [`SqliteStores::open`] writes.

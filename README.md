@@ -266,7 +266,8 @@ fetch_max_chars = 20000         # the most text of one page
   usage (tokens, cost and latency) over a window. Each tool runs one fixed
   query on `lg.db`, read only, and reads no message.
   [ADR 0019](docs/adr/0019-the-assistant-reads-its-own-runs.md) explains
-  the design.
+  the design. These tools and `recent_wakes` come with the `self-debug`
+  feature, which is on by default.
 
 ## Goals and ideas
 

@@ -130,6 +130,7 @@ impl Tools {
         if config.files {
             tools.extend(file_tools());
         }
+        #[cfg(feature = "self-debug")]
         if config.runs {
             tools.extend(crate::runlog::tools(db));
         }
@@ -201,8 +202,17 @@ mod tests {
             &[]
         };
         let files = ["read_file", "write_file", "list_files", "delete_file"];
-        let runs = ["recent_runs", "failed_attempts", "model_usage"];
-        let expected: Vec<&str> = web.iter().copied().chain(files).chain(runs).collect();
+        let runs: &[&str] = if cfg!(feature = "self-debug") {
+            &["recent_runs", "failed_attempts", "model_usage"]
+        } else {
+            &[]
+        };
+        let expected: Vec<&str> = web
+            .iter()
+            .copied()
+            .chain(files)
+            .chain(runs.iter().copied())
+            .collect();
         assert_eq!(all.names(), expected);
         assert_eq!(
             all.workspace.as_deref(),

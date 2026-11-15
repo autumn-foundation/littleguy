@@ -44,6 +44,7 @@ mod plans;
 mod protocol;
 #[cfg(feature = "refine")]
 mod refine;
+#[cfg(feature = "self-debug")]
 mod runlog;
 mod sandbox;
 #[cfg(feature = "skills")]

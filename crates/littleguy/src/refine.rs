@@ -37,6 +37,7 @@ pub const FILE_NAME: &str = "overlays.db";
 pub const PROPOSER_ID: &str = "lg-refine";
 
 /// The author of an overlay version that syncs the skills folder.
+#[cfg(feature = "skills")]
 pub const SKILLS_ID: &str = "lg-skills";
 
 /// The attempts of one proposal. A reply that does not decode or does not
@@ -283,6 +284,7 @@ impl Refine {
     ///
     /// Returns an error when the engine refuses the overlay, when the
     /// pointer moved meanwhile, or when the store fails.
+    #[cfg(feature = "skills")]
     pub async fn set_skills(
         &self,
         skills: std::collections::BTreeMap<String, autumn_harvest_agent::SkillText>,
@@ -511,6 +513,7 @@ mod tests {
         assert!(entries[0].active);
     }
 
+    #[cfg(feature = "skills")]
     #[tokio::test]
     async fn skills_sync_once_and_a_proposal_cannot_change_them() {
         use autumn_harvest_agent::SkillText;

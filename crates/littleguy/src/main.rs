@@ -46,6 +46,7 @@ mod protocol;
 mod refine;
 mod runlog;
 mod sandbox;
+#[cfg(feature = "skills")]
 mod skills;
 mod tools;
 mod wake;
@@ -525,12 +526,15 @@ fn with_config_file(daemon: daemon::Daemon, file: Option<PathBuf>) -> daemon::Da
     let Some(file) = file else {
         return daemon;
     };
+    #[cfg(feature = "skills")]
     let skills = file.parent().map(|parent| parent.join("skills"));
     let daemon = daemon.with_config_file(file);
-    match skills {
+    #[cfg(feature = "skills")]
+    let daemon = match skills {
         Some(dir) => daemon.with_skills_dir(dir),
         None => daemon,
-    }
+    };
+    daemon
 }
 
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {

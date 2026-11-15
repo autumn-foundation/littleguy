@@ -23,8 +23,11 @@ use std::sync::Arc;
 #[cfg(feature = "followups")]
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 use autumn_harvest_agent::flow::labels;
-use autumn_harvest_agent::{AgentError, ErrorKind, FnTool, Tool, ToolContext, ToolEffect};
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
+use autumn_harvest_agent::{AgentError, ErrorKind, ToolContext};
+use autumn_harvest_agent::{FnTool, Tool, ToolEffect};
 use chrono::{DateTime, Utc};
 use littleguy_stores::SqliteStores;
 #[cfg(feature = "plans")]
@@ -33,10 +36,12 @@ use serde_json::{Value, json};
 
 /// The key of one tool call. A retried call has the same key, so the store
 /// adds its row once.
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn call_key(ctx: &ToolContext) -> String {
     format!("{}:{}", ctx.run_id.as_str(), ctx.call_id)
 }
 
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
@@ -47,10 +52,12 @@ fn time(ms: Option<i64>) -> Value {
         .map_or(Value::Null, |at| json!(at.to_rfc3339()))
 }
 
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn refuse(message: impl Into<String>) -> AgentError {
     AgentError::new(ErrorKind::Tool, message)
 }
 
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn text<'a>(input: &'a Value, name: &str) -> Result<&'a str, AgentError> {
     input[name]
         .as_str()
@@ -124,11 +131,13 @@ impl Default for WakeLinks {
 #[cfg(feature = "followups")]
 const MAX_WAKE_MINUTES: i64 = littleguy_stores::wakes::MAX_AHEAD_MS / 60_000;
 
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn object(properties: &Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required})
 }
 
 /// What `list_plans` says it lists, from the parts of this build.
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn list_plans_description() -> String {
     let mut what = Vec::new();
     if cfg!(feature = "plans") {
@@ -137,7 +146,9 @@ fn list_plans_description() -> String {
     if cfg!(feature = "followups") {
         what.push("wakes");
     }
-    what.push("skill drafts");
+    if cfg!(feature = "skills") {
+        what.push("skill drafts");
+    }
     let last = what.pop().unwrap_or_default();
     let mut text = if what.is_empty() {
         format!("List your {last}.")
@@ -159,147 +170,166 @@ fn list_plans_description() -> String {
     text
 }
 
-/// The goal, idea, wake and skill tools over `stores`.
+/// The goal, idea, wake and skill tools over `stores`, as this build has
+/// them.
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "the tools, each a schema and a short body, read best in one list"
-)]
 pub fn tools(
     stores: &Arc<SqliteStores>,
     #[cfg(feature = "followups")] wakes: &WakeLinks,
 ) -> Vec<Arc<dyn Tool>> {
-    let list = Arc::clone(stores);
-    let draft = Arc::clone(stores);
-    let ticks = Arc::clone(stores);
-    let tools = vec![
-        FnTool::new(
-            "list_plans",
-            list_plans_description(),
-            json!({"type": "object", "properties": {}}),
-            move |_input| {
-                let stores = Arc::clone(&list);
-                async move {
-                    let drafts = stores.skill_drafts()?;
-                    #[cfg(any(feature = "plans", feature = "followups"))]
-                    let now = now_ms();
-                    let listing = json!({
-                        "skill_drafts": drafts.iter().map(|draft| json!({
-                            "id": draft.id,
-                            "name": draft.name,
-                            "description": draft.description,
-                        })).collect::<Vec<_>>(),
-                    });
-                    #[cfg(feature = "followups")]
-                    let listing = {
-                        let mut listing = listing;
-                        listing["wakes"] = stores
-                            .pending_wakes()?
-                            .iter()
-                            .map(|wake| {
-                                json!({
-                                    "id": wake.id,
-                                    "at": time(Some(wake.at_ms)),
-                                    "due": wake.at_ms <= now,
-                                    "about": wake.about,
-                                })
-                            })
-                            .collect();
-                        listing
-                    };
-                    #[cfg(feature = "plans")]
-                    let listing = {
-                        let mut listing = listing;
-                        let plans = stores.plans()?;
-                        listing["goals"] =
-                            plans.goals.iter().map(|goal| goal_json(goal, now)).collect();
-                        listing["ideas"] = plans.ideas.iter().map(idea_json).collect();
-                        listing
-                    };
-                    Ok(listing)
-                }
-            },
-        )
-        .effect(ToolEffect::ReadOnly)
-        .label(labels::UNTRUSTED_INPUT)
-        .shared(),
-        FnTool::with_context(
-            "propose_skill",
-            "Draft a skill: know-how that you will load on demand later, written as the body \
-             of a SKILL.md. Draft one when you find a way of doing something that you will \
-             need again. It does nothing until the owner accepts it on the Skills tab; tell \
-             them you drafted it. A draft with the name of an existing skill revises it.",
-            object(
-                &json!({
-                    "name": {"type": "string", "description": "lowercase-with-dashes, for example triage-inbox."},
-                    "description": {"type": "string", "description": "One line: when to load the skill."},
-                    "body": {"type": "string", "description": "The know-how, in markdown."},
-                }),
-                &["name", "description", "body"],
-            ),
-            move |input, ctx| {
-                let stores = Arc::clone(&draft);
-                async move {
-                    let id = stores.add_skill_draft(
-                        &call_key(&ctx),
-                        text(&input, "name")?,
-                        text(&input, "description")?,
-                        text(&input, "body")?,
-                        now_ms(),
-                    )?;
-                    Ok(json!({"skill_draft": id, "status": "waits for the owner"}))
-                }
-            },
-        )
-        .effect(ToolEffect::Internal)
-        .shared(),
-        FnTool::new(
-            "recent_wakes",
-            "List the newest times that you woke on your own, newest first: heartbeats, briefs, \
-             reflections and the wakes you booked. Each says when it was due, when it ended, \
-             and how it went, for example skipped by the precheck with no model call. Your \
-             run log cannot show these, because every op runs inside one long run.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "limit": {"type": "integer", "minimum": 1, "description": "The most rows. Default 20."},
-                },
-            }),
-            move |input| {
-                let stores = Arc::clone(&ticks);
-                async move {
-                    let limit = input["limit"]
-                        .as_u64()
-                        .and_then(|limit| u32::try_from(limit).ok())
-                        .unwrap_or(20)
-                        .max(1);
-                    let rows = stores.recent_ticks(limit)?;
-                    Ok(json!({"ticks": rows.iter().map(|tick| json!({
-                        "kind": tick.kind,
-                        "due": time(Some(tick.due_ms)),
-                        "ended": time(Some(tick.seen_ms)),
-                        "outcome": tick.outcome,
-                    })).collect::<Vec<_>>()}))
-                }
-            },
-        )
-        .effect(ToolEffect::ReadOnly)
-        .shared(),
-    ];
+    let tools = std::iter::empty::<Arc<dyn Tool>>();
+    #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
+    let tools = tools.chain(std::iter::once(list_plans(stores)));
     // The goal and idea tools come right after `list_plans`.
     #[cfg(feature = "plans")]
-    let tools = {
-        let mut tools = tools;
-        tools.splice(1..1, goal_tools(stores));
-        tools
-    };
+    let tools = tools.chain(goal_tools(stores));
+    let tools = tools.chain(std::iter::once(recent_wakes(stores)));
+    #[cfg(feature = "skills")]
+    let tools = tools.chain(std::iter::once(propose_skill(stores)));
     #[cfg(feature = "followups")]
-    let tools = {
-        let mut tools = tools;
-        tools.extend(wake_tools(stores, wakes));
-        tools
-    };
-    tools
+    let tools = tools.chain(wake_tools(stores, wakes));
+    tools.collect()
+}
+
+/// `list_plans`: the goals, ideas, wakes and skill drafts of this build.
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
+fn list_plans(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
+    let list = Arc::clone(stores);
+    FnTool::new(
+        "list_plans",
+        list_plans_description(),
+        json!({"type": "object", "properties": {}}),
+        move |_input| {
+            let stores = Arc::clone(&list);
+            async move {
+                #[cfg(any(feature = "plans", feature = "followups"))]
+                let now = now_ms();
+                let listing = json!({});
+                #[cfg(feature = "skills")]
+                let listing = {
+                    let mut listing = listing;
+                    listing["skill_drafts"] = stores
+                        .skill_drafts()?
+                        .iter()
+                        .map(|draft| {
+                            json!({
+                                "id": draft.id,
+                                "name": draft.name,
+                                "description": draft.description,
+                            })
+                        })
+                        .collect();
+                    listing
+                };
+                #[cfg(feature = "followups")]
+                let listing = {
+                    let mut listing = listing;
+                    listing["wakes"] = stores
+                        .pending_wakes()?
+                        .iter()
+                        .map(|wake| {
+                            json!({
+                                "id": wake.id,
+                                "at": time(Some(wake.at_ms)),
+                                "due": wake.at_ms <= now,
+                                "about": wake.about,
+                            })
+                        })
+                        .collect();
+                    listing
+                };
+                #[cfg(feature = "plans")]
+                let listing = {
+                    let mut listing = listing;
+                    let plans = stores.plans()?;
+                    listing["goals"] = plans
+                        .goals
+                        .iter()
+                        .map(|goal| goal_json(goal, now))
+                        .collect();
+                    listing["ideas"] = plans.ideas.iter().map(idea_json).collect();
+                    listing
+                };
+                Ok(listing)
+            }
+        },
+    )
+    .effect(ToolEffect::ReadOnly)
+    .label(labels::UNTRUSTED_INPUT)
+    .shared()
+}
+
+/// `propose_skill`: a draft that the owner accepts or declines.
+#[cfg(feature = "skills")]
+fn propose_skill(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
+    let draft = Arc::clone(stores);
+    FnTool::with_context(
+        "propose_skill",
+        "Draft a skill: know-how that you will load on demand later, written as the body \
+         of a SKILL.md. Draft one when you find a way of doing something that you will \
+         need again. It does nothing until the owner accepts it on the Skills tab; tell \
+         them you drafted it. A draft with the name of an existing skill revises it.",
+        object(
+            &json!({
+                "name": {"type": "string", "description": "lowercase-with-dashes, for example triage-inbox."},
+                "description": {"type": "string", "description": "One line: when to load the skill."},
+                "body": {"type": "string", "description": "The know-how, in markdown."},
+            }),
+            &["name", "description", "body"],
+        ),
+        move |input, ctx| {
+            let stores = Arc::clone(&draft);
+            async move {
+                let id = stores.add_skill_draft(
+                    &call_key(&ctx),
+                    text(&input, "name")?,
+                    text(&input, "description")?,
+                    text(&input, "body")?,
+                    now_ms(),
+                )?;
+                Ok(json!({"skill_draft": id, "status": "waits for the owner"}))
+            }
+        },
+    )
+    .effect(ToolEffect::Internal)
+    .shared()
+}
+
+/// `recent_wakes`: the tick log, newest first.
+fn recent_wakes(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
+    let ticks = Arc::clone(stores);
+    FnTool::new(
+        "recent_wakes",
+        "List the newest times that you woke on your own, newest first: heartbeats, briefs, \
+         reflections and the wakes you booked. Each says when it was due, when it ended, \
+         and how it went, for example skipped by the precheck with no model call. Your \
+         run log cannot show these, because every op runs inside one long run.",
+        json!({
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "description": "The most rows. Default 20."},
+            },
+        }),
+        move |input| {
+            let stores = Arc::clone(&ticks);
+            async move {
+                let limit = input["limit"]
+                    .as_u64()
+                    .and_then(|limit| u32::try_from(limit).ok())
+                    .unwrap_or(20)
+                    .max(1);
+                let rows = stores.recent_ticks(limit)?;
+                Ok(json!({"ticks": rows.iter().map(|tick| json!({
+                    "kind": tick.kind,
+                    "due": time(Some(tick.due_ms)),
+                    "ended": time(Some(tick.seen_ms)),
+                    "outcome": tick.outcome,
+                })).collect::<Vec<_>>()}))
+            }
+        },
+    )
+    .effect(ToolEffect::ReadOnly)
+    .shared()
 }
 
 /// The tools that book and cancel a wake.
@@ -507,14 +537,27 @@ mod tests {
         } else {
             &[]
         };
+        let skills: &[&str] = if cfg!(feature = "skills") {
+            &["propose_skill"]
+        } else {
+            &[]
+        };
         let wakes: &[&str] = if cfg!(feature = "followups") {
             &["wake_me", "cancel_wake"]
         } else {
             &[]
         };
-        let want: Vec<&str> = std::iter::once("list_plans")
+        let lists = cfg!(any(
+            feature = "plans",
+            feature = "followups",
+            feature = "skills"
+        ));
+        let want: Vec<&str> = lists
+            .then_some("list_plans")
+            .into_iter()
             .chain(goals.iter().copied())
-            .chain(["propose_skill", "recent_wakes"])
+            .chain(["recent_wakes"])
+            .chain(skills.iter().copied())
             .chain(wakes.iter().copied())
             .collect();
         assert_eq!(names, want);
@@ -525,11 +568,13 @@ mod tests {
                 tool.name()
             );
         }
-        assert!(
-            tools[0]
-                .labels()
-                .iter()
-                .any(|label| label == labels::UNTRUSTED_INPUT)
-        );
+        // `list_plans` shows text that a research read, so it is untrusted.
+        for tool in tools.iter().filter(|tool| tool.name() == "list_plans") {
+            assert!(
+                tool.labels()
+                    .iter()
+                    .any(|label| label == autumn_harvest_agent::flow::labels::UNTRUSTED_INPUT)
+            );
+        }
     }
 }

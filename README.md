@@ -328,7 +328,8 @@ way of doing something that it will need again. A draft waits on the
 **Skills** tab of the Workspace page; accepting it writes the `SKILL.md`.
 Retiring a skill moves its folder to `.retired/`. Skills reach the
 assistant through the refine overlay, so they need a `[refine]` section.
-[ADR 0024](docs/adr/0024-skills.md) explains the design.
+[ADR 0024](docs/adr/0024-skills.md) explains the design. Skills come with
+the `skills` feature, which is on by default and needs `refine`.
 
 ## Heartbeat
 

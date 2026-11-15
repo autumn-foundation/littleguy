@@ -57,6 +57,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `reflection` | yes | The reflection after a memory consolidation pass: the assistant files ideas and drafts skills from what the pass learned. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
+| `skills` | yes | `[skills]`: SKILL.md files that reach the assistant through its profile overlay, `propose_skill`, and the Skills tab. | none |
 | `slack` | yes | Slack direct messages over Socket Mode, or over the Events API as a hook. | `autumn-plugin-slack`, `futures-util`, `reqwest`, `rustls`, `tokio-tungstenite` |
 | `web` | yes | The `web_fetch` and `web_search` tools. | `reqwest`, `rustls`, `url` |
 
@@ -81,6 +82,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 |---|---|---|---|
 | `followups` | no | The wakes that the assistant books (`wakes`). | none |
 | `plans` | no | The goals and ideas of the assistant (`plans`). | none |
+| `skills` | no | The skill drafts of the assistant (`skill_drafts`). | none |
 
 ### `littleguy-tools`
 

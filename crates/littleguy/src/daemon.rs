@@ -346,8 +346,10 @@ pub struct Daemon {
     #[cfg(feature = "reflection")]
     passes_seen: Option<DateTime<Utc>>,
     /// The skills folder of a config with no `[skills] dir`.
+    #[cfg(feature = "skills")]
     skills_default: Option<std::path::PathBuf>,
     /// The skills folder at the last sync. `None` syncs at the next tick.
+    #[cfg(feature = "skills")]
     skills_stamp: Option<Vec<(std::path::PathBuf, std::time::SystemTime, u64)>>,
     chats: Arc<Chats>,
     clock: Clock,
@@ -482,7 +484,9 @@ impl Daemon {
             disarm: true,
             #[cfg(feature = "reflection")]
             passes_seen: None,
+            #[cfg(feature = "skills")]
             skills_default: None,
+            #[cfg(feature = "skills")]
             skills_stamp: None,
             chats,
             clock: Arc::new(Utc::now),
@@ -1113,6 +1117,22 @@ impl Daemon {
         Ok(())
     }
 
+    /// A build without skills: the listing is off, and an action fails.
+    #[cfg(not(feature = "skills"))]
+    #[expect(
+        clippy::unused_self,
+        clippy::needless_pass_by_value,
+        reason = "the skills build reads the daemon and takes the request, and the router calls both the same way"
+    )]
+    fn skills_request(&self, request: Request) -> std::future::Ready<Result<Response>> {
+        let message = crate::features::missing("skills", "skills");
+        std::future::ready(Ok(if matches!(request, Request::Skills) {
+            Response::Off { message }
+        } else {
+            Response::Error { message }
+        }))
+    }
+
     /// Plans one reflection when a consolidation pass completed that no
     /// reflection saw yet (ADR 0022). It looks at most once a minute. Each
     /// pass counts once, also across a restart: `memory.db` keeps its key.
@@ -1184,6 +1204,7 @@ impl Daemon {
         #[cfg(feature = "reflection")]
         self.notice_passes()?;
         // A change to the skills folder reaches the overlay.
+        #[cfg(feature = "skills")]
         self.sync_skills().await;
         // The arm comes after the drive, so a due brief tick runs first. A
         // second drive books the armed tick at once.
@@ -1802,6 +1823,7 @@ mod plans;
 #[cfg(feature = "refine")]
 mod refine;
 mod reload;
+#[cfg(feature = "skills")]
 mod skills;
 #[cfg(feature = "discord")]
 pub use discord::DiscordLink;
@@ -3382,7 +3404,10 @@ mod tests {
         config
     }
 
-    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
+    #[cfg(all(
+        any(feature = "heartbeat", feature = "reflection"),
+        any(feature = "discord", feature = "sandbox")
+    ))]
     fn armed(daemon: &Daemon) -> Option<DateTime<Utc>> {
         daemon
             .wake
@@ -3391,7 +3416,10 @@ mod tests {
             .map(|(at, _)| at)
     }
 
-    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
+    #[cfg(all(
+        any(feature = "heartbeat", feature = "reflection"),
+        any(feature = "discord", feature = "sandbox")
+    ))]
     fn utc(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text)
             .unwrap()
@@ -4177,7 +4205,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "refine")]
+    #[cfg(feature = "skills")]
     #[tokio::test(flavor = "multi_thread")]
     async fn skills_from_the_folder_and_from_littleguy_reach_the_prompt() {
         let dir = tempfile::tempdir().unwrap();
@@ -4266,6 +4294,24 @@ mod tests {
         ));
     }
 
+    #[cfg(not(feature = "skills"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_build_without_skills_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(&dir.path().join("lg.db"), Arc::new(OfflineModel::new()));
+        assert!(matches!(
+            daemon.handle_request(UID, Request::Skills).await,
+            Response::Off { message } if message.contains("`skills` feature")
+        ));
+        assert!(matches!(
+            daemon
+                .handle_request(UID, Request::RetireSkill { name: String::from("x") })
+                .await,
+            Response::Error { message } if message.contains("`skills` feature")
+        ));
+    }
+
+    #[cfg(feature = "skills")]
     #[tokio::test(flavor = "multi_thread")]
     async fn skills_are_off_without_the_refine_loop() {
         let dir = tempfile::tempdir().unwrap();

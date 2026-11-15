@@ -48,6 +48,13 @@ part pays for it at each build.
   of the wake plan. It needs `plans`, since a reflection files ideas.
   `reflect = true` under `[memory]` is the default, so a build without the
   feature only logs that the reflection is off.
+- `skills` gates the skills folder and its sync into the overlay,
+  `propose_skill`, the skill drafts in `list_plans`, the owner's skills
+  requests and the `skill_drafts` module of `littleguy-stores`. It needs
+  `refine`, since skills reach the assistant through the overlay. A build
+  without it refuses `[skills] dir` at start. A reflection then does not
+  ask for a skill draft. A build with none of `plans`, `followups` and
+  `skills` has no `list_plans`.
 - `[tools] plans` still switches the whole set of the assistant's own
   tools, also `wake_me`, `cancel_wake`, `propose_skill` and
   `recent_wakes`. Their own features split that switch.

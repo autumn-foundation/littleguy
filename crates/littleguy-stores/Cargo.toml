@@ -12,6 +12,8 @@ repository.workspace = true
 plans = []
 # The wakes that the assistant books (`wakes`).
 followups = []
+# The skill drafts of the assistant (`skill_drafts`).
+skills = []
 
 [dependencies]
 autumn-harvest-agent = { version = "0.10.0", default-features = false }

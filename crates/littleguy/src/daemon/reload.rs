@@ -318,7 +318,10 @@ impl Daemon {
         }
         self.kit.config = config;
         // The refine loop or the skills folder may have changed.
-        self.skills_stamp = None;
+        #[cfg(feature = "skills")]
+        {
+            self.skills_stamp = None;
+        }
         tracing::info!(applied = ?merge.applied, profile = ?merge.profile, restart = ?merge.restart, "the config reloaded");
         Ok(merge)
     }

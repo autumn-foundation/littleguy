@@ -153,6 +153,18 @@ impl Tools {
         self
     }
 
+    /// Each tool, with its calls recorded in `traces` (ADR 0028).
+    #[cfg(feature = "self-debug")]
+    #[must_use]
+    pub fn traced(mut self, traces: &Arc<crate::trace::Traces>) -> Self {
+        self.tools = self
+            .tools
+            .into_iter()
+            .map(|tool| crate::trace::Traced::wrap(tool, traces))
+            .collect();
+        self
+    }
+
     /// The tools, in order.
     #[must_use]
     pub fn all(&self) -> &[Arc<dyn Tool>] {

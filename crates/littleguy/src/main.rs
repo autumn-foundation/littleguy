@@ -50,6 +50,8 @@ mod sandbox;
 #[cfg(feature = "skills")]
 mod skills;
 mod tools;
+#[cfg(feature = "self-debug")]
+mod trace;
 mod wake;
 mod web;
 

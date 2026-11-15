@@ -330,14 +330,37 @@ fn message_text(message: &autumn_harvest_agent::ChatMessage) -> String {
         .join("\n\n")
 }
 
-/// How a tick went, in a few words. `skipped` is the verdict of the
-/// heartbeat precheck, and `finished` counts the booked wakes it ended.
+/// What a tick that ran did: its tool calls and its answer.
 #[cfg(feature = "self-debug")]
-fn tick_outcome(skipped: Option<bool>, finished: usize) -> String {
+fn ran_with(trace: &crate::trace::TickTrace) -> String {
+    let tools = if trace.tools.is_empty() {
+        String::from("no tool calls")
+    } else {
+        format!("called {}", trace.tools.join(", "))
+    };
+    let answer = if trace.answer.trim() == "HEARTBEAT_OK" {
+        String::from("nothing to tell (HEARTBEAT_OK)")
+    } else if trace.answer.is_empty() {
+        String::from("no answer")
+    } else {
+        format!("answered: {}", trace.answer)
+    };
+    format!("ran; {tools}; {answer}")
+}
+
+/// How a tick went, in a few words. `skipped` is the verdict of the
+/// heartbeat precheck, `finished` counts the booked wakes it ended, and
+/// `trace` says what it did: its tool calls and its answer (ADR 0028).
+#[cfg(feature = "self-debug")]
+fn tick_outcome(
+    skipped: Option<bool>,
+    finished: usize,
+    trace: Option<&crate::trace::TickTrace>,
+) -> String {
     let ran = if skipped == Some(true) {
         String::from("skipped by the precheck: no goal due and no idea open; no model call")
     } else {
-        String::from("ran")
+        trace.map_or_else(|| String::from("ran"), ran_with)
     };
     match finished {
         0 => ran,
@@ -1198,13 +1221,12 @@ impl Daemon {
             return Ok(Some(arm.key));
         };
         // The state query replays the run, so it runs only after a wake.
-        let ticks = if wake.waits_for_tick(now) {
-            sqlite::state(&self.rt, &id)
-                .await?
-                .map_or(0, |state| state.ticks)
+        let state = if wake.waits_for_tick(now) {
+            sqlite::state(&self.rt, &id).await?
         } else {
-            0
+            None
         };
+        let ticks = state.as_ref().map_or(0, |state| state.ticks);
         // A tick ran: the booked wakes up to its time are done, and the
         // tick log gets a row.
         #[cfg(any(feature = "followups", feature = "self-debug"))]
@@ -1229,11 +1251,23 @@ impl Daemon {
                 // With no heartbeat there is no precheck to skip a tick.
                 #[cfg(not(feature = "heartbeat"))]
                 let skipped = None;
+                // What the tick did: the newest run that no person started.
+                // When it is the last segment, the state holds its answer,
+                // also from a model that does not stream.
+                let trace = self.live.traces().take_unprompted().map(|mut trace| {
+                    let last = state.as_ref().filter(|state| {
+                        state.segments > 0 && run_id(state, state.segments - 1) == trace.run_id
+                    });
+                    if let Some(answer) = last.and_then(|state| state.last_answer.as_deref()) {
+                        trace.answer = crate::trace::one_line(answer);
+                    }
+                    trace
+                });
                 stores.record_tick(&littleguy_stores::tick_log::Tick {
                     kind: kind.label().to_owned(),
                     due_ms: due.timestamp_millis(),
                     seen_ms: now.timestamp_millis(),
-                    outcome: tick_outcome(skipped, finished),
+                    outcome: tick_outcome(skipped, finished, trace.as_ref()),
                 })?;
             }
             // Only the tick log reads the kind and the count.
@@ -3894,7 +3928,12 @@ mod tests {
         clock.set("2026-11-14T14:00:30Z");
         daemon.tick().await.unwrap();
         #[cfg(feature = "self-debug")]
-        assert_eq!(stores.recent_ticks(1).unwrap()[0].outcome, "ran");
+        // It says what the tick did, and the person's add_idea is not part
+        // of it.
+        assert_eq!(
+            stores.recent_ticks(1).unwrap()[0].outcome,
+            "ran; no tool calls; answered: ok: check in"
+        );
         // The message prints no turn, so a failure logs no conversation.
         assert!(
             !turns.iter().any(|turn| turn.text.contains("[littleguy")),
@@ -4106,7 +4145,12 @@ mod tests {
             let ticks = stores.recent_ticks(5).unwrap();
             assert_eq!(ticks[0].kind, "follow-up");
             assert_eq!(ticks[0].due_ms, booked[0].at_ms);
-            assert_eq!(ticks[0].outcome, "ran; ended 1 booked wake");
+            let outcome = &ticks[0].outcome;
+            assert!(outcome.starts_with("ran; "), "the tick ran");
+            assert!(
+                outcome.ends_with("; ended 1 booked wake"),
+                "it ended the booked wake"
+            );
             let seen = daemon
                 .handle_request(UID, request("r-2", "use recent_wakes {}"))
                 .await;
@@ -4206,6 +4250,59 @@ mod tests {
         assert_eq!(last.text, "ok: check in");
         let hi = turns.iter().position(|turn| turn.text == "ok: hi").unwrap();
         assert_eq!(turns[hi].from, Speaker::Assistant);
+    }
+
+    #[cfg(all(
+        feature = "heartbeat",
+        feature = "self-debug",
+        any(feature = "discord", feature = "sandbox")
+    ))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_tick_log_names_the_tools_of_the_tick_and_not_of_the_person() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let hand = clock.clone();
+        let mut config = heartbeat_config();
+        if let Some(beat) = config.heartbeat.as_mut() {
+            beat.prompt = String::from("use list_plans {}");
+        }
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.tick().await.unwrap();
+        // The person files an idea, so the heartbeat has work.
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-1",
+                    r#"use add_idea {"title": "Docs", "body": "Links rot."}"#,
+                ),
+            )
+            .await;
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set("2026-11-14T13:00:01Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        clock.set("2026-11-14T13:00:30Z");
+        daemon.tick().await.unwrap();
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let outcome = stores.recent_ticks(1).unwrap()[0].outcome.clone();
+        assert!(
+            outcome.starts_with("ran; called list_plans; answered: log: "),
+            "{outcome}"
+        );
+        assert!(
+            !outcome.contains("add_idea"),
+            "the person's call is not the tick's"
+        );
     }
 
     #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]

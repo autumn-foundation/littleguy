@@ -178,6 +178,10 @@ impl Kit {
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db.as_path()));
         let model = Arc::clone(&self.model);
+        // Each tool call goes in the traces, so the tick log can say what a
+        // tick did (ADR 0028).
+        #[cfg(feature = "self-debug")]
+        let tools = tools.traced(self.live.traces());
         let assistant = harness(config, Arc::clone(&model), memory, delivery, tools, guard);
         #[cfg(feature = "refine")]
         let (assistant, refine) = super::refine::attach(assistant, config, &db, model)?;

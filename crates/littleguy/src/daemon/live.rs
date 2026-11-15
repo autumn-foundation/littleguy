@@ -36,6 +36,9 @@ pub enum Piece {
 #[derive(Debug, Default)]
 pub struct Live {
     taps: Mutex<Taps>,
+    /// What each run did, for the tick log (ADR 0028).
+    #[cfg(feature = "self-debug")]
+    traces: std::sync::Arc<crate::trace::Traces>,
 }
 
 #[derive(Debug, Default)]
@@ -86,6 +89,14 @@ impl Live {
     /// Names `run_id` as the run of the op of the current message.
     pub(super) fn expect(&self, run_id: &str) {
         self.taps().run = Run::Id(run_id.to_owned());
+        #[cfg(feature = "self-debug")]
+        self.traces.person(run_id);
+    }
+
+    /// What each run did. The tools record their calls here too.
+    #[cfg(feature = "self-debug")]
+    pub const fn traces(&self) -> &std::sync::Arc<crate::trace::Traces> {
+        &self.traces
     }
 
     /// Takes the first run that writes as the run of the op of the current
@@ -105,10 +116,18 @@ impl Live {
 impl LiveSink for Live {
     fn send(&self, event: &LiveEvent) {
         let (LiveEvent::Start { run_id, .. } | LiveEvent::Delta { run_id, .. }) = event;
+        // Every run leaves its text in the traces, watched or not.
+        #[cfg(feature = "self-debug")]
+        match event {
+            LiveEvent::Start { .. } => self.traces.started(run_id),
+            LiveEvent::Delta { text, .. } => self.traces.wrote(run_id, text),
+        }
         let reader = {
             let mut taps = self.taps();
             if taps.run == Run::First {
                 taps.run = Run::Id(run_id.clone());
+                #[cfg(feature = "self-debug")]
+                self.traces.person(run_id);
             }
             let ours = taps.run == Run::Id(run_id.clone());
             taps.current

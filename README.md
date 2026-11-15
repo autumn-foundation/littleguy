@@ -274,7 +274,11 @@ fetch_max_chars = 20000         # the most text of one page
 - `runs` lets the assistant debug itself: its newest runs and how each
   ended, the model and tool calls that failed and why, and its model
   usage (tokens, cost and latency) over a window. Each tool runs one fixed
-  query on `lg.db`, read only, and reads no message.
+  query on `lg.db`, read only, and reads no message. `config_summary`
+  shows littleguy the config that the daemon loaded and the features of
+  the build, so it can tell a part that is off from one that is broken. It
+  is an allow list of fields: no user id, prompt, path, URL or key, only
+  whether a key is set.
   [ADR 0019](docs/adr/0019-the-assistant-reads-its-own-runs.md) explains
   the design. These tools and `recent_wakes` come with the `self-debug`
   feature, which is on by default.

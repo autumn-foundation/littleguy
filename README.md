@@ -626,6 +626,7 @@ versions live in `overlays.db` next to the database.
 owner = "mark"
 system = "You are littleguy, a small and helpful personal assistant."
 window = 40
+max_steps = 8                         # tool rounds per message or tick; a reload applies it
 
 [discord]
 pairing = true                        # strangers get a code; false drops them
@@ -635,6 +636,10 @@ allowed = ["123456789012345678"]      # Discord user ids allowed from the start
 id = "inbox"
 from = "file:/home/mark/lg-inbox?delete=true"
 ```
+
+A message or a tick that needs more than `max_steps` tool rounds stops and
+says so. Raise it when littleguy researches in long chains; each round is a
+model call.
 
 | Flag | Variable | Default |
 |---|---|---|

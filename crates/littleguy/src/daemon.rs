@@ -190,7 +190,9 @@ pub fn harness(
 ) -> AgentHarness {
     let profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
-        .window(config.window);
+        .window(config.window)
+        // A tick with no cap of its own takes this one too.
+        .max_steps(config.max_steps);
     let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
     if let Some(guard) = guard {
         (harness, profile) = guard.apply(harness, profile);
@@ -216,6 +218,104 @@ fn shown_text(data: &[u8]) -> Option<String> {
         return None;
     }
     std::str::from_utf8(data).ok().map(str::to_owned)
+}
+
+/// Why an op stopped before its answer, in words for the owner.
+fn stopped_early(stop: autumn_harvest_agent::AgentStop) -> String {
+    use autumn_harvest_agent::AgentStop;
+    match stop {
+        AgentStop::StepsExhausted => {
+            String::from("I used every tool round that one message gets. Ask me to go on")
+        }
+        AgentStop::TokensExhausted | AgentStop::BudgetExceeded => {
+            String::from("I ran out of my token budget")
+        }
+        AgentStop::TranscriptFull => String::from("the conversation got too long"),
+        AgentStop::LoopDetected => String::from("I kept making the same tool calls"),
+        AgentStop::OutputCapped => String::from("my answer hit the output limit"),
+        AgentStop::ReplyTooLarge => String::from("my answer was too large to send"),
+        AgentStop::Interrupted => String::from("the op was interrupted"),
+        other => format!("the op stopped early ({other:?})"),
+    }
+}
+
+/// The answer to a person, from how the op stopped and its last text. An
+/// op that stopped early says why, also when it wrote some text first. An
+/// op with no text at all is no answer, never an empty reply.
+fn answer_of(stop: Option<autumn_harvest_agent::AgentStop>, text: &str) -> Response {
+    use autumn_harvest_agent::AgentStop;
+    let text = text.trim();
+    match stop {
+        None | Some(AgentStop::Completed) if !text.is_empty() => Response::Reply {
+            text: text.to_owned(),
+            usage: None,
+        },
+        None | Some(AgentStop::Completed) => Response::NoAnswer {
+            reason: String::from("the op ended without an answer"),
+        },
+        Some(stop) if text.is_empty() => Response::NoAnswer {
+            reason: stopped_early(stop),
+        },
+        Some(stop) => Response::Reply {
+            text: format!("{text}\n\n(I stopped early: {}.)", stopped_early(stop)),
+            usage: None,
+        },
+    }
+}
+
+/// `response` with `usage`, when it is a reply.
+fn with_usage(response: Response, usage: Option<crate::protocol::Usage>) -> Response {
+    match response {
+        Response::Reply { text, .. } => Response::Reply { text, usage },
+        other => other,
+    }
+}
+
+/// The run id of segment `segment` of the assistant, as the engine names
+/// it.
+fn run_id(state: &autumn_harvest_agent::AgentState, segment: u64) -> String {
+    format!("{}:s{segment}", state.incarnation)
+}
+
+/// The answer to the person who asked `asked`, from the transcript: the
+/// last text of the assistant after the newest message with that text, and
+/// before the next message of anyone. A tick prompt is such a message, so a
+/// tick answer never counts.
+fn answer_in(transcript: &[autumn_harvest_agent::ChatMessage], asked: &str) -> Response {
+    use autumn_harvest_agent::ChatRole;
+    let asked = asked.trim();
+    let answer = transcript
+        .iter()
+        .rposition(|message| message.role == ChatRole::User && message_text(message) == asked)
+        .and_then(|start| {
+            transcript[start + 1..]
+                .iter()
+                .take_while(|message| message.role != ChatRole::User)
+                .filter(|message| message.role == ChatRole::Assistant)
+                .map(message_text)
+                .filter(|text| !text.is_empty())
+                .last()
+        });
+    answer.map_or_else(
+        || Response::NoAnswer {
+            reason: String::from("the op ended without an answer"),
+        },
+        |text| Response::Reply { text, usage: None },
+    )
+}
+
+/// The text parts of `message`, trimmed, with a blank line between them.
+fn message_text(message: &autumn_harvest_agent::ChatMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            autumn_harvest_agent::ContentPart::Text(text) => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// How a tick went, in a few words. `skipped` is the verdict of the
@@ -594,7 +694,7 @@ impl Daemon {
         let result = match request {
             Request::Chat { message_id, text } => match cli_inbound(uid, message_id, text) {
                 Ok(inbound) => {
-                    // Each piece of text in this drive belongs to this message.
+                    // The pieces of the op of this message go to its reader.
                     self.live.begin(inbound.message_id.as_str());
                     let answer = self.handle(&inbound, "").await;
                     self.live.end();
@@ -729,8 +829,17 @@ impl Daemon {
             (self.clock)().timestamp_millis(),
             std::sync::atomic::Ordering::SeqCst,
         );
+        // A tick that is due already runs first, so the op of this message
+        // is the next segment, and its run id is known before it starts.
+        sqlite::drive(&mut self.rt, &id).await?;
         let before = sqlite::state(&self.rt, &id).await?;
         let failures_before = before.as_ref().map_or(0, |state| state.failures);
+        // With no run yet, nothing can run before this op: the first run
+        // that writes is its run.
+        match &before {
+            Some(state) => self.live.expect(&run_id(state, state.segments)),
+            None => self.live.expect_first(),
+        }
         let key = inbound.message_id.as_str();
         let mark = usage::mark(&self.rt, &id)?;
         let op = AgentOp::message_with_id(inbound.text.as_str(), key);
@@ -753,6 +862,23 @@ impl Daemon {
                 reason: String::from("the assistant has no running run"),
             });
         };
+        // The state names the last op of the drive. When a tick ran after
+        // this message, its answer, stop and failures are the tick's. Then
+        // the answer of this message is in the transcript.
+        let alone = before.as_ref().map_or(state.segments == 1, |before| {
+            before.incarnation == state.incarnation && state.segments == before.segments + 1
+        });
+        // The answer stands even when the ledger cannot be read. A tick
+        // that ran after the op in the same drive counts in it too.
+        let usage = usage::since(&self.rt, &id, mark)
+            .inspect_err(|error| tracing::warn!(%error, "the usage of an op is not known"))
+            .ok();
+        if !alone {
+            return Ok(with_usage(
+                answer_in(&state.transcript, &inbound.text),
+                usage,
+            ));
+        }
         if state.failures > failures_before {
             return Ok(Response::NoAnswer {
                 reason: state
@@ -760,16 +886,13 @@ impl Daemon {
                     .unwrap_or_else(|| String::from("the op failed")),
             });
         }
-        let Some(text) = state.last_answer else {
-            return Ok(Response::NoAnswer {
-                reason: String::from("the op ended without an answer"),
-            });
-        };
-        // The answer stands even when the ledger cannot be read.
-        let usage = usage::since(&self.rt, &id, mark)
-            .inspect_err(|error| tracing::warn!(%error, "the usage of an op is not known"))
-            .ok();
-        Ok(Response::Reply { text, usage })
+        Ok(with_usage(
+            answer_of(
+                state.last_stop,
+                state.last_answer.as_deref().unwrap_or_default(),
+            ),
+            usage,
+        ))
     }
 
     /// Handles one Discord direct message, as [`Self::chat`] does.
@@ -1850,25 +1973,16 @@ pub use slack::SlackInbox;
 /// parts of one message. Tool calls, tool results and system text are not
 /// turns, and a message with no text is left out.
 fn turns(transcript: &[autumn_harvest_agent::ChatMessage]) -> Vec<Turn> {
-    use autumn_harvest_agent::{ChatRole, ContentPart};
+    use autumn_harvest_agent::ChatRole;
     let mut turns = Vec::new();
     // A tick prompt is not a person. The next answer is the assistant on
     // its own.
     let mut after_tick = false;
     for message in transcript {
-        let text: Vec<&str> = message
-            .content
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text(text) => Some(text.trim()),
-                _ => None,
-            })
-            .filter(|text| !text.is_empty())
-            .collect();
+        let text = message_text(message);
         if text.is_empty() {
             continue;
         }
-        let text = text.join("\n\n");
         let from = match message.role {
             ChatRole::User if crate::wake::is_tick(&text) => {
                 after_tick = true;
@@ -3241,6 +3355,81 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_early_stop_is_never_an_empty_reply() {
+        use autumn_harvest_agent::AgentStop;
+        let Response::Reply { text, .. } = answer_of(Some(AgentStop::Completed), " Hi. ") else {
+            panic!("a completed op with text is a reply");
+        };
+        assert_eq!(text, "Hi.");
+        assert!(matches!(
+            answer_of(Some(AgentStop::Completed), ""),
+            Response::NoAnswer { .. }
+        ));
+        let Response::NoAnswer { reason } = answer_of(Some(AgentStop::StepsExhausted), "") else {
+            panic!("an early stop with no text is no answer");
+        };
+        assert!(reason.contains("tool round"));
+        let Response::Reply { text, .. } = answer_of(Some(AgentStop::LoopDetected), "Half done.")
+        else {
+            panic!("an early stop keeps its text");
+        };
+        assert!(text.starts_with("Half done."));
+        assert!(text.contains("I stopped early"));
+    }
+
+    /// A model that asks for another tool call each time, so an op runs out
+    /// of tool rounds.
+    #[derive(Debug, Default)]
+    struct BusyModel {
+        calls: std::sync::atomic::AtomicU64,
+    }
+
+    impl AgentModel for BusyModel {
+        fn chat<'a>(
+            &'a self,
+            _request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            use std::sync::atomic::Ordering;
+            Box::pin(async move {
+                // Each call reads another path, so no two calls repeat.
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(autumn_harvest_agent::ChatResponse {
+                    content: vec![autumn_harvest_agent::ContentPart::ToolCall {
+                        id: format!("c{n}"),
+                        name: String::from("read_file"),
+                        arguments: serde_json::json!({"path": format!("notes/{n}.md")}),
+                    }],
+                    stop_reason: autumn_harvest_agent::StopReason::ToolUse,
+                    usage: autumn_harvest_agent::TokenUsage::new(1, 1),
+                })
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_that_runs_out_of_tool_rounds_says_so() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let busy = Arc::new(BusyModel::default());
+        let mut config = config();
+        config.max_steps = 3;
+        let model: Arc<dyn AgentModel> = Arc::clone(&busy) as Arc<dyn AgentModel>;
+        let mut daemon =
+            Daemon::open(&dir.path().join("lg.db"), &config, model, UID, false).unwrap();
+        let Response::NoAnswer { reason } = daemon.handle_request(UID, request("b-1", "dig")).await
+        else {
+            panic!("an op that ran out of rounds answered");
+        };
+        assert!(reason.contains("tool round"));
+        // The config caps the rounds: three ran, and the fourth call found
+        // the cap.
+        assert_eq!(busy.calls.load(Ordering::SeqCst), 4);
+    }
+
     fn reply_text(response: &Response) -> &str {
         match response {
             Response::Reply { text, .. } => text,
@@ -3711,6 +3900,100 @@ mod tests {
                 .await;
             assert!(reply_text(&seen).contains(r#""kind":"follow-up""#));
         }
+    }
+
+    /// A model that moves the hand clock once, during the next call it
+    /// gets, so a timer comes due in the middle of an op.
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    #[derive(Debug)]
+    struct LateClockModel {
+        inner: MemoryModel,
+        clock: HandClock,
+        jump: std::sync::Mutex<Option<&'static str>>,
+    }
+
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    impl std::fmt::Debug for HandClock {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("HandClock")
+        }
+    }
+
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    impl AgentModel for LateClockModel {
+        fn chat<'a>(
+            &'a self,
+            request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            let jump = self.jump.lock().unwrap().take();
+            if let Some(at) = jump {
+                self.clock.set(at);
+            }
+            self.inner.chat(request)
+        }
+    }
+
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tick_in_the_same_drive_never_answers_for_a_person() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let model = Arc::new(LateClockModel {
+            inner: MemoryModel::default(),
+            clock: clock.clone(),
+            jump: std::sync::Mutex::new(None),
+        });
+        let hand = clock.clone();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &heartbeat_config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.tick().await.unwrap();
+        assert_eq!(armed(&daemon), Some(utc("2026-11-14T13:00:00Z")));
+        // An idea waits, so the heartbeat runs a model call.
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "t-1",
+                    r#"use add_idea {"title": "Docs", "body": "Links rot."}"#,
+                ),
+            )
+            .await;
+
+        // The heartbeat comes due while the model answers the person.
+        clock.set("2026-11-14T12:59:50Z");
+        *model.jump.lock().unwrap() = Some("2026-11-14T13:00:05Z");
+        let before = model.inner.calls.load(Ordering::SeqCst);
+        let answer = daemon.handle_request(UID, request("t-2", "hi")).await;
+        assert_eq!(
+            reply_text(&answer),
+            "ok: hi",
+            "the person gets their own answer"
+        );
+
+        // The tick ran, in that drive or the next, and it speaks on its own.
+        tick_until(&mut daemon, || {
+            model.inner.calls.load(Ordering::SeqCst) >= before + 2
+        })
+        .await;
+        let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
+            panic!("no history");
+        };
+        let last = turns.last().unwrap();
+        assert_eq!(last.from, Speaker::Unprompted);
+        assert_eq!(last.text, "ok: check in");
+        let hi = turns.iter().position(|turn| turn.text == "ok: hi").unwrap();
+        assert_eq!(turns[hi].from, Speaker::Assistant);
     }
 
     #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]

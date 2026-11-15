@@ -265,7 +265,19 @@ impl Daemon {
         // A plan that did not change keeps its arm, so a wake that went out
         // does not go out again. A plan that went away turns the timer off.
         if config.brief != self.kit.config.brief || config.heartbeat != self.kit.config.heartbeat {
+            // A reflection that waits for its arm survives the new plan.
+            let pending = self
+                .wake
+                .as_ref()
+                .and_then(Wake::pending_reflection)
+                .map(str::to_owned);
             self.wake = built.wake;
+            if let Some(pass) = pending {
+                let brief_armed = Arc::clone(&self.kit.brief_armed);
+                self.wake
+                    .get_or_insert_with(|| Wake::idle(brief_armed))
+                    .reflect(&pass);
+            }
             self.disarm = self.wake.is_none();
         }
         self.approvals = built.approvals;

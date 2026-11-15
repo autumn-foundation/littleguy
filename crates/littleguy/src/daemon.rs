@@ -218,6 +218,13 @@ fn shown_text(data: &[u8]) -> Option<String> {
     std::str::from_utf8(data).ok().map(str::to_owned)
 }
 
+/// How often the daemon looks for consolidation passes to reflect on.
+const PASS_LOOK_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
+
+/// How far back the daemon looks for a pass. A pass from before stays
+/// without a reflection.
+const PASS_LOOK_BACK: chrono::TimeDelta = chrono::TimeDelta::days(2);
+
 /// The seconds since the Unix epoch.
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -309,6 +316,8 @@ pub struct Daemon {
     /// Whether the engine timer may still tick for a plan that went away.
     /// The next arm checks once.
     disarm: bool,
+    /// When the daemon last looked for consolidation passes to reflect on.
+    passes_seen: Option<DateTime<Utc>>,
     chats: Arc<Chats>,
     clock: Clock,
     /// The store of the calls that wait, when a call can wait.
@@ -436,6 +445,7 @@ impl Daemon {
             connections: None,
             wake: built.wake,
             disarm: true,
+            passes_seen: None,
             chats,
             clock: Arc::new(Utc::now),
             approvals: built.approvals,
@@ -976,6 +986,61 @@ impl Daemon {
         Ok(Some(arm.key))
     }
 
+    /// Plans one reflection when a consolidation pass completed that no
+    /// reflection saw yet (ADR 0022). It looks at most once a minute. Each
+    /// pass counts once, also across a restart: `memory.db` keeps its key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime or the store cannot read.
+    fn notice_passes(&mut self) -> Result<()> {
+        let config = &self.kit.config;
+        if !(config.memory.enabled && config.memory.reflect && config.tools.plans) {
+            return Ok(());
+        }
+        let now = (self.clock)();
+        if self
+            .passes_seen
+            .is_some_and(|seen| now - seen < PASS_LOOK_EVERY)
+        {
+            return Ok(());
+        }
+        self.passes_seen = Some(now);
+        let Some(stores) = self.kit.stores.clone() else {
+            return Ok(());
+        };
+        let filter = autumn_harvest_sqlite::ExecutionFilter {
+            workflow_name: Some(String::from(
+                autumn_harvest_agent::consolidate::CONSOLIDATE_WORKFLOW_NAME,
+            )),
+            states: vec![String::from("COMPLETED")],
+            started_after: Some(now - PASS_LOOK_BACK),
+            limit: Some(10),
+            ..autumn_harvest_sqlite::ExecutionFilter::default()
+        };
+        let mut newest = None;
+        for pass in self.rt.list_executions(&filter)?.executions {
+            let autumn_harvest_sqlite::Stored::Value(id) = pass.exec_id else {
+                continue;
+            };
+            let key = format!("{}{id}", crate::wake::REFLECT_KEY);
+            if stores.was_sent(&key)? {
+                continue;
+            }
+            stores.mark_sent(&key)?;
+            // The listing is newest first. One reflection covers them all.
+            newest.get_or_insert(id);
+        }
+        if let Some(pass) = newest {
+            tracing::info!(%pass, "a consolidation pass ended: the assistant reflects");
+            let brief_armed = Arc::clone(&self.kit.brief_armed);
+            self.wake
+                .get_or_insert_with(|| Wake::idle(brief_armed))
+                .reflect(&pass);
+        }
+        Ok(())
+    }
+
     /// Drives the assistant until it blocks, so a due timer fires. Then it
     /// arms the next brief slot.
     ///
@@ -987,6 +1052,8 @@ impl Daemon {
         // and drives every run once.
         self.rt.poll_once().await?;
         let first = sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
+        // A consolidation pass that just ended plans a reflection.
+        self.notice_passes()?;
         // The arm comes after the drive, so a due brief tick runs first. A
         // second drive books the armed tick at once.
         let run = if self.arm_wake().await?.is_some() {
@@ -3227,6 +3294,68 @@ mod tests {
             !turns.iter().any(|turn| turn.text.contains("[littleguy")),
             "a tick prompt shows in the history"
         );
+    }
+
+    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_consolidation_pass_wakes_one_reflection_then_the_timer_stops() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-14T03:00:00Z");
+        let hand = clock.clone();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        assert_eq!(model.passes.load(Ordering::SeqCst), 1);
+
+        // The tick sees the pass and plans the reflection at the engine minimum.
+        daemon.tick().await.unwrap();
+        assert_eq!(armed(&daemon), Some(utc("2026-11-14T03:01:00Z")));
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set("2026-11-14T03:01:01Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
+            panic!("no history");
+        };
+        let last = turns.last().unwrap();
+        assert_eq!(last.from, Speaker::Unprompted);
+        // The assertion prints no turn, so a failure logs no conversation.
+        assert!(
+            last.text
+                .starts_with("ok: Your memory was just consolidated")
+        );
+
+        // The pass counts once, and nothing else is planned: the timer stops.
+        let after = model.calls.load(Ordering::SeqCst);
+        for minute in 3..6 {
+            clock.set(&format!("2026-11-14T03:0{minute}:30Z"));
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), after);
+        let booked = sqlite::state(&daemon.rt, daemon.assistant())
+            .await
+            .unwrap()
+            .and_then(|state| state.next_heartbeat_ms);
+        assert_eq!(booked, None);
     }
 
     #[cfg(any(feature = "discord", feature = "sandbox"))]

@@ -34,11 +34,14 @@ use anyhow::{Result, bail};
 use autumn_harvest::policy::Schedule;
 use autumn_harvest::schedule_plan::next_fire_after;
 use autumn_harvest_agent::agent::MIN_CUSTOM_HEARTBEAT_SECS;
-use autumn_harvest_agent::{
-    AgentHeartbeat, AgentOp, BoxFuture, Control, HeartbeatSetting, HeartbeatTask, Precheck,
-};
+use autumn_harvest_agent::{AgentHeartbeat, AgentOp, Control, HeartbeatSetting};
+#[cfg(feature = "heartbeat")]
+use autumn_harvest_agent::{BoxFuture, HeartbeatTask, Precheck};
 use chrono::{DateTime, Utc};
-use littleguy_core::{BriefConfig, HeartbeatConfig, QuietHours};
+#[cfg(feature = "heartbeat")]
+use littleguy_core::QuietHours;
+use littleguy_core::{BriefConfig, HeartbeatConfig};
+#[cfg(feature = "heartbeat")]
 use littleguy_stores::SqliteStores;
 
 /// The first line of the prompt of a brief tick.
@@ -80,6 +83,7 @@ pub const REFLECT_PROMPT: &str = "Your memory was just consolidated: new facts a
 pub const BRIEF_KEY: &str = "brief:";
 
 /// The prefix of the op key that arms one heartbeat.
+#[cfg(feature = "heartbeat")]
 pub const HEARTBEAT_KEY: &str = "heartbeat:";
 
 /// The prefix of the op key that turns the engine timer off.
@@ -135,6 +139,7 @@ pub enum Kind {
     /// A slot of the morning brief.
     Brief,
     /// A heartbeat.
+    #[cfg(feature = "heartbeat")]
     Heartbeat,
     /// A reflection after a consolidation pass.
     Reflection,
@@ -148,6 +153,7 @@ impl Kind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Brief => "brief",
+            #[cfg(feature = "heartbeat")]
             Self::Heartbeat => "heartbeat",
             Self::Reflection => "reflection",
             Self::Followup => "follow-up",
@@ -156,9 +162,11 @@ impl Kind {
 }
 
 /// What the precheck decided for the last heartbeat tick, for the tick log.
+#[cfg(feature = "heartbeat")]
 #[derive(Debug, Default)]
 pub struct Verdict(std::sync::atomic::AtomicU8);
 
+#[cfg(feature = "heartbeat")]
 impl Verdict {
     const UNKNOWN: u8 = 0;
     const RAN: u8 = 1;
@@ -190,12 +198,14 @@ struct Armed {
 }
 
 /// The daily window with no heartbeat, as two cron times.
+#[cfg(feature = "heartbeat")]
 #[derive(Debug, Clone)]
 struct Quiet {
     start: Schedule,
     end: Schedule,
 }
 
+#[cfg(feature = "heartbeat")]
 impl Quiet {
     fn new(hours: QuietHours, timezone: &str) -> Self {
         let at = |minutes: u16| Schedule::CronInTimezone {
@@ -218,6 +228,7 @@ impl Quiet {
 }
 
 /// The heartbeat part of the plan.
+#[cfg(feature = "heartbeat")]
 #[derive(Debug, Clone)]
 struct Beat {
     every: chrono::TimeDelta,
@@ -225,6 +236,7 @@ struct Beat {
     prompt: String,
 }
 
+#[cfg(feature = "heartbeat")]
 impl Beat {
     fn next(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let at = now + self.every;
@@ -245,6 +257,7 @@ struct Brief {
 #[derive(Debug, Clone)]
 pub struct Wake {
     brief: Option<Brief>,
+    #[cfg(feature = "heartbeat")]
     beat: Option<Beat>,
     /// The pass that waits for its reflection.
     reflect: Option<String>,
@@ -289,6 +302,11 @@ impl Wake {
                 })
             })
             .transpose()?;
+        #[cfg(not(feature = "heartbeat"))]
+        if beat.is_some() {
+            bail!(crate::features::missing("[heartbeat]", "heartbeat"));
+        }
+        #[cfg(feature = "heartbeat")]
         let beat = beat
             .map(|config| {
                 let quiet = config
@@ -310,11 +328,16 @@ impl Wake {
                 })
             })
             .transpose()?;
-        if brief.is_none() && beat.is_none() {
+        #[cfg(not(feature = "heartbeat"))]
+        let no_beat = true;
+        #[cfg(feature = "heartbeat")]
+        let no_beat = beat.is_none();
+        if brief.is_none() && no_beat {
             return Ok(None);
         }
         Ok(Some(Self {
             brief,
+            #[cfg(feature = "heartbeat")]
             beat,
             reflect: None,
             followup: None,
@@ -328,6 +351,7 @@ impl Wake {
     pub const fn idle(brief_armed: Arc<AtomicBool>) -> Self {
         Self {
             brief: None,
+            #[cfg(feature = "heartbeat")]
             beat: None,
             reflect: None,
             followup: None,
@@ -415,10 +439,13 @@ impl Wake {
             .brief
             .as_ref()
             .and_then(|brief| Some((next_fire_after(&brief.schedule, now)?, Kind::Brief)));
+        #[cfg(feature = "heartbeat")]
         let beat = self
             .beat
             .as_ref()
             .and_then(|beat| Some((beat.next(now)?, Kind::Heartbeat)));
+        #[cfg(not(feature = "heartbeat"))]
+        let beat = None;
         // The earliest wins, and a brief wins a tie with a heartbeat.
         let next = [reflect, followup, brief, beat]
             .into_iter()
@@ -443,6 +470,7 @@ impl Wake {
                     heartbeat(prompt, every),
                 )
             }
+            #[cfg(feature = "heartbeat")]
             Kind::Heartbeat => {
                 let prompt = self.beat.as_ref().map_or("", |beat| beat.prompt.as_str());
                 (
@@ -482,14 +510,8 @@ fn interval(now: DateTime<Utc>, at: DateTime<Utc>) -> Duration {
 /// The precheck of a heartbeat tick: run it only when a goal is due, or,
 /// with `research`, when an idea is open. A brief tick always runs. With
 /// no store of goals and ideas, every heartbeat runs.
+#[cfg(feature = "heartbeat")]
 #[derive(Debug)]
-#[cfg_attr(
-    not(feature = "plans"),
-    expect(
-        dead_code,
-        reason = "a build without goals and ideas never reads the store or `research`"
-    )
-)]
 pub struct Due {
     /// The goals and ideas, when they are on.
     pub plans: Option<Arc<SqliteStores>>,
@@ -499,8 +521,8 @@ pub struct Due {
     pub verdict: Arc<Verdict>,
 }
 
+#[cfg(feature = "heartbeat")]
 impl Due {
-    #[cfg(feature = "plans")]
     fn worth_it(&self, now_ms: i64) -> bool {
         let Some(plans) = &self.plans else {
             return true;
@@ -510,20 +532,9 @@ impl Due {
         // A store that fails runs the tick, which then says why.
         due.unwrap_or(true) || (self.research && ideas())
     }
-
-    /// A build without goals and ideas has no store of them, so every
-    /// heartbeat runs.
-    #[cfg(not(feature = "plans"))]
-    #[expect(
-        clippy::unused_self,
-        clippy::missing_const_for_fn,
-        reason = "the build with goals and ideas reads the store, and both share one signature"
-    )]
-    fn worth_it(&self, _now_ms: i64) -> bool {
-        true
-    }
 }
 
+#[cfg(feature = "heartbeat")]
 impl Precheck for Due {
     fn should_run<'a>(&'a self, task: &'a HeartbeatTask) -> BoxFuture<'a, bool> {
         Box::pin(async move {
@@ -539,6 +550,7 @@ impl Precheck for Due {
 
 #[cfg(test)]
 mod tests {
+    use littleguy_core::QuietHours;
     use littleguy_core::config::{
         DEFAULT_BRIEF_PROMPT, DEFAULT_BRIEF_SCHEDULE, DEFAULT_HEARTBEAT_PROMPT, HeartbeatDelivery,
     };
@@ -637,6 +649,7 @@ mod tests {
         assert_eq!(wake.arm(late, 4), None);
     }
 
+    #[cfg(feature = "heartbeat")]
     #[test]
     fn a_heartbeat_asks_the_precheck_and_beats_from_its_last_arm() {
         let now = at("2026-11-14T12:00:00Z");
@@ -656,6 +669,7 @@ mod tests {
         assert_eq!(arm.key, "heartbeat:2026-11-14T13:01:00+00:00");
     }
 
+    #[cfg(feature = "heartbeat")]
     #[test]
     fn the_brief_wins_when_it_comes_first_and_sets_the_flag() {
         let now = at("2026-11-02T07:00:00Z");
@@ -677,6 +691,7 @@ mod tests {
         assert!(!flag.load(Ordering::SeqCst));
     }
 
+    #[cfg(feature = "heartbeat")]
     #[test]
     fn quiet_hours_push_a_beat_to_their_end() {
         let quiet = beat(60, Some((22 * 60, 8 * 60)));
@@ -716,6 +731,13 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("brief.schedule"));
         assert!(Wake::new(Some(&brief("99 7 * * *", "UTC")), None, flag(), now).is_err());
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn a_bad_heartbeat_zone_is_refused() {
+        let now = at("2026-11-09T00:00:00Z");
+        let flag = || Arc::new(AtomicBool::new(false));
         let mut martian = beat(60, Some((60, 120)));
         martian.timezone = String::from("Mars/Olympus");
         let error = Wake::new(None, Some(&martian), flag(), now).unwrap_err();
@@ -745,6 +767,7 @@ mod tests {
         assert_eq!(wake.arm(later, 1), None);
     }
 
+    #[cfg(feature = "heartbeat")]
     #[test]
     fn a_reflection_goes_before_an_armed_heartbeat_which_comes_back() {
         let now = at("2026-11-14T03:00:00Z");
@@ -757,6 +780,7 @@ mod tests {
         assert_eq!(arm.key, "heartbeat:2026-11-14T04:06:01+00:00");
     }
 
+    #[cfg(feature = "heartbeat")]
     #[test]
     fn a_booked_wake_comes_before_the_heartbeat_and_reports_its_run() {
         let now = at("2026-11-14T12:00:00Z");
@@ -810,22 +834,20 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "plans"))]
-    #[tokio::test]
-    async fn without_plans_every_heartbeat_runs() {
-        let due = Due {
-            plans: Some(Arc::new(SqliteStores::open_in_memory().unwrap())),
-            research: true,
-            verdict: Arc::default(),
-        };
-        let heartbeat = HeartbeatTask {
-            prompt: marked(HEARTBEAT_MARK, "go"),
-            ..HeartbeatTask::default()
-        };
-        assert!(due.should_run(&heartbeat).await);
+    #[cfg(not(feature = "heartbeat"))]
+    #[test]
+    fn a_build_without_the_heartbeat_refuses_one() {
+        let error = Wake::new(
+            None,
+            Some(&beat(60, None)),
+            Arc::default(),
+            at("2026-11-14T00:00:00Z"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("`heartbeat` feature"));
     }
 
-    #[cfg(feature = "plans")]
+    #[cfg(feature = "heartbeat")]
     #[tokio::test]
     async fn the_precheck_runs_a_heartbeat_only_with_work_to_do() {
         let stores = Arc::new(SqliteStores::open_in_memory().unwrap());

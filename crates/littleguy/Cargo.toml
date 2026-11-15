@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.3"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat"]
 # Every integration.
 full = ["default", "camel", "google", "fleet"]
 # Discord direct messages over the gateway.
@@ -71,6 +71,9 @@ sandbox = ["autumn-harvest/sandbox-activities", "autumn-harvest-agent/sandbox"]
 # Goals and ideas: the tools that file, research and propose them, the
 # Goals and Ideas tabs, and the heartbeat precheck that looks at them.
 plans = ["littleguy-stores/plans"]
+# `[heartbeat]`: the assistant wakes on its own every so often. Its precheck
+# skips a tick with no model call when no goal is due and no idea waits.
+heartbeat = ["plans"]
 # `[refine]` and `lg refine`: profile overlays that the model proposes and
 # the owner activates. It adds no crate.
 refine = []

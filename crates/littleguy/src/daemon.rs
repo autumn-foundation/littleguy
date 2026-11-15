@@ -451,6 +451,7 @@ impl Daemon {
             live: Arc::clone(&live),
             brief_armed: Arc::default(),
             wake_links: crate::plans::WakeLinks::default(),
+            #[cfg(feature = "heartbeat")]
             verdict: Arc::default(),
         };
         let built = kit.assemble(config, &chats)?;
@@ -1041,9 +1042,13 @@ impl Daemon {
         {
             let finished = stores.finish_wakes(due.timestamp_millis())?;
             wake.set_followup(next_wake(stores)?, now);
+            #[cfg(feature = "heartbeat")]
             let skipped = (kind == crate::wake::Kind::Heartbeat)
                 .then(|| self.kit.verdict.take_skipped())
                 .flatten();
+            // With no heartbeat there is no precheck to skip a tick.
+            #[cfg(not(feature = "heartbeat"))]
+            let skipped = None;
             stores.record_tick(&littleguy_stores::tick_log::Tick {
                 kind: kind.label().to_owned(),
                 due_ms: due.timestamp_millis(),
@@ -3350,7 +3355,7 @@ mod tests {
         config
     }
 
-    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
     fn heartbeat_config() -> Config {
         let mut config = config();
         config.heartbeat = Some(littleguy_core::HeartbeatConfig {
@@ -3380,7 +3385,7 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    #[cfg(all(feature = "plans", any(feature = "discord", feature = "sandbox")))]
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_heartbeat_wakes_the_model_only_with_work_and_speaks_in_the_chat() {
         use std::sync::atomic::Ordering;
@@ -3650,7 +3655,7 @@ mod tests {
         assert!(reply_text(&seen).contains(r#""kind":"follow-up""#));
     }
 
-    #[cfg(any(feature = "discord", feature = "sandbox"))]
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_heartbeat_that_goes_away_stops_the_engine_timer() {
         let dir = tempfile::tempdir().unwrap();

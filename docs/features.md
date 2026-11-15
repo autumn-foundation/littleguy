@@ -48,6 +48,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `fleet` | no | `[fleet]`: the memory, the episodes and the approvals in a tenant database, replicated to a directory or an S3-compatible store by autumn-web. The replication of autumn-web needs a database backend, so it takes `postgres`. | `tokio-util`, `autumn-web/http-client`, `autumn-web/postgres` |
 | `full` | no | Every integration. | `autumn-harvest-plugin`, `autumn-plugin-discord`, `autumn-plugin-slack`, `axum`, `base64`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `futures-util`, `harvest-camel`, `reqwest`, `rmcp`, `rustls`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `tokio-tungstenite`, `tokio-util`, `url`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities`, `autumn-web/http-client`, `autumn-web/postgres` |
 | `google` | no | `[google]`: the Gmail and Google Calendar tools. Needs `oauth`. | `axum`, `base64`, `san-mateo`, `san-mateo-sqlite` |
+| `heartbeat` | yes | `[heartbeat]`: the assistant wakes on its own every so often. Its precheck skips a tick with no model call when no goal is due and no idea waits. | none |
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
 | `openai` | yes | `--model openai` and `--model openrouter`. | `reqwest`, `rustls` |

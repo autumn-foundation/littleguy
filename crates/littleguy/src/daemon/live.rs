@@ -1,11 +1,12 @@
 //! The text of an answer while the model writes it.
 //!
-//! The harness sends each piece of model text to a [`LiveSink`]. The daemon
-//! drives one op at a time, so every piece that arrives during a drive
-//! belongs to the message of that drive. [`Live`] marks that message, and it
-//! forwards each piece to the one reader that watches it. A piece of no
-//! watched message goes nowhere. Nothing here is durable: the answer that
-//! the daemon returns is still the answer that counts.
+//! The harness sends each piece of model text to a [`LiveSink`]. A drive
+//! can run more than the op of a message: a tick that comes due during the
+//! op runs right after it, in the same drive. So [`Live`] marks the message
+//! of the drive and the run id of its op, and it forwards only the pieces of
+//! that run to the one reader that watches the message. Any other piece goes
+//! nowhere. Nothing here is durable: the answer that the daemon returns is
+//! still the answer that counts.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -43,6 +44,20 @@ struct Taps {
     readers: HashMap<String, mpsc::Sender<Piece>>,
     /// The message of the drive that runs now.
     current: Option<String>,
+    /// Which run is the op of that message.
+    run: Run,
+}
+
+/// Which run is the op of the current message.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+enum Run {
+    /// Not known yet: no piece goes out.
+    #[default]
+    Unknown,
+    /// The first run that writes, when the assistant had no run before.
+    First,
+    /// This run id.
+    Id(String),
 }
 
 impl Live {
@@ -63,21 +78,42 @@ impl Live {
 
     /// Marks `message_id` as the message of the drive that starts.
     pub(super) fn begin(&self, message_id: &str) {
-        self.taps().current = Some(message_id.to_owned());
+        let mut taps = self.taps();
+        taps.current = Some(message_id.to_owned());
+        taps.run = Run::Unknown;
+    }
+
+    /// Names `run_id` as the run of the op of the current message.
+    pub(super) fn expect(&self, run_id: &str) {
+        self.taps().run = Run::Id(run_id.to_owned());
+    }
+
+    /// Takes the first run that writes as the run of the op of the current
+    /// message.
+    pub(super) fn expect_first(&self) {
+        self.taps().run = Run::First;
     }
 
     /// Ends the drive of the current message.
     pub(super) fn end(&self) {
-        self.taps().current = None;
+        let mut taps = self.taps();
+        taps.current = None;
+        taps.run = Run::Unknown;
     }
 }
 
 impl LiveSink for Live {
     fn send(&self, event: &LiveEvent) {
+        let (LiveEvent::Start { run_id, .. } | LiveEvent::Delta { run_id, .. }) = event;
         let reader = {
-            let taps = self.taps();
+            let mut taps = self.taps();
+            if taps.run == Run::First {
+                taps.run = Run::Id(run_id.clone());
+            }
+            let ours = taps.run == Run::Id(run_id.clone());
             taps.current
                 .as_ref()
+                .filter(|_| ours)
                 .and_then(|current| taps.readers.get(current))
                 .cloned()
         };
@@ -112,18 +148,48 @@ mod tests {
         live.watch("m-1", tx);
         live.send(&delta("before the drive"));
         live.begin("m-2");
+        live.expect("r");
         live.send(&delta("another message"));
         live.end();
         live.begin("m-1");
+        live.send(&delta("before its run is known"));
+        live.expect("r");
         live.send(&LiveEvent::Start {
             run_id: String::from("r"),
             step: 0,
         });
         live.send(&delta("hello"));
+        // A tick that runs next in the same drive has its own run.
+        live.send(&LiveEvent::Start {
+            run_id: String::from("tick"),
+            step: 0,
+        });
+        live.send(&LiveEvent::Delta {
+            run_id: String::from("tick"),
+            step: 0,
+            text: String::from("a tick"),
+        });
         live.end();
         live.send(&delta("after the drive"));
         assert_eq!(rx.try_recv(), Ok(Piece::Restart));
         assert_eq!(rx.try_recv(), Ok(Piece::Text(String::from("hello"))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn with_no_run_before_the_first_run_that_writes_is_the_op() {
+        let live = Live::default();
+        let (tx, mut rx) = mpsc::channel(8);
+        live.watch("m-1", tx);
+        live.begin("m-1");
+        live.expect_first();
+        live.send(&delta("first"));
+        live.send(&LiveEvent::Delta {
+            run_id: String::from("other"),
+            step: 0,
+            text: String::from("not ours"),
+        });
+        assert_eq!(rx.try_recv(), Ok(Piece::Text(String::from("first"))));
         assert!(rx.try_recv().is_err());
     }
 
@@ -133,6 +199,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         live.watch("m-1", tx);
         live.begin("m-1");
+        live.expect("r");
         live.send(&delta("a"));
         live.send(&delta("b"));
         live.forget("m-1");

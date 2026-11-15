@@ -3453,6 +3453,7 @@ mod tests {
                 "skill_draft",
                 "skills",
                 "ticks",
+                "build",
             ]
             .iter()
             .any(|key| result.get(key).is_some())
@@ -4734,6 +4735,38 @@ mod tests {
         assert_eq!(shown_text(&[0xff, 0xfe]), None);
         assert_eq!(shown_text(&vec![b'a'; MAX_SHOWN_BYTES + 1]), None);
         assert!(shown_text(&vec![b'a'; MAX_SHOWN_BYTES]).is_some());
+    }
+
+    #[cfg(feature = "self-debug")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_assistant_reads_the_config_it_runs_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut beating = config();
+        beating.heartbeat = Some(littleguy_core::HeartbeatConfig {
+            every_minutes: 45,
+            quiet: None,
+            timezone: String::from("UTC"),
+            research: true,
+            deliver: littleguy_core::HeartbeatDelivery::Web,
+            prompt: String::from("check in"),
+        });
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &beating,
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        let seen = daemon
+            .handle_request(UID, request("k-1", "use config_summary {}"))
+            .await;
+        let text = reply_text(&seen);
+        assert!(
+            text.contains(r#""every_minutes":45"#),
+            "the heartbeat is on"
+        );
+        assert!(text.contains(r#""refine":null"#), "refine is absent");
     }
 
     #[cfg(feature = "self-debug")]

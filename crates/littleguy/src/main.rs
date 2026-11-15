@@ -30,6 +30,8 @@ mod camel;
 mod camel;
 mod chats;
 mod client;
+#[cfg(feature = "self-debug")]
+mod config_view;
 mod daemon;
 mod features;
 #[cfg(feature = "fleet")]

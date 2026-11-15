@@ -3,8 +3,12 @@
 //! Every page and action needs the owner in the session. An action sends
 //! one [`Request`] through the daemon handle, as `lg` does over the socket,
 //! and answers with the section that it changed. So the pages hold no state
-//! of their own, and they can do nothing that `lg` cannot.
+//! of their own, and they can do nothing that `lg` cannot. The one exception
+//! is a chat answer that waits for its stream (see [`super::streams`]).
 
+use std::convert::Infallible;
+
+use autumn_plugin_markstream::sse::{Stream, StreamEvent, stream};
 use autumn_plugin_markstream::{Markstream, Mode, markstream_head};
 use autumn_web::AppState;
 use autumn_web::app::AppBuilder;
@@ -15,10 +19,13 @@ use autumn_web::reexports::axum::http::StatusCode;
 use autumn_web::reexports::axum::response::{IntoResponse, Response};
 use autumn_web::security::CsrfToken;
 use autumn_web::session::Session;
+use autumn_web::sse::{Event, Sse};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
 use super::Web;
 use crate::client::render;
+use crate::daemon::live::Piece;
 use crate::protocol::{
     ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response as Answer, Speaker,
     Turn,
@@ -66,8 +73,23 @@ impl autumn_web::plugin::Plugin for Assets {
 #[must_use]
 pub fn routes() -> Vec<autumn_web::Route> {
     routes![
-        index, manage, login, logout, chat, approvals, approve, deny, pairs, pair, unpair,
-        overlays, overlay, propose, activate, rollback,
+        index,
+        manage,
+        login,
+        logout,
+        chat,
+        chat_stream,
+        approvals,
+        approve,
+        deny,
+        pairs,
+        pair,
+        unpair,
+        overlays,
+        overlay,
+        propose,
+        activate,
+        rollback,
     ]
 }
 
@@ -169,13 +191,16 @@ fn turn(turn: &Turn) -> Markup {
     }
 }
 
+/// The style of an answer: markdown in a chat bubble.
+fn answer_markdown(markdown: Markstream) -> Markup {
+    let markdown = markdown.mode(Mode::Chat).class("markstream body");
+    html! { div.msg.lg { (markdown) } }
+}
+
 /// One answer of the assistant, or an error in its place.
 fn answer_turn(text: &str, ok: bool) -> Markup {
     if ok {
-        let markdown = Markstream::new(text)
-            .mode(Mode::Chat)
-            .class("markstream body");
-        html! { div.msg.lg { (markdown) } }
+        answer_markdown(Markstream::new(text))
     } else {
         html! { div.msg.lg.error { div.body { (text) } } }
     }
@@ -208,8 +233,9 @@ async fn index(State(state): State<AppState>, session: Session, csrf: CsrfToken)
                 }
             }
             div.composer-wrap {
-                form #composer hx-post="/chat" hx-target="#thread" hx-swap="beforeend"
-                    hx-indicator="#thinking" hx-disabled-elt="find button" {
+                // The chat script shows the dots and locks the button until
+                // the answer settles.
+                form #composer hx-post="/chat" hx-target="#thread" hx-swap="beforeend" {
                     textarea name="text" rows="1" required aria-label="Message"
                         placeholder="Message littleguy" {}
                     button type="submit" { "Send" }
@@ -289,7 +315,8 @@ struct Message {
     text: String,
 }
 
-/// Sends one message to the assistant and shows the answer.
+/// Sends one message to the assistant, and shows its answer as the model
+/// writes it. The answer streams from [`chat_stream`].
 #[post("/chat")]
 async fn chat(
     State(state): State<AppState>,
@@ -302,13 +329,67 @@ async fn chat(
     let Some(web) = web(&state) else {
         return broken();
     };
-    let request = Request::Chat {
-        message_id: crate::client::fresh_message_id(),
-        text: form.text,
+    let id = web.streams.put(web.handle.chat_live(form.text));
+    answer_markdown(Markstream::stream(format!("/chat/stream/{id}"))).into_response()
+}
+
+/// Streams one answer that [`chat`] started, once.
+#[get("/chat/stream/{id}")]
+async fn chat_stream(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<String>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
     };
-    let answer = ask(&web, request).await;
-    let (text, ok) = render(&answer);
-    answer_turn(&text, ok).into_response()
+    Sse::new(answer_events(web.streams.take(&id)))
+        .keep_alive(autumn_web::sse::keep_alive())
+        .into_response()
+}
+
+/// Where the events of an answer are.
+enum Feed {
+    /// The pieces come from the daemon.
+    Open(mpsc::Receiver<Piece>),
+    /// One event is left.
+    Last(StreamEvent),
+    /// The stream is over.
+    Closed,
+}
+
+/// The markstream events of one answer: the text while the model writes
+/// it, then the whole answer in its place. The answer is the text that
+/// counts, so a piece that a slow reader lost does no harm. With no pieces,
+/// the stream fails at once.
+fn answer_events(
+    pieces: Option<mpsc::Receiver<Piece>>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    let start = pieces.map_or(Feed::Last(StreamEvent::Error), Feed::Open);
+    stream::unfold(start, |feed| async move {
+        let (event, next) = match feed {
+            Feed::Closed => return None,
+            Feed::Last(event) => (event, Feed::Closed),
+            Feed::Open(mut pieces) => match pieces.recv().await {
+                Some(Piece::Restart) => (StreamEvent::replace(""), Feed::Open(pieces)),
+                Some(Piece::Text(text)) => (StreamEvent::chunk(text), Feed::Open(pieces)),
+                Some(Piece::Answer(answer)) => {
+                    let (text, ok) = render(&answer);
+                    let last = if ok {
+                        StreamEvent::Done
+                    } else {
+                        StreamEvent::Error
+                    };
+                    (StreamEvent::replace(text), Feed::Last(last))
+                }
+                None => (StreamEvent::Error, Feed::Closed),
+            },
+        };
+        Some((Ok(Event::from(event)), next))
+    })
 }
 
 /// The approvals section, with `notice` on top.

@@ -505,6 +505,16 @@ async fn camel(config: &Config, mapper: camel::Mapper, db: &Path) -> Result<Opti
     Ok(Some(camel::Camel::start(mapper, db).await?))
 }
 
+/// The bearer token of the hooks, from the variable that the config names.
+fn hook_token(config: &Config) -> Result<Option<web::HookToken>> {
+    config
+        .hooks
+        .as_ref()
+        .map(|hooks| web::HookToken::new(&hooks.token_env, std::env::var(&hooks.token_env).ok()))
+        .transpose()
+        .map_err(Into::into)
+}
+
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let config = load_config(args.config.as_deref(), env)?;
     features::check(&config)?;
@@ -554,11 +564,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     // The hook token is read first, so a missing one fails before the
     // daemon opens its database.
     let plan = web::Plan::of(&config);
-    let hooks = config
-        .hooks
-        .as_ref()
-        .map(|hooks| web::HookToken::new(&hooks.token_env, std::env::var(&hooks.token_env).ok()))
-        .transpose()?;
+    let hooks = hook_token(&config)?;
     let daemon = daemon::Daemon::open_with(&db, &config, model, uid, discord, extras)?;
     // The daemon watches its config file, and `lg reload` reads it too.
     let daemon = match config_file(args.config.as_deref(), env) {
@@ -576,6 +582,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     #[cfg(not(feature = "camel"))]
     let camel: Option<camel::Camel> = None;
     let (handle, jobs) = daemon::jobs(uid);
+    let handle = handle.with_live(daemon.live());
     let logins = web::Logins::new(web::base_url(plan.bind));
     // A daemon whose pages do not serve refuses `lg ui`.
     let daemon = if plan.pages {
@@ -594,6 +601,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let routes = web::Web {
         handle,
         logins,
+        streams: web::Streams::default(),
         hooks,
         #[cfg(feature = "slack")]
         slack,

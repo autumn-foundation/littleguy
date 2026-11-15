@@ -81,7 +81,7 @@ pub(super) fn same(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// 32 random bytes as hex.
-fn fresh_token() -> String {
+pub(super) fn fresh_token() -> String {
     let mut bytes = [0_u8; 32];
     if getrandom::fill(&mut bytes).is_err() {
         // No randomness: fall back to the clock and the process id. The

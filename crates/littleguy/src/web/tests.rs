@@ -708,7 +708,10 @@ async fn the_workspace_page_lists_the_files_and_opens_one() {
     let empty = rig.client.get("/workspace").send().await;
     empty.assert_status(200);
     empty.assert_body_contains("The workspace is empty");
-    empty.assert_selector_count("nav a[href='/workspace'][aria-current='page']", 1);
+    empty.assert_selector_count(
+        "header.bar nav a[href='/workspace'][aria-current='page']",
+        1,
+    );
 
     let saved = rig
         .handle
@@ -775,12 +778,22 @@ fn markdown_is_known_by_its_extension_in_any_case() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_owner_accepts_a_proposed_goal_on_the_workspace_page() {
+async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {
     let rig = rig_on(&config(false), None, Arc::new(Saver)).await;
     let token = sign_in(&rig).await;
-    let empty = rig.client.get("/workspace").send().await;
-    empty.assert_text_contains("#plans", "No goals yet");
-    empty.assert_text_contains("#plans", "No ideas yet");
+    let files = rig.client.get("/workspace").send().await;
+    files.assert_text_contains("#tabs a[aria-current='page']", "Files");
+    files.assert_selector_count("#tabs .count", 0);
+    rig.client
+        .get("/workspace?tab=goals")
+        .send()
+        .await
+        .assert_text_contains("#plan-view", "No goals yet");
+    rig.client
+        .get("/workspace?tab=ideas")
+        .send()
+        .await
+        .assert_text_contains("#plan-view", "No ideas yet");
 
     for (id, text) in [
         (
@@ -808,13 +821,27 @@ async fn the_owner_accepts_a_proposed_goal_on_the_workspace_page() {
         );
     }
 
-    let page = rig.client.get("/workspace").send().await;
-    page.assert_selector_count("#plans .plan.proposed", 1);
-    page.assert_selector_count("#plans button[hx-post='/plans/accept/1']", 1);
-    page.assert_selector_count("#plans button[hx-post='/plans/drop-idea/1']", 1);
-    page.assert_text_contains("#plans .plan.proposed", "waiting for you");
-    // An idea is text, and HTML in it stays text.
-    page.assert_selector_count("#plans b", 0);
+    // Every tab shows that a goal waits.
+    let files = rig.client.get("/workspace").send().await;
+    files.assert_text_contains("#tabs .count", "1 waiting");
+
+    // The goals tab opens the first goal as a document, with the buttons.
+    let goals = rig.client.get("/workspace?tab=goals").send().await;
+    goals.assert_text_contains("#tabs a[aria-current='page']", "Goals");
+    goals.assert_selector_count(
+        "#plan-view .files a[href='/workspace?tab=goals&id=1'] .dot",
+        1,
+    );
+    goals.assert_text_contains("#file .doc .tag", "waiting for you");
+    goals.assert_selector_count("#file button[hx-post='/plans/accept/1']", 1);
+    goals.assert_selector_count("#file button[hx-post='/plans/decline/1']", 1);
+    goals.assert_selector_count("#file a[href='/workspace?tab=ideas&id=1']", 1);
+
+    // The idea is a document too. HTML in it stays text.
+    let idea = rig.client.get("/workspace?tab=ideas&id=1").send().await;
+    idea.assert_selector_count("#file button[hx-post='/plans/drop-idea/1']", 1);
+    idea.assert_text_contains("#file .doc", "They <b>rot</b>.");
+    idea.assert_selector_count("#file b", 0);
 
     rig.client
         .post("/plans/accept/1")
@@ -828,10 +855,17 @@ async fn the_owner_accepts_a_proposed_goal_on_the_workspace_page() {
         .send()
         .await;
     accepted.assert_status(200);
-    accepted.assert_selector_count("section#plans .plan.proposed", 0);
-    accepted.assert_selector_count("button[hx-post='/plans/drop-goal/1']", 1);
-    accepted.assert_text_contains("#plans", "No ideas yet");
-    accepted.assert_text_contains("#plans", "checks every 60 min");
+    accepted.assert_selector_count("#plan-view .tag.active", 1);
+    accepted.assert_selector_count("#plan-view button[hx-post='/plans/drop-goal/1']", 1);
+    accepted.assert_text_contains("#plan-view .meta", "checks every 60 min");
+    // The tabs come along out of band, and nothing waits any more.
+    accepted.assert_selector_count("#tabs[hx-swap-oob='true']", 1);
+    accepted.assert_selector_count("#tabs .count", 0);
+    rig.client
+        .get("/workspace?tab=ideas")
+        .send()
+        .await
+        .assert_text_contains("#plan-view", "No ideas yet");
 
     let again = rig
         .client
@@ -839,7 +873,7 @@ async fn the_owner_accepts_a_proposed_goal_on_the_workspace_page() {
         .header("X-CSRF-Token", &token)
         .send()
         .await;
-    again.assert_text_contains("#plans .error", "1 is not a proposed goal");
+    again.assert_text_contains("#plan-view .error", "1 is not a proposed goal");
     rig.client
         .post("/plans/bogus/1")
         .header("X-CSRF-Token", &token)

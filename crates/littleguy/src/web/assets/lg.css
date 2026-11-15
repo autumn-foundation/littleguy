@@ -370,16 +370,72 @@ button:disabled {
 
 /* The workspace: the files on the left, the open file on the right. */
 
+/* Two rows: the tabs, and a view that takes the rest of the height. */
 .workspace {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(12rem, 18rem) 1fr;
-  gap: 1rem;
+  grid-template-rows: auto 1fr;
+  gap: 0.75rem;
   width: 100%;
   max-width: 72rem;
   margin: 0 auto;
-  padding: 1rem;
+  padding: 0.75rem 1rem 1rem;
+}
+
+.workspace .tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.workspace .tabs a {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.9rem;
+  margin-bottom: -1px;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+
+.workspace .tabs a:hover {
+  color: var(--text);
+}
+
+.workspace .tabs a[aria-current="page"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.workspace .tabs .count {
+  font-size: 0.72rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* Each tab: the list on the left, the open item on the right. */
+.workspace .split {
+  display: grid;
+  grid-template-columns: minmax(12rem, 18rem) 1fr;
+  gap: 1rem;
+  min-height: 0;
+}
+
+.workspace .split > #file.wide {
+  grid-column: 1 / -1;
+}
+
+.workspace .files .dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  align-self: center;
+  flex: none;
 }
 
 .workspace .files,
@@ -448,82 +504,83 @@ button:disabled {
 }
 
 @media (max-width: 40rem) {
-  .workspace {
+  .workspace .split {
     grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
   }
 }
 
-/* Goals and ideas, on top of the workspace page. */
+/* A goal or an idea, as a document. */
 
-.workspace .plans {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+.workspace .doc header {
+  display: flex;
   gap: 1rem;
+  align-items: flex-start;
+  justify-content: space-between;
 }
 
-.plans > .note,
-.plans > .error {
-  grid-column: 1 / -1;
+/* The title of a document, not the path of a file. */
+.workspace #file .doc h2 {
+  font-size: 1.15rem;
+  font-family: inherit;
+  color: var(--text);
   margin: 0;
 }
 
-.plans h2 {
-  font-size: 1rem;
-  margin: 0 0 0.5rem;
-}
-
-.plans .plan {
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.6rem 0.9rem;
-  margin-bottom: 0.6rem;
-}
-
-.plans .plan.proposed {
-  border-color: var(--accent);
-}
-
-.plans .plan header {
-  display: flex;
-  gap: 0.5rem;
-  align-items: baseline;
-}
-
-.plans .plan .id,
-.plans .meta,
-.plans .notes .at {
+.workspace .doc .id {
   color: var(--muted);
-  font-size: 0.85rem;
+  font-weight: 400;
 }
 
-.plans .tag {
-  margin-left: auto;
+.workspace .doc h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 1.25rem 0 0.4rem;
+}
+
+.workspace .doc .meta {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0.4rem 0 0;
+}
+
+.workspace .doc .tag {
   font-size: 0.75rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
   color: var(--accent);
 }
 
-.plans .plan p {
-  margin: 0.35rem 0;
+.workspace .doc .tag.active {
+  border-color: var(--line);
+  color: var(--muted);
 }
 
-.plans .notes {
-  margin: 0.35rem 0;
-  padding-left: 1.1rem;
-  font-size: 0.9rem;
-}
-
-.plans .actions {
+.workspace .doc .actions {
   display: flex;
   gap: 0.4rem;
-  justify-content: flex-end;
+  flex: none;
 }
 
-@media (max-width: 40rem) {
-  .workspace .plans {
-    grid-template-columns: 1fr;
-  }
+.workspace .doc .notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.workspace .doc .notes li {
+  border-left: 2px solid var(--line);
+  padding: 0.1rem 0 0.1rem 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.workspace .doc .notes .at {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0 0 0.2rem;
 }
 
 /* An answer that littleguy gave on its own, from a heartbeat or a brief. */

@@ -280,10 +280,47 @@ async fn manage(State(state): State<AppState>, session: Session, csrf: CsrfToken
     page("Manage", Some(csrf.token()), &body).into_response()
 }
 
-/// The file that the workspace page opens.
+/// What the workspace page opens: a tab, and a file or an item in it.
 #[derive(Debug, Deserialize)]
 struct Open {
+    tab: Option<String>,
     path: Option<String>,
+    id: Option<i64>,
+}
+
+/// A tab of the workspace page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    /// The files of the workspace.
+    Files,
+    /// The goals, proposed and active.
+    Goals,
+    /// The open ideas.
+    Ideas,
+}
+
+impl Tab {
+    /// The tab that `name` names. Anything else is the files.
+    fn parse(name: Option<&str>) -> Self {
+        match name {
+            Some("goals") => Self::Goals,
+            Some("ideas") => Self::Ideas,
+            _ => Self::Files,
+        }
+    }
+
+    /// The URL of the tab, with item `id` open.
+    fn url(self, id: Option<i64>) -> String {
+        let tab = match self {
+            Self::Files => return String::from("/workspace"),
+            Self::Goals => "goals",
+            Self::Ideas => "ideas",
+        };
+        id.map_or_else(
+            || format!("/workspace?tab={tab}"),
+            |id| format!("/workspace?tab={tab}&id={id}"),
+        )
+    }
 }
 
 /// The URL of the workspace page with `path` open.
@@ -293,9 +330,31 @@ fn workspace_url(path: &str) -> String {
     url
 }
 
-/// The files of the assistant workspace, and the one that is open. A link
-/// loads the whole page, so the page works without a script. With htmx, a
-/// click swaps only the open file.
+/// The tabs of the workspace page, with `current` marked. The goals tab
+/// counts the goals that wait for the owner. With `oob`, an htmx answer
+/// swaps the tabs too, so the count stays right after a decision.
+fn tabs(current: Tab, plans: &Answer, oob: bool) -> Markup {
+    let waiting = match plans {
+        Answer::Plans { goals, .. } => goals.iter().filter(|g| g.status == "proposed").count(),
+        _ => 0,
+    };
+    let mark = |tab: Tab| (tab == current).then_some("page");
+    html! {
+        nav #tabs.tabs aria-label="Workspace" hx-swap-oob=[oob.then_some("true")] {
+            a href=(Tab::Files.url(None)) aria-current=[mark(Tab::Files)] { "Files" }
+            a href=(Tab::Goals.url(None)) aria-current=[mark(Tab::Goals)] {
+                "Goals"
+                @if waiting > 0 { span.count title="waiting for you" { (waiting) " waiting" } }
+            }
+            a href=(Tab::Ideas.url(None)) aria-current=[mark(Tab::Ideas)] { "Ideas" }
+        }
+    }
+}
+
+/// The files of the assistant workspace, its goals and its ideas, one tab
+/// at a time. Each tab is a list and the item that is open. A link loads
+/// the whole page, so the page works without a script. With htmx, a click
+/// swaps only the open item.
 #[get("/workspace")]
 async fn workspace(
     State(state): State<AppState>,
@@ -309,16 +368,39 @@ async fn workspace(
     let Some(web) = web(&state) else {
         return broken();
     };
-    let files = ask(&web, Request::Workspace).await;
+    let tab = Tab::parse(open.tab.as_deref());
     let plans = ask(&web, Request::Plans).await;
-    let file = match &open.path {
-        Some(path) => Some(ask(&web, Request::WorkspaceFile { path: path.clone() }).await),
-        None => None,
+    let view = match tab {
+        Tab::Files => files_view(&web, open.path.as_deref()).await,
+        Tab::Goals | Tab::Ideas => plans_view(tab, &plans, open.id, None),
     };
     let body = html! {
         (bar(csrf.token(), "/workspace"))
         main.workspace {
-            (plans_section(&plans, None))
+            (tabs(tab, &plans, false))
+            (view)
+        }
+    };
+    page("Workspace", Some(csrf.token()), &body).into_response()
+}
+
+/// The files tab: the files, and the one at `path`.
+async fn files_view(web: &Web, path: Option<&str>) -> Markup {
+    let files = ask(web, Request::Workspace).await;
+    let file = match path {
+        Some(path) => Some(
+            ask(
+                web,
+                Request::WorkspaceFile {
+                    path: path.to_owned(),
+                },
+            )
+            .await,
+        ),
+        None => None,
+    };
+    html! {
+        div.split {
             nav.files aria-label="Files" {
                 @match &files {
                     Answer::Workspace { files } if files.is_empty() => {
@@ -326,7 +408,7 @@ async fn workspace(
                     }
                     Answer::Workspace { files } => ul {
                         @for file in files {
-                            @let current = (open.path.as_deref() == Some(file.path.as_str())).then_some("page");
+                            @let current = (path == Some(file.path.as_str())).then_some("page");
                             li {
                                 a href=(workspace_url(&file.path)) aria-current=[current]
                                     hx-get=(workspace_url(&file.path)) hx-select="#file"
@@ -342,8 +424,7 @@ async fn workspace(
             }
             (open_file(file.as_ref()))
         }
-    };
-    page("Workspace", Some(csrf.token()), &body).into_response()
+    }
 }
 
 /// An epoch millisecond as a short UTC time.
@@ -352,97 +433,169 @@ fn when(ms: i64) -> String {
         .map_or_else(String::new, |at| at.format("%b %-d, %H:%M UTC").to_string())
 }
 
-/// The newest notes of a goal or an idea.
-fn plan_notes(notes: &[crate::protocol::PlanNote]) -> Markup {
+/// Text that the assistant wrote, rendered as markdown. Raw HTML in it
+/// shows as text.
+fn markdown(text: &str) -> Markup {
+    html! { (Markstream::new(text).mode(Mode::Docs).class("markstream doc")) }
+}
+
+/// The notes of a goal or an idea, oldest first, each as markdown.
+fn plan_notes(heading: &str, notes: &[crate::protocol::PlanNote]) -> Markup {
     html! {
         @if !notes.is_empty() {
+            h3 { (heading) }
             ol.notes {
                 @for note in notes {
-                    li { span.at { (when(note.at_ms)) } " " (note.text) }
+                    li { p.at { (when(note.at_ms)) } (markdown(&note.text)) }
                 }
             }
         }
     }
 }
 
-/// A button that sends the owner's `decision` on `id`, and swaps the
-/// section with the answer.
+/// A button that sends the owner's `decision` on `id`, and swaps the open
+/// view with the answer.
 fn decide_button(decision: &str, id: i64, label: &str) -> Markup {
     html! {
-        button hx-post=(format!("/plans/{decision}/{id}")) hx-target="#plans" hx-swap="outerHTML" {
+        button hx-post=(format!("/plans/{decision}/{id}")) hx-target="#plan-view" hx-swap="outerHTML" {
             (label)
         }
     }
 }
 
-/// The goals and the ideas, with `notice` on top. A proposed goal waits
-/// for the owner, as a refine overlay does.
-fn plans_section(answer: &Answer, notice: Option<Markup>) -> Markup {
+/// One goal, as a document. A proposed goal waits for the owner, as a
+/// refine overlay does.
+fn goal_doc(goal: &crate::protocol::GoalEntry) -> Markup {
+    let proposed = goal.status == "proposed";
     html! {
-        section #plans.plans {
-            @if let Some(notice) = notice { (notice) }
-            @match answer {
-                Answer::Plans { goals, ideas } => {
-                    div.column {
-                        h2 { "Goals" }
+        article.doc {
+            header {
+                h2 { span.id { "#" (goal.id) } " " (goal.title) }
+                div.actions {
+                    @if proposed {
+                        (decide_button("accept", goal.id, "Accept"))
+                        (decide_button("decline", goal.id, "Decline"))
+                    } @else {
+                        (decide_button("drop-goal", goal.id, "Drop"))
+                    }
+                }
+            }
+            p.meta {
+                @if proposed { span.tag { "waiting for you" } } @else { span.tag.active { "active" } }
+                @if let Some(idea) = goal.idea {
+                    " · from " a href=(Tab::Ideas.url(Some(idea))) { "idea #" (idea) }
+                }
+                " · "
+                @match (goal.check_every_minutes, goal.next_check_ms) {
+                    (Some(every), Some(next)) => { "checks every " (every) " min, next " (when(next)) }
+                    (Some(every), None) => { "checks every " (every) " min once accepted" }
+                    _ => { "no checks" }
+                }
+            }
+            h3 { "Why" }
+            (markdown(&goal.why))
+            (plan_notes("Progress", &goal.notes))
+        }
+    }
+}
+
+/// One idea, as a document.
+fn idea_doc(idea: &crate::protocol::IdeaEntry) -> Markup {
+    html! {
+        article.doc {
+            header {
+                h2 { span.id { "#" (idea.id) } " " (idea.title) }
+                div.actions { (decide_button("drop-idea", idea.id, "Drop")) }
+            }
+            p.meta { "filed " (when(idea.created_ms)) }
+            (markdown(&idea.body))
+            (plan_notes("Research", &idea.notes))
+        }
+    }
+}
+
+/// The goals that wait for the owner, then the active ones, each in the
+/// order of the store.
+fn waiting_first(goals: &[crate::protocol::GoalEntry]) -> Vec<&crate::protocol::GoalEntry> {
+    let mut sorted: Vec<_> = goals.iter().collect();
+    sorted.sort_by_key(|goal| goal.status != "proposed");
+    sorted
+}
+
+/// The goals or the ideas tab: the list, and the item `id`, or the first.
+/// `notice` goes on top of the open item.
+fn plans_view(tab: Tab, plans: &Answer, id: Option<i64>, notice: Option<Markup>) -> Markup {
+    html! {
+        div #plan-view.split {
+            @match (tab, plans) {
+                (Tab::Goals, Answer::Plans { goals, .. }) => {
+                    // What waits for the owner comes first.
+                    @let goals = waiting_first(goals);
+                    @let open = id.and_then(|id| goals.iter().copied().find(|g| g.id == id)).or_else(|| goals.first().copied());
+                    nav.files aria-label="Goals" {
                         @if goals.is_empty() {
                             p.note { "No goals yet. littleguy proposes them, and you accept them here." }
                         }
-                        @for goal in goals {
-                            @let proposed = goal.status == "proposed";
-                            article.plan.proposed[proposed] {
-                                header {
-                                    span.id { "#" (goal.id) }
-                                    strong { (goal.title) }
-                                    @if proposed { span.tag { "waiting for you" } }
-                                }
-                                p { (goal.why) }
-                                p.meta {
-                                    @if let Some(idea) = goal.idea { "from idea #" (idea) " · " }
-                                    @match (goal.check_every_minutes, goal.next_check_ms) {
-                                        (Some(every), Some(next)) => { "checks every " (every) " min · next " (when(next)) }
-                                        (Some(every), None) => { "checks every " (every) " min once accepted" }
-                                        _ => { "no checks" }
-                                    }
-                                }
-                                (plan_notes(&goal.notes))
-                                div.actions {
-                                    @if proposed {
-                                        (decide_button("accept", goal.id, "Accept"))
-                                        (decide_button("decline", goal.id, "Decline"))
-                                    } @else {
-                                        (decide_button("drop-goal", goal.id, "Drop"))
+                        ul {
+                            @for goal in &goals {
+                                @let current = open.is_some_and(|o| o.id == goal.id);
+                                @let url = tab.url(Some(goal.id));
+                                li {
+                                    a href=(url) aria-current=[current.then_some("page")]
+                                        hx-get=(url) hx-select="#plan-view" hx-target="#plan-view"
+                                        hx-swap="outerHTML" hx-push-url="true" {
+                                        span.path { "#" (goal.id) " " (goal.title) }
+                                        @if goal.status == "proposed" { span.dot title="waiting for you" {} }
                                     }
                                 }
                             }
                         }
                     }
-                    div.column {
-                        h2 { "Ideas" }
-                        @if ideas.is_empty() {
-                            p.note { "No ideas yet. littleguy files them from your chats and its own research." }
-                        }
-                        @for idea in ideas {
-                            article.plan {
-                                header {
-                                    span.id { "#" (idea.id) }
-                                    strong { (idea.title) }
-                                }
-                                p { (idea.body) }
-                                p.meta { "filed " (when(idea.created_ms)) }
-                                (plan_notes(&idea.notes))
-                                div.actions { (decide_button("drop-idea", idea.id, "Drop")) }
-                            }
+                    section #file {
+                        @if let Some(notice) = notice { (notice) }
+                        @match open {
+                            Some(goal) => (goal_doc(goal)),
+                            None => p.note { "Nothing to open." },
                         }
                     }
                 }
-                other => (note(other)),
+                (Tab::Ideas, Answer::Plans { ideas, .. }) => {
+                    @let open = id.and_then(|id| ideas.iter().find(|i| i.id == id)).or_else(|| ideas.first());
+                    nav.files aria-label="Ideas" {
+                        @if ideas.is_empty() {
+                            p.note { "No ideas yet. littleguy files them from your chats and its own research." }
+                        }
+                        ul {
+                            @for idea in ideas {
+                                @let current = open.is_some_and(|o| o.id == idea.id);
+                                @let url = tab.url(Some(idea.id));
+                                li {
+                                    a href=(url) aria-current=[current.then_some("page")]
+                                        hx-get=(url) hx-select="#plan-view" hx-target="#plan-view"
+                                        hx-swap="outerHTML" hx-push-url="true" {
+                                        span.path { "#" (idea.id) " " (idea.title) }
+                                        span.size { (idea.notes.len()) " notes" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    section #file {
+                        @if let Some(notice) = notice { (notice) }
+                        @match open {
+                            Some(idea) => (idea_doc(idea)),
+                            None => p.note { "Nothing to open." },
+                        }
+                    }
+                }
+                (_, other) => section #file.wide { @if let Some(notice) = notice { (notice) } (note(other)) },
             }
         }
     }
 }
 
-/// The owner's decision on a goal or an idea. Answers with the section.
+/// The owner's decision on a goal or an idea. Answers with the open view of
+/// its tab, and the tabs, so the waiting count stays right.
 #[post("/plans/{decision}/{id}")]
 async fn decide_plan(
     State(state): State<AppState>,
@@ -456,19 +609,22 @@ async fn decide_plan(
     let Some(web) = web(&state) else {
         return broken();
     };
-    let decision = match decision.as_str() {
-        "accept" => PlanDecision::Accept,
-        "decline" => PlanDecision::Decline,
-        "drop-goal" => PlanDecision::DropGoal,
-        "drop-idea" => PlanDecision::DropIdea,
+    let (decision, tab) = match decision.as_str() {
+        "accept" => (PlanDecision::Accept, Tab::Goals),
+        "decline" => (PlanDecision::Decline, Tab::Goals),
+        "drop-goal" => (PlanDecision::DropGoal, Tab::Goals),
+        "drop-idea" => (PlanDecision::DropIdea, Tab::Ideas),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let answer = ask(&web, Request::Decide { decision, id }).await;
-    if matches!(answer, Answer::Plans { .. }) {
-        return plans_section(&answer, None).into_response();
-    }
-    let plans = ask(&web, Request::Plans).await;
-    plans_section(&plans, Some(note(&answer))).into_response()
+    let (plans, notice) = if matches!(answer, Answer::Plans { .. }) {
+        (answer, None)
+    } else {
+        (ask(&web, Request::Plans).await, Some(note(&answer)))
+    };
+    // An accepted goal stays open. A gone item opens the first one.
+    let view = plans_view(tab, &plans, Some(id), notice);
+    html! { (view) (tabs(tab, &plans, true)) }.into_response()
 }
 
 /// Whether `path` names a Markdown file, in any case.

@@ -190,7 +190,9 @@ pub fn harness(
 ) -> AgentHarness {
     let profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
-        .window(config.window);
+        .window(config.window)
+        // A tick with no cap of its own takes this one too.
+        .max_steps(config.max_steps);
     let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
     if let Some(guard) = guard {
         (harness, profile) = guard.apply(harness, profile);
@@ -3340,15 +3342,22 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_that_runs_out_of_tool_rounds_says_so() {
+        use std::sync::atomic::Ordering;
         let dir = tempfile::tempdir().unwrap();
-        let model: Arc<dyn AgentModel> = Arc::new(BusyModel::default());
+        let busy = Arc::new(BusyModel::default());
+        let mut config = config();
+        config.max_steps = 3;
+        let model: Arc<dyn AgentModel> = Arc::clone(&busy) as Arc<dyn AgentModel>;
         let mut daemon =
-            Daemon::open(&dir.path().join("lg.db"), &config(), model, UID, false).unwrap();
+            Daemon::open(&dir.path().join("lg.db"), &config, model, UID, false).unwrap();
         let Response::NoAnswer { reason } = daemon.handle_request(UID, request("b-1", "dig")).await
         else {
             panic!("an op that ran out of rounds answered");
         };
         assert!(reason.contains("tool round"));
+        // The config caps the rounds: three ran, and the fourth call found
+        // the cap.
+        assert_eq!(busy.calls.load(Ordering::SeqCst), 4);
     }
 
     fn reply_text(response: &Response) -> &str {

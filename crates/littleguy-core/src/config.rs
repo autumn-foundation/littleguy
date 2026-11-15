@@ -4,6 +4,7 @@
 //! owner = "mark"
 //! system = "You are littleguy, a helpful assistant."
 //! window = 40
+//! max_steps = 8
 //!
 //! [discord]
 //! pairing = true
@@ -171,6 +172,9 @@ pub const DEFAULT_SYSTEM: &str = "You are littleguy, a small and helpful persona
 /// The transcript bound when the config names none, in messages.
 pub const DEFAULT_WINDOW: u32 = 40;
 
+/// The tool rounds of one op when the config names none: the engine default.
+pub const DEFAULT_MAX_STEPS: u32 = 8;
+
 /// Why a config did not load.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -191,6 +195,9 @@ pub enum ConfigError {
     /// The window is zero.
     #[error("window must be at least 1")]
     Window,
+    /// The tool rounds of an op are zero.
+    #[error("max_steps must be at least 1")]
+    MaxSteps,
     /// A Discord user id is not a snowflake.
     #[error("`{0}` is not a Discord user id")]
     DiscordUser(String),
@@ -1370,6 +1377,7 @@ struct Raw {
     owner: String,
     system: Option<String>,
     window: Option<u32>,
+    max_steps: Option<u32>,
     #[serde(default)]
     discord: RawDiscord,
     #[serde(default)]
@@ -1651,6 +1659,9 @@ pub struct Config {
     pub system: String,
     /// The transcript bound of the assistant, in messages.
     pub window: u32,
+    /// The most tool rounds of one op, a message or a tick. An op that
+    /// needs more stops and says so.
+    pub max_steps: u32,
     /// The Discord settings.
     pub discord: DiscordConfig,
     /// The Slack settings.
@@ -1697,6 +1708,7 @@ impl Config {
             owner,
             system: String::from(DEFAULT_SYSTEM),
             window: DEFAULT_WINDOW,
+            max_steps: DEFAULT_MAX_STEPS,
             discord: DiscordConfig::default(),
             slack: SlackConfig::default(),
             camel: Vec::new(),
@@ -1731,6 +1743,12 @@ impl Config {
         if window == 0 {
             return Err(ConfigError::Window);
         }
+        // Only zero cannot work. A high cap costs model calls, which is the
+        // owner's call.
+        let max_steps = raw.max_steps.unwrap_or(DEFAULT_MAX_STEPS);
+        if max_steps == 0 {
+            return Err(ConfigError::MaxSteps);
+        }
         let allowed = raw
             .discord
             .allowed
@@ -1761,6 +1779,7 @@ impl Config {
             owner: OwnerName::new(raw.owner)?,
             system: raw.system.unwrap_or_else(|| String::from(DEFAULT_SYSTEM)),
             window,
+            max_steps,
             discord: DiscordConfig {
                 pairing: raw.discord.pairing.unwrap_or(true),
                 allowed,
@@ -2384,6 +2403,13 @@ mod tests {
         let config = Config::parse("owner = \"mark\"\nsystem = \"Be brief.\"\nwindow = 8").unwrap();
         assert_eq!(config.system, "Be brief.");
         assert_eq!(config.window, 8);
+        assert_eq!(config.max_steps, DEFAULT_MAX_STEPS);
+        let deep = Config::parse("owner = \"mark\"\nmax_steps = 400").unwrap();
+        assert_eq!(deep.max_steps, 400, "a high cap is the owner's call");
+        assert!(matches!(
+            Config::parse("owner = \"m\"\nmax_steps = 0"),
+            Err(ConfigError::MaxSteps)
+        ));
     }
 
     #[test]

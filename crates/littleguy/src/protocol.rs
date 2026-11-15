@@ -118,6 +118,8 @@ pub enum Request {
     },
     /// The goals and the ideas of the assistant. Only the owner may.
     Plans,
+    /// The notes of the assistant. Only the owner may.
+    Notes,
     /// The skills of the skills folder and the drafts of the assistant.
     /// Only the owner may.
     Skills,
@@ -229,6 +231,17 @@ pub struct GoalEntry {
     pub idea: Option<i64>,
     /// The newest notes, oldest first.
     pub notes: Vec<PlanNote>,
+}
+
+/// One note of the assistant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteEntry {
+    /// Its name.
+    pub name: String,
+    /// The note, in markdown.
+    pub text: String,
+    /// When it last changed, in epoch milliseconds.
+    pub updated_ms: i64,
 }
 
 /// One open idea.
@@ -507,6 +520,11 @@ pub enum Response {
         /// The text. `None` when the file is not UTF-8 text, or is too
         /// large to show.
         text: Option<String>,
+    },
+    /// The notes of the assistant, by name.
+    Notes {
+        /// Each note.
+        notes: Vec<NoteEntry>,
     },
     /// The goals and the ideas of the assistant.
     Plans {

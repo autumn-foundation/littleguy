@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.3"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files", "notes"]
 # Every integration.
 full = ["default", "camel", "google", "fleet"]
 # Discord direct messages over the gateway.
@@ -68,6 +68,9 @@ web = ["littleguy-tools/web"]
 mcp = ["littleguy-tools/mcp"]
 # `search_notes`: the assistant finds a note of its workspace by its words.
 search-notes = ["littleguy-tools/search-notes"]
+# `write_note` and the other note tools: notes in memory.db that a tick can
+# write too (ADR 0029).
+notes = ["search-notes", "littleguy-stores/notes"]
 # `grep_files`: the assistant finds the lines of its workspace that match a pattern.
 grep-files = ["littleguy-tools/grep-files"]
 # The `run_code` tool and `[sandbox]`.

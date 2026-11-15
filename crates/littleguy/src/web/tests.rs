@@ -814,6 +814,36 @@ async fn the_goals_tab_says_the_build_has_no_plans() {
     }
 }
 
+#[cfg(feature = "notes")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_reads_the_notes_of_littleguy_on_the_notes_tab() {
+    let rig = rig_on(&config(false), None, Arc::new(Saver)).await;
+    sign_in(&rig).await;
+    rig.client
+        .get("/workspace?tab=notes")
+        .send()
+        .await
+        .assert_text_contains("#plan-view", "No notes yet");
+    let answer = rig
+        .handle
+        .ask(Request::Chat {
+            message_id: String::from("n-1"),
+            text: String::from(
+                r##"use write_note {"name": "ui-punchlist", "text": "# Punch list\n\n- Tabs <b>count</b>."}"##,
+            ),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reply_text(&answer), "saved");
+    let page = rig.client.get("/workspace?tab=notes").send().await;
+    page.assert_text_contains("#tabs a[aria-current='page']", "Notes");
+    page.assert_text_contains("#plan-view .files .path", "ui-punchlist");
+    // The note opens as a document, and HTML in it stays text.
+    page.assert_text_contains("#file .doc h2", "ui-punchlist");
+    page.assert_text_contains("#file .doc", "Tabs <b>count</b>.");
+    page.assert_selector_count("#file b", 0);
+}
+
 #[cfg(feature = "plans")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {

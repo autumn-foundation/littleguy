@@ -306,6 +306,8 @@ enum Tab {
     Goals,
     /// The open ideas.
     Ideas,
+    /// The notes of the assistant.
+    Notes,
     /// The skills, and the drafts that wait.
     Skills,
 }
@@ -316,6 +318,7 @@ impl Tab {
         match name {
             Some("goals") => Self::Goals,
             Some("ideas") => Self::Ideas,
+            Some("notes") => Self::Notes,
             Some("skills") => Self::Skills,
             _ => Self::Files,
         }
@@ -327,6 +330,7 @@ impl Tab {
             Self::Files => return String::from("/workspace"),
             Self::Goals => "goals",
             Self::Ideas => "ideas",
+            Self::Notes => "notes",
             Self::Skills => "skills",
         };
         id.map_or_else(
@@ -340,6 +344,13 @@ impl Tab {
 fn workspace_url(path: &str) -> String {
     let mut url = String::from("/workspace?path=");
     url.extend(form_urlencoded::byte_serialize(path.as_bytes()));
+    url
+}
+
+/// The URL of the notes tab with the note `name` open.
+fn note_url(name: &str) -> String {
+    let mut url = String::from("/workspace?tab=notes&name=");
+    url.extend(form_urlencoded::byte_serialize(name.as_bytes()));
     url
 }
 
@@ -371,6 +382,7 @@ fn tabs(current: Tab, plans: &Answer, skills: &Answer, oob: bool) -> Markup {
                 @if waiting > 0 { span.count title="waiting for you" { (waiting) " waiting" } }
             }
             a href=(Tab::Ideas.url(None)) aria-current=[mark(Tab::Ideas)] { "Ideas" }
+            a href=(Tab::Notes.url(None)) aria-current=[mark(Tab::Notes)] { "Notes" }
             a href=(Tab::Skills.url(None)) aria-current=[mark(Tab::Skills)] {
                 "Skills"
                 @if drafts > 0 { span.count title="drafts wait for you" { (drafts) " waiting" } }
@@ -402,6 +414,7 @@ async fn workspace(
     let view = match tab {
         Tab::Files => files_view(&web, open.path.as_deref()).await,
         Tab::Goals | Tab::Ideas => plans_view(tab, &plans, open.id, None),
+        Tab::Notes => notes_view(&ask(&web, Request::Notes).await, open.name.as_deref()),
         Tab::Skills => skills_view(&skills, open.id, open.name.as_deref(), None),
     };
     let body = html! {
@@ -540,6 +553,50 @@ fn idea_doc(idea: &crate::protocol::IdeaEntry) -> Markup {
             p.meta { "filed " (when(idea.created_ms)) }
             (markdown(&idea.body))
             (plan_notes("Research", &idea.notes))
+        }
+    }
+}
+
+/// The notes tab: the notes by name, and the note `name`, or the first.
+/// The owner reads them here; littleguy writes them.
+fn notes_view(notes: &Answer, name: Option<&str>) -> Markup {
+    html! {
+        div #plan-view.split {
+            @match notes {
+                Answer::Notes { notes } => {
+                    @let open = name.and_then(|name| notes.iter().find(|n| n.name == name)).or_else(|| notes.first());
+                    nav.files aria-label="Notes" {
+                        @if notes.is_empty() {
+                            p.note { "No notes yet. littleguy writes them as it learns, also on a heartbeat." }
+                        }
+                        ul {
+                            @for note in notes {
+                                @let current = open.is_some_and(|o| o.name == note.name);
+                                @let url = note_url(&note.name);
+                                li {
+                                    a href=(url) aria-current=[current.then_some("page")]
+                                        hx-get=(url) hx-select="#plan-view" hx-target="#plan-view"
+                                        hx-swap="outerHTML" hx-push-url="true" {
+                                        span.path { (note.name) }
+                                        span.size { (note.text.chars().count()) " chars" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    section #file {
+                        @match open {
+                            Some(note) => article.doc {
+                                header { h2 { (note.name) } }
+                                p.meta { "changed " (when(note.updated_ms)) }
+                                (markdown(&note.text))
+                            },
+                            None => p.note { "Nothing to open." },
+                        }
+                    }
+                }
+                other => section #file.wide { (note(other)) },
+            }
         }
     }
 }

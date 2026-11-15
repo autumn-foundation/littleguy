@@ -149,6 +149,18 @@ pub fn render(response: &Response) -> (String, bool) {
         Response::History { turns } => (render_history(turns), true),
         Response::Workspace { files } => (render_workspace(files), true),
         Response::Plans { goals, ideas } => (render_plans(goals, ideas), true),
+        Response::Notes { notes } => (
+            if notes.is_empty() {
+                String::from("no notes")
+            } else {
+                notes
+                    .iter()
+                    .map(|note| format!("{} ({} chars)", note.name, note.text.chars().count()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            true,
+        ),
         Response::Skills {
             skills,
             invalid,

@@ -53,6 +53,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `grep-files` | yes | `grep_files`: the assistant finds the lines of its workspace that match a pattern. | `regex` |
 | `heartbeat` | yes | `[heartbeat]`: the assistant wakes on its own every so often. Its precheck skips a tick with no model call when no goal is due and no idea waits. | none |
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
+| `notes` | yes | `write_note` and the other note tools: notes in memory.db that a tick can write too (ADR 0029). | none |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
 | `openai` | yes | `--model openai` and `--model openrouter`. | `reqwest`, `rustls` |
 | `plans` | yes | Goals and ideas: the tools that file, research and propose them, the Goals and Ideas tabs, and the heartbeat precheck that looks at them. | none |
@@ -86,6 +87,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 |---|---|---|---|
 | `council` | no | What the council of the owner decided (`council`, ADR 0027). | none |
 | `followups` | no | The wakes that the assistant books (`wakes`). | none |
+| `notes` | no | The notes of the assistant (`notes`, ADR 0029). | none |
 | `plans` | no | The goals and ideas of the assistant (`plans`). | none |
 | `self-debug` | no | The run log and the tick log that the assistant reads to debug itself (`runlog`, `tick_log`). | none |
 | `skills` | no | The skill drafts of the assistant (`skill_drafts`). | none |

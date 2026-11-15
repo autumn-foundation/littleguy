@@ -779,6 +779,7 @@ impl Daemon {
             Request::WorkspaceFile { path } => self.workspace_file(path).await,
             #[cfg(feature = "plans")]
             Request::Plans => self.plans(),
+            Request::Notes => self.notes_listing(),
             #[cfg(not(feature = "plans"))]
             Request::Plans => Ok(Response::Off {
                 message: crate::features::missing("goals and ideas", "plans"),
@@ -1314,6 +1315,51 @@ impl Daemon {
             .get_or_insert_with(|| Wake::idle(brief_armed))
             .set_followup(next, now);
         Ok(())
+    }
+
+    /// The notes of the assistant, for the owner (ADR 0029).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store fails.
+    #[cfg(feature = "notes")]
+    fn notes_listing(&self) -> Result<Response> {
+        let config = &self.kit.config;
+        let Some(stores) = self
+            .kit
+            .stores
+            .as_ref()
+            .filter(|_| config.tools.files && config.memory.enabled)
+        else {
+            return Ok(Response::Off {
+                message: String::from(
+                    "notes are off: they need `files = true` under [tools] and memory on",
+                ),
+            });
+        };
+        let notes = stores
+            .notes()?
+            .into_iter()
+            .map(|note| crate::protocol::NoteEntry {
+                name: note.name,
+                text: note.text,
+                updated_ms: note.updated_ms,
+            })
+            .collect();
+        Ok(Response::Notes { notes })
+    }
+
+    /// A build without notes: the listing is off.
+    #[cfg(not(feature = "notes"))]
+    #[expect(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "the notes build reads the store, and the router calls both the same way"
+    )]
+    fn notes_listing(&self) -> Result<Response> {
+        Ok(Response::Off {
+            message: crate::features::missing("notes", "notes"),
+        })
     }
 
     /// A build without skills: the listing is off, and an action fails.
@@ -4251,6 +4297,51 @@ mod tests {
         assert_eq!(last.text, "ok: check in");
         let hi = turns.iter().position(|turn| turn.text == "ok: hi").unwrap();
         assert_eq!(turns[hi].from, Speaker::Assistant);
+    }
+
+    #[cfg(all(
+        feature = "heartbeat",
+        feature = "notes",
+        any(feature = "discord", feature = "sandbox")
+    ))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_note_written_on_a_tick_is_kept() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let hand = clock.clone();
+        let mut config = heartbeat_config();
+        if let Some(beat) = config.heartbeat.as_mut() {
+            beat.prompt = String::from(
+                r#"use write_note {"name": "heartbeat-design", "text": "Fixed on a tick."}"#,
+            );
+        }
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon.tick().await.unwrap();
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-1",
+                    r#"use add_idea {"title": "Docs", "body": "Links rot."}"#,
+                ),
+            )
+            .await;
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set("2026-11-14T13:00:01Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let note = stores.note("heartbeat-design").unwrap().unwrap();
+        assert_eq!(note.text, "Fixed on a tick.");
     }
 
     #[cfg(all(

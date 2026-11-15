@@ -49,7 +49,7 @@ pub use files::{MAX_READ_CHARS, file_tools};
 #[cfg(feature = "grep-files")]
 pub use grep::{DEFAULT_GREP_MATCHES, MAX_GREP_MATCHES, grep_files_tool};
 #[cfg(feature = "search-notes")]
-pub use notes::{DEFAULT_MATCHES, search_notes_tool};
+pub use notes::{DEFAULT_MATCHES, Hit, limit_of, rank, search_notes_tool};
 #[cfg(feature = "web")]
 pub use search::{BRAVE_ENDPOINT, SearchTool};
 

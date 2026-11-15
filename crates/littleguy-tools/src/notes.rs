@@ -110,35 +110,39 @@ fn score(path: &str, text: &str, words: &[String]) -> Option<Match> {
     })
 }
 
-fn search(input: &Value, ctx: &ToolContext) -> Result<Value, AgentError> {
-    let query = text_field(input, "query")?;
+/// One text that holds words of a query, as [`rank`] gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hit {
+    /// The path or the name of the text.
+    pub name: String,
+    /// How many words of the query it holds.
+    pub matched: usize,
+    /// How many words the query has.
+    pub of: usize,
+    /// The text around the first hit, on one line.
+    pub snippet: String,
+}
+
+/// The texts of `docs`, each a name and its text, that hold words of
+/// `query`: those with the most words first, then the most hits, then by
+/// name, at most `limit`. Returns them, and whether more matched.
+///
+/// # Errors
+///
+/// Returns a `Tool` error when the query has no word.
+pub fn rank<'a>(
+    docs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    query: &str,
+    limit: usize,
+) -> Result<(Vec<Hit>, bool), AgentError> {
     let words = words(query);
     if words.is_empty() {
         return Err(refuse("the query needs a word of two letters or more"));
     }
-    let limit = input["limit"]
-        .as_u64()
-        .and_then(|limit| usize::try_from(limit).ok())
-        .unwrap_or(DEFAULT_MATCHES)
-        .max(1);
-    let workspace = ctx
-        .workspace
-        .as_ref()
-        .ok_or_else(|| refuse("this agent has no workspace"))?;
-    let (mut matches, searched) = workspace.with(|files| {
-        let mut searched = 0;
-        let matches: Vec<Match> = files
-            .files()
-            .iter()
-            .filter_map(|(path, file)| {
-                // A file that is not text holds no words.
-                let text = std::str::from_utf8(&file.data).ok()?;
-                searched += 1;
-                score(path, text, &words)
-            })
-            .collect();
-        (matches, searched)
-    });
+    let mut matches: Vec<Match> = docs
+        .into_iter()
+        .filter_map(|(name, text)| score(name, text, &words))
+        .collect();
     matches.sort_by(|a, b| {
         b.matched
             .cmp(&a.matched)
@@ -147,15 +151,53 @@ fn search(input: &Value, ctx: &ToolContext) -> Result<Value, AgentError> {
     });
     let more = matches.len() > limit;
     matches.truncate(limit);
+    let hits = matches
+        .into_iter()
+        .map(|found| Hit {
+            name: found.path,
+            matched: found.matched,
+            of: words.len(),
+            snippet: found.snippet,
+        })
+        .collect();
+    Ok((hits, more))
+}
+
+/// The most matches that `input` asks for.
+#[must_use]
+pub fn limit_of(input: &Value) -> usize {
+    input["limit"]
+        .as_u64()
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(DEFAULT_MATCHES)
+        .max(1)
+}
+
+fn search(input: &Value, ctx: &ToolContext) -> Result<Value, AgentError> {
+    let query = text_field(input, "query")?;
+    let workspace = ctx
+        .workspace
+        .as_ref()
+        .ok_or_else(|| refuse("this agent has no workspace"))?;
+    let (hits, more, searched) = workspace.with(|files| {
+        // A file that is not text holds no words.
+        let texts: Vec<(&str, &str)> = files
+            .files()
+            .iter()
+            .filter_map(|(path, file)| Some((path.as_str(), std::str::from_utf8(&file.data).ok()?)))
+            .collect();
+        let searched = texts.len();
+        rank(texts, query, limit_of(input)).map(|(hits, more)| (hits, more, searched))
+    })?;
     Ok(json!({
         "query": query,
         "searched": searched,
         "more": more,
-        "matches": matches.iter().map(|found| json!({
-            "path": found.path,
-            "matched": found.matched,
-            "of": words.len(),
-            "snippet": found.snippet,
+        "matches": hits.iter().map(|hit| json!({
+            "path": hit.name,
+            "matched": hit.matched,
+            "of": hit.of,
+            "snippet": hit.snippet,
         })).collect::<Vec<_>>(),
     }))
 }

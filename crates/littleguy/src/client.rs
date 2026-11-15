@@ -10,6 +10,7 @@ use tokio::net::UnixStream;
 
 use crate::protocol::{
     ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response, Speaker, Turn,
+    WorkspaceEntry,
 };
 
 /// A fresh message id: the clock in nanoseconds and the process id.
@@ -141,8 +142,26 @@ pub fn render(response: &Response) -> (String, bool) {
             profile,
         } => (render_reload(applied, restart, profile), true),
         Response::History { turns } => (render_history(turns), true),
+        Response::Workspace { files } => (render_workspace(files), true),
+        Response::WorkspaceFile { path, bytes, text } => (
+            text.clone()
+                .unwrap_or_else(|| format!("{path}: {bytes} bytes, not text or too large to show")),
+            true,
+        ),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// One line per file: its size and its path.
+fn render_workspace(files: &[WorkspaceEntry]) -> String {
+    if files.is_empty() {
+        return String::from("the workspace is empty");
+    }
+    files
+        .iter()
+        .map(|file| format!("{:>9}  {}", file.bytes, file.path))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// One block per turn, oldest first.

@@ -47,6 +47,15 @@ async fn rig(config: &Config) -> Rig {
 /// A rig whose Slack runs over the Events API against the fake Slack at
 /// `slack`, when there is one.
 async fn rig_with(config: &Config, slack: Option<&str>) -> Rig {
+    rig_on(config, slack, Arc::new(OfflineModel::new())).await
+}
+
+/// A rig whose assistant runs on `model`.
+async fn rig_on(
+    config: &Config,
+    slack: Option<&str>,
+    model: Arc<dyn autumn_harvest_agent::AgentModel>,
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("lg.db");
     let plan = Plan::of(config);
@@ -55,7 +64,6 @@ async fn rig_with(config: &Config, slack: Option<&str>) -> Rig {
         slack: slack.is_some(),
         ..daemon::Extras::default()
     };
-    let model = Arc::new(OfflineModel::new());
     let daemon = Daemon::open_with(&db, config, model, UID, false, extras)
         .unwrap()
         .with_logins(logins.clone());
@@ -627,4 +635,129 @@ async fn the_manage_page_holds_the_sections() {
         .send()
         .await
         .assert_selector_count("section#approvals", 0);
+}
+
+/// Saves a file for `save <path> <text>`, with the file tool, then says
+/// `saved`. Any other message gets `ok`.
+#[derive(Debug)]
+struct Saver;
+
+impl autumn_harvest_agent::AgentModel for Saver {
+    fn chat<'a>(
+        &'a self,
+        request: &'a autumn_harvest_agent::ChatRequest,
+    ) -> autumn_harvest_agent::BoxFuture<
+        'a,
+        Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+    > {
+        use autumn_harvest_agent::{ChatResponse, ContentPart, StopReason, TokenUsage};
+        let last = request.messages.last().map(|message| &message.content);
+        let answered = last
+            .into_iter()
+            .flatten()
+            .any(|part| matches!(part, ContentPart::ToolResult { .. }));
+        let text = last.into_iter().flatten().find_map(|part| match part {
+            ContentPart::Text(text) => Some(text.clone()),
+            _ => None,
+        });
+        let save = text
+            .as_deref()
+            .and_then(|text| text.strip_prefix("save "))
+            .and_then(|rest| rest.split_once(' '));
+        let (content, stop_reason) = match save {
+            Some((path, text)) if !answered => (
+                ContentPart::ToolCall {
+                    id: String::from("call-1"),
+                    name: String::from("write_file"),
+                    arguments: serde_json::json!({"path": path, "text": text}),
+                },
+                StopReason::ToolUse,
+            ),
+            _ if answered => (
+                ContentPart::Text(String::from("saved")),
+                StopReason::EndTurn,
+            ),
+            _ => (ContentPart::Text(String::from("ok")), StopReason::EndTurn),
+        };
+        Box::pin(async move {
+            Ok(ChatResponse {
+                content: vec![content],
+                stop_reason,
+                usage: TokenUsage::new(1, 1),
+            })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workspace_page_lists_the_files_and_opens_one() {
+    let rig = rig_on(&config(false), None, Arc::new(Saver)).await;
+    sign_in(&rig).await;
+    let empty = rig.client.get("/workspace").send().await;
+    empty.assert_status(200);
+    empty.assert_body_contains("The workspace is empty");
+    empty.assert_selector_count("nav a[href='/workspace'][aria-current='page']", 1);
+
+    let saved = rig
+        .handle
+        .ask(Request::Chat {
+            message_id: String::from("w-1"),
+            text: String::from("save notes/tea.md **green** tea"),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        saved,
+        Response::Reply {
+            text: String::from("saved")
+        }
+    );
+    rig.handle
+        .ask(Request::Chat {
+            message_id: String::from("w-2"),
+            text: String::from("save plan.txt a <b>plan</b>"),
+        })
+        .await
+        .unwrap();
+
+    let listed = rig.client.get("/workspace").send().await;
+    listed.assert_selector_count(".files li", 2);
+    listed.assert_selector_count(
+        ".files a[href='/workspace?path=notes%2Ftea.md'][hx-select='#file']",
+        1,
+    );
+    listed.assert_text_contains("#file", "Pick a file");
+
+    // Markdown renders, and the link of the open file is marked.
+    let markdown = rig
+        .client
+        .get("/workspace?path=notes%2Ftea.md")
+        .send()
+        .await;
+    markdown.assert_status(200);
+    markdown.assert_selector_count(".files a[aria-current='page']", 1);
+    markdown.assert_selector_count("#file [data-markstream]", 1);
+    markdown.assert_text_contains("#file", "**green** tea");
+
+    // Other text shows as it is, and HTML in it stays text.
+    let text = rig.client.get("/workspace?path=plan.txt").send().await;
+    text.assert_selector_count("#file pre", 1);
+    text.assert_selector_count("#file b", 0);
+    text.assert_text_contains("#file pre", "a <b>plan</b>");
+
+    let missing = rig.client.get("/workspace?path=gone.md").send().await;
+    missing.assert_text_contains("#file", "the workspace has no file gone.md");
+
+    rig.client.log_out();
+    rig.client.get("/workspace").send().await.assert_status(401);
+}
+
+#[test]
+fn markdown_is_known_by_its_extension_in_any_case() {
+    for path in ["a.md", "notes/B.MD", "c.Markdown"] {
+        assert!(pages::is_markdown(path), "{path}");
+    }
+    for path in ["a.txt", "md", "notes.md/plan"] {
+        assert!(!pages::is_markdown(path), "{path}");
+    }
 }

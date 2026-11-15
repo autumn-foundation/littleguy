@@ -75,6 +75,7 @@ pub fn routes() -> Vec<autumn_web::Route> {
     routes![
         index,
         manage,
+        workspace,
         login,
         logout,
         chat,
@@ -171,6 +172,7 @@ fn bar(csrf: &str, current: &str) -> Markup {
             h1 { a href="/" { "littleguy" } }
             nav {
                 a href="/" aria-current=[mark("/")] { "Chat" }
+                a href="/workspace" aria-current=[mark("/workspace")] { "Workspace" }
                 a href="/manage" aria-current=[mark("/manage")] { "Manage" }
                 form method="post" action="/logout" {
                     input type="hidden" name="_csrf" value=(csrf);
@@ -270,6 +272,101 @@ async fn manage(State(state): State<AppState>, session: Session, csrf: CsrfToken
         }
     };
     page("Manage", Some(csrf.token()), &body).into_response()
+}
+
+/// The file that the workspace page opens.
+#[derive(Debug, Deserialize)]
+struct Open {
+    path: Option<String>,
+}
+
+/// The URL of the workspace page with `path` open.
+fn workspace_url(path: &str) -> String {
+    let mut url = String::from("/workspace?path=");
+    url.extend(form_urlencoded::byte_serialize(path.as_bytes()));
+    url
+}
+
+/// The files of the assistant workspace, and the one that is open. A link
+/// loads the whole page, so the page works without a script. With htmx, a
+/// click swaps only the open file.
+#[get("/workspace")]
+async fn workspace(
+    State(state): State<AppState>,
+    session: Session,
+    csrf: CsrfToken,
+    Query(open): Query<Open>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(false);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let files = ask(&web, Request::Workspace).await;
+    let file = match &open.path {
+        Some(path) => Some(ask(&web, Request::WorkspaceFile { path: path.clone() }).await),
+        None => None,
+    };
+    let body = html! {
+        (bar(csrf.token(), "/workspace"))
+        main.workspace {
+            nav.files aria-label="Files" {
+                @match &files {
+                    Answer::Workspace { files } if files.is_empty() => {
+                        p.note { "The workspace is empty. littleguy keeps files here with its file tools." }
+                    }
+                    Answer::Workspace { files } => ul {
+                        @for file in files {
+                            @let current = (open.path.as_deref() == Some(file.path.as_str())).then_some("page");
+                            li {
+                                a href=(workspace_url(&file.path)) aria-current=[current]
+                                    hx-get=(workspace_url(&file.path)) hx-select="#file"
+                                    hx-target="#file" hx-swap="outerHTML" hx-push-url="true" {
+                                    span.path { (file.path) }
+                                    span.size { (file.bytes) " B" }
+                                }
+                            }
+                        }
+                    },
+                    other => (note(other)),
+                }
+            }
+            (open_file(file.as_ref()))
+        }
+    };
+    page("Workspace", Some(csrf.token()), &body).into_response()
+}
+
+/// Whether `path` names a Markdown file, in any case.
+pub(super) fn is_markdown(path: &str) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        })
+}
+
+/// The pane of the open file. Markdown renders. Other text shows as it is.
+fn open_file(file: Option<&Answer>) -> Markup {
+    html! {
+        section #file {
+            @match file {
+                None => p.note { "Pick a file." },
+                Some(Answer::WorkspaceFile { path, bytes, text }) => {
+                    h2 { (path) }
+                    @match text {
+                        Some(text) if is_markdown(path) => {
+                            (Markstream::new(text.as_str()).mode(Mode::Docs).class("markstream doc"))
+                        }
+                        Some(text) => pre { (text) },
+                        None => p.note { (bytes) " bytes. The file is not text, or it is too large to show." },
+                    }
+                }
+                Some(other) => (note(other)),
+            }
+        }
+    }
 }
 
 /// The form of a sign-in link.

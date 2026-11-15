@@ -165,16 +165,23 @@ impl Tools {
     ) -> (AgentHarness, AgentProfile) {
         let harness = harness.tools(self.tools);
         match self.workspace {
-            Some(root) => {
-                let blobs = Arc::new(DirWorkspaceBlobs::new(root));
-                (
-                    harness.workspace(WorkspaceStore::new(blobs, PayloadCodecs::default())),
-                    profile.workspace(),
-                )
-            }
+            Some(root) => (
+                harness.workspace(workspace_store(root)),
+                profile.workspace(),
+            ),
             None => (harness, profile),
         }
     }
+}
+
+/// The store of the workspace snapshots under `root`. The harness writes
+/// through it, and the owner's pages read through it.
+#[must_use]
+pub fn workspace_store(root: PathBuf) -> WorkspaceStore {
+    WorkspaceStore::new(
+        Arc::new(DirWorkspaceBlobs::new(root)),
+        PayloadCodecs::default(),
+    )
 }
 
 #[cfg(test)]

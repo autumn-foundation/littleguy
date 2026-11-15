@@ -12,6 +12,7 @@ use crate::protocol::{
     ApprovalEntry, ConnectionEntry, GoalEntry, IdeaEntry, OverlayEntry, PairEntry, Request,
     Response, Speaker, Turn, WorkspaceEntry,
 };
+use crate::protocol::{InvalidSkill, SkillDraftEntry, SkillEntry};
 
 /// A fresh message id: the clock in nanoseconds and the process id.
 #[must_use]
@@ -54,6 +55,10 @@ pub async fn send(socket: &Path, request: &Request) -> Result<Response> {
 
 /// The text that `lg chat` prints, and whether the command succeeded.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one arm per response, and the arms read best as one match"
+)]
 pub fn render(response: &Response) -> (String, bool) {
     match response {
         Response::Reply { text } => (text.clone(), true),
@@ -144,6 +149,11 @@ pub fn render(response: &Response) -> (String, bool) {
         Response::History { turns } => (render_history(turns), true),
         Response::Workspace { files } => (render_workspace(files), true),
         Response::Plans { goals, ideas } => (render_plans(goals, ideas), true),
+        Response::Skills {
+            skills,
+            invalid,
+            drafts,
+        } => (render_skills(skills, invalid, drafts), true),
         Response::WorkspaceFile { path, bytes, text } => (
             text.clone()
                 .unwrap_or_else(|| format!("{path}: {bytes} bytes, not text or too large to show")),
@@ -154,6 +164,32 @@ pub fn render(response: &Response) -> (String, bool) {
         Response::Off { message } => (message.clone(), true),
         Response::Error { message } => (format!("error: {message}"), false),
     }
+}
+
+/// One line per skill, per file that does not load, and per draft.
+fn render_skills(
+    skills: &[SkillEntry],
+    invalid: &[InvalidSkill],
+    drafts: &[SkillDraftEntry],
+) -> String {
+    let mut lines: Vec<String> = skills
+        .iter()
+        .map(|skill| format!("{}: {}", skill.name, skill.description))
+        .collect();
+    lines.extend(
+        invalid
+            .iter()
+            .map(|file| format!("does not load: {} ({})", file.path, file.reason)),
+    );
+    lines.extend(
+        drafts
+            .iter()
+            .map(|draft| format!("draft {}: {} waits for you", draft.id, draft.name)),
+    );
+    if lines.is_empty() {
+        return String::from("no skills yet");
+    }
+    lines.join("\n")
 }
 
 /// One line per goal and per idea, with its number.

@@ -326,6 +326,10 @@ pub struct Daemon {
     disarm: bool,
     /// When the daemon last looked for consolidation passes to reflect on.
     passes_seen: Option<DateTime<Utc>>,
+    /// The skills folder of a config with no `[skills] dir`.
+    skills_default: Option<std::path::PathBuf>,
+    /// The skills folder at the last sync. `None` syncs at the next tick.
+    skills_stamp: Option<Vec<(std::path::PathBuf, std::time::SystemTime, u64)>>,
     chats: Arc<Chats>,
     clock: Clock,
     /// The store of the calls that wait, when a call can wait.
@@ -455,6 +459,8 @@ impl Daemon {
             wake: built.wake,
             disarm: true,
             passes_seen: None,
+            skills_default: None,
+            skills_stamp: None,
             chats,
             clock: Arc::new(Utc::now),
             approvals: built.approvals,
@@ -598,6 +604,10 @@ impl Daemon {
             Request::Workspace => self.workspace_files().await,
             Request::WorkspaceFile { path } => self.workspace_file(path).await,
             Request::Plans => self.plans(),
+            request @ (Request::Skills
+            | Request::AcceptSkill { .. }
+            | Request::DeclineSkill { .. }
+            | Request::RetireSkill { .. }) => Box::pin(self.skills_request(request)).await,
             Request::Decide { decision, id } => self.decide_plan(decision, id),
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
@@ -1114,6 +1124,8 @@ impl Daemon {
         let first = sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
         // A consolidation pass that just ended plans a reflection.
         self.notice_passes()?;
+        // A change to the skills folder reaches the overlay.
+        self.sync_skills().await;
         // The arm comes after the drive, so a due brief tick runs first. A
         // second drive books the armed tick at once.
         let run = if self.arm_wake().await?.is_some() {
@@ -1730,6 +1742,7 @@ mod plans;
 #[cfg(feature = "refine")]
 mod refine;
 mod reload;
+mod skills;
 #[cfg(feature = "discord")]
 pub use discord::DiscordLink;
 #[cfg(feature = "slack")]
@@ -2986,10 +2999,18 @@ mod tests {
                 .as_str()
                 .map(|out| format!("ran: {}", out.trim()));
             let said = result.as_str().map(|text| format!("got: {text}"));
-            let logged = ["runs", "failures", "models", "idea", "goal", "wake"]
-                .iter()
-                .any(|key| result.get(key).is_some())
-                .then(|| format!("log: {result}"));
+            let logged = [
+                "runs",
+                "failures",
+                "models",
+                "idea",
+                "goal",
+                "wake",
+                "skill_draft",
+            ]
+            .iter()
+            .any(|key| result.get(key).is_some())
+            .then(|| format!("log: {result}"));
             result["text"]
                 .as_str()
                 .map(str::to_owned)
@@ -3972,6 +3993,112 @@ mod tests {
                 ideas: Vec::new()
             }
         );
+    }
+
+    #[cfg(feature = "refine")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn skills_from_the_folder_and_from_littleguy_reach_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("skills");
+        let mut with_refine = config();
+        with_refine.refine = Some(littleguy_core::RefineConfig::default());
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &with_refine,
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_skills_dir(shelf.clone());
+
+        // The owner writes a SKILL.md by hand. The next tick puts it in the
+        // prompt.
+        crate::skills::write(&shelf, "deploy", "Ship the site.", "1. Build.", "mark").unwrap();
+        daemon.tick().await.unwrap();
+        let recall = daemon.handle_request(UID, request("s-1", "recall")).await;
+        assert!(reply_text(&recall).contains("`deploy`: Ship the site."));
+
+        // littleguy drafts a skill. It waits; it is not in the prompt.
+        let drafted = daemon
+            .handle_request(
+                UID,
+                request(
+                    "s-2",
+                    r#"use propose_skill {"name": "weekly-digest", "description": "Write the Friday digest.", "body": "1. Read the week."}"#,
+                ),
+            )
+            .await;
+        assert!(reply_text(&drafted).starts_with("log: "));
+        let Response::Skills { drafts, .. } = daemon.handle_request(UID, Request::Skills).await
+        else {
+            panic!("no skills");
+        };
+        assert_eq!(drafts.len(), 1);
+        assert!(!drafts[0].revises);
+        // Only the owner decides.
+        assert!(matches!(
+            daemon
+                .handle_request(UID + 1, Request::AcceptSkill { draft: drafts[0].id })
+                .await,
+            Response::Error { message } if message == "only the owner of the daemon may do that"
+        ));
+
+        // The owner accepts: a SKILL.md by littleguy, live at once.
+        let Response::Skills { skills, drafts, .. } = daemon
+            .handle_request(
+                UID,
+                Request::AcceptSkill {
+                    draft: drafts[0].id,
+                },
+            )
+            .await
+        else {
+            panic!("the accept failed");
+        };
+        assert_eq!(drafts, []);
+        let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+        assert_eq!(names, ["deploy", "weekly-digest"]);
+        let file = std::fs::read_to_string(shelf.join("weekly-digest").join("SKILL.md")).unwrap();
+        assert!(file.contains("author: littleguy"));
+        let recall = daemon.handle_request(UID, request("s-3", "recall")).await;
+        assert!(reply_text(&recall).contains("`weekly-digest`: Write the Friday digest."));
+
+        // Retiring keeps the file and takes the skill out of the prompt.
+        daemon
+            .handle_request(
+                UID,
+                Request::RetireSkill {
+                    name: String::from("deploy"),
+                },
+            )
+            .await;
+        assert!(shelf.join(crate::skills::RETIRED).is_dir());
+        let recall = daemon.handle_request(UID, request("s-4", "recall")).await;
+        assert!(!reply_text(&recall).contains("`deploy`"));
+        assert!(matches!(
+            daemon
+                .handle_request(UID, Request::DeclineSkill { draft: 1 })
+                .await,
+            Response::Error { .. }
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn skills_are_off_without_the_refine_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(&dir.path().join("lg.db"), Arc::new(OfflineModel::new()))
+            .with_skills_dir(dir.path().join("skills"));
+        assert!(matches!(
+            daemon.handle_request(UID, Request::Skills).await,
+            Response::Off { message } if message.contains("refine")
+        ));
+        assert!(matches!(
+            daemon
+                .handle_request(UID, Request::AcceptSkill { draft: 1 })
+                .await,
+            Response::Error { message } if message.contains("refine")
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]

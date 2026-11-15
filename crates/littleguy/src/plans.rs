@@ -11,6 +11,10 @@
 //!
 //! `wake_me` books a wake: a look at something again at a later time
 //! (ADR 0023). The daemon aims the engine timer at the next one.
+//!
+//! `propose_skill` drafts a skill: a `SKILL.md` that the owner accepts or
+//! declines on the Skills tab (ADR 0024). A skill is standing instructions,
+//! so no tool turns one on.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -116,11 +120,12 @@ fn object(properties: &Value, required: &[&str]) -> Value {
 #[must_use]
 #[expect(
     clippy::too_many_lines,
-    reason = "seven tools, each a schema and a short body, read best in one list"
+    reason = "eight tools, each a schema and a short body, read best in one list"
 )]
 pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>> {
     let list = Arc::clone(stores);
     let book = (Arc::clone(stores), wakes.clone());
+    let draft = Arc::clone(stores);
     let cancel = (Arc::clone(stores), wakes.clone());
     let file = Arc::clone(stores);
     let research = Arc::clone(stores);
@@ -139,10 +144,16 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
                 async move {
                     let plans = stores.plans()?;
                     let wakes = stores.pending_wakes()?;
+                    let drafts = stores.skill_drafts()?;
                     let now = now_ms();
                     Ok(json!({
                         "goals": plans.goals.iter().map(|goal| goal_json(goal, now)).collect::<Vec<_>>(),
                         "ideas": plans.ideas.iter().map(idea_json).collect::<Vec<_>>(),
+                        "skill_drafts": drafts.iter().map(|draft| json!({
+                            "id": draft.id,
+                            "name": draft.name,
+                            "description": draft.description,
+                        })).collect::<Vec<_>>(),
                         "wakes": wakes.iter().map(|wake| json!({
                             "id": wake.id,
                             "at": time(Some(wake.at_ms)),
@@ -303,6 +314,36 @@ pub fn tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool>
         )
         .effect(ToolEffect::Internal)
         .shared(),
+        FnTool::with_context(
+            "propose_skill",
+            "Draft a skill: know-how that you will load on demand later, written as the body \
+             of a SKILL.md. Draft one when you find a way of doing something that you will \
+             need again. It does nothing until the owner accepts it on the Skills tab; tell \
+             them you drafted it. A draft with the name of an existing skill revises it.",
+            object(
+                &json!({
+                    "name": {"type": "string", "description": "lowercase-with-dashes, for example triage-inbox."},
+                    "description": {"type": "string", "description": "One line: when to load the skill."},
+                    "body": {"type": "string", "description": "The know-how, in markdown."},
+                }),
+                &["name", "description", "body"],
+            ),
+            move |input, ctx| {
+                let stores = Arc::clone(&draft);
+                async move {
+                    let id = stores.add_skill_draft(
+                        &call_key(&ctx),
+                        text(&input, "name")?,
+                        text(&input, "description")?,
+                        text(&input, "body")?,
+                        now_ms(),
+                    )?;
+                    Ok(json!({"skill_draft": id, "status": "waits for the owner"}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
         FnTool::new(
             "cancel_wake",
             "Cancel a wake that you booked and no longer need.",
@@ -340,6 +381,7 @@ mod tests {
                 "propose_goal",
                 "goal_progress",
                 "wake_me",
+                "propose_skill",
                 "cancel_wake"
             ]
         );

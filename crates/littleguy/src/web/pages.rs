@@ -77,6 +77,7 @@ pub fn routes() -> Vec<autumn_web::Route> {
         manage,
         workspace,
         decide_plan,
+        decide_skill,
         login,
         logout,
         chat,
@@ -292,6 +293,8 @@ struct Open {
     tab: Option<String>,
     path: Option<String>,
     id: Option<i64>,
+    /// A skill, by name.
+    name: Option<String>,
 }
 
 /// A tab of the workspace page.
@@ -303,6 +306,8 @@ enum Tab {
     Goals,
     /// The open ideas.
     Ideas,
+    /// The skills, and the drafts that wait.
+    Skills,
 }
 
 impl Tab {
@@ -311,6 +316,7 @@ impl Tab {
         match name {
             Some("goals") => Self::Goals,
             Some("ideas") => Self::Ideas,
+            Some("skills") => Self::Skills,
             _ => Self::Files,
         }
     }
@@ -321,6 +327,7 @@ impl Tab {
             Self::Files => return String::from("/workspace"),
             Self::Goals => "goals",
             Self::Ideas => "ideas",
+            Self::Skills => "skills",
         };
         id.map_or_else(
             || format!("/workspace?tab={tab}"),
@@ -336,12 +343,23 @@ fn workspace_url(path: &str) -> String {
     url
 }
 
-/// The tabs of the workspace page, with `current` marked. The goals tab
-/// counts the goals that wait for the owner. With `oob`, an htmx answer
-/// swaps the tabs too, so the count stays right after a decision.
-fn tabs(current: Tab, plans: &Answer, oob: bool) -> Markup {
+/// The URL of the skills tab with the skill `name` open.
+fn skill_url(name: &str) -> String {
+    let mut url = String::from("/workspace?tab=skills&name=");
+    url.extend(form_urlencoded::byte_serialize(name.as_bytes()));
+    url
+}
+
+/// The tabs of the workspace page, with `current` marked. The goals and
+/// skills tabs count what waits for the owner. With `oob`, an htmx answer
+/// swaps the tabs too, so the counts stay right after a decision.
+fn tabs(current: Tab, plans: &Answer, skills: &Answer, oob: bool) -> Markup {
     let waiting = match plans {
         Answer::Plans { goals, .. } => goals.iter().filter(|g| g.status == "proposed").count(),
+        _ => 0,
+    };
+    let drafts = match skills {
+        Answer::Skills { drafts, .. } => drafts.len(),
         _ => 0,
     };
     let mark = |tab: Tab| (tab == current).then_some("page");
@@ -353,6 +371,10 @@ fn tabs(current: Tab, plans: &Answer, oob: bool) -> Markup {
                 @if waiting > 0 { span.count title="waiting for you" { (waiting) " waiting" } }
             }
             a href=(Tab::Ideas.url(None)) aria-current=[mark(Tab::Ideas)] { "Ideas" }
+            a href=(Tab::Skills.url(None)) aria-current=[mark(Tab::Skills)] {
+                "Skills"
+                @if drafts > 0 { span.count title="drafts wait for you" { (drafts) " waiting" } }
+            }
         }
     }
 }
@@ -376,14 +398,16 @@ async fn workspace(
     };
     let tab = Tab::parse(open.tab.as_deref());
     let plans = ask(&web, Request::Plans).await;
+    let skills = ask(&web, Request::Skills).await;
     let view = match tab {
         Tab::Files => files_view(&web, open.path.as_deref()).await,
         Tab::Goals | Tab::Ideas => plans_view(tab, &plans, open.id, None),
+        Tab::Skills => skills_view(&skills, open.id, open.name.as_deref(), None),
     };
     let body = html! {
         (bar(csrf.token(), "/workspace"))
         main.workspace {
-            (tabs(tab, &plans, false))
+            (tabs(tab, &plans, &skills, false))
             (view)
         }
     };
@@ -630,7 +654,206 @@ async fn decide_plan(
     };
     // An accepted goal stays open. A gone item opens the first one.
     let view = plans_view(tab, &plans, Some(id), notice);
-    html! { (view) (tabs(tab, &plans, true)) }.into_response()
+    let skills = ask(&web, Request::Skills).await;
+    html! { (view) (tabs(tab, &plans, &skills, true)) }.into_response()
+}
+
+/// One skill, a draft or a file that does not load, as a document.
+enum SkillItem<'a> {
+    Draft(&'a crate::protocol::SkillDraftEntry),
+    Skill(&'a crate::protocol::SkillEntry),
+    Invalid(&'a crate::protocol::InvalidSkill),
+}
+
+/// A button that sends the owner's skill `action` on `target`, and swaps
+/// the open view with the answer.
+fn skill_button(action: &str, target: &str, label: &str) -> Markup {
+    let mut url = format!("/skills/{action}/");
+    url.extend(form_urlencoded::byte_serialize(target.as_bytes()));
+    html! {
+        button hx-post=(url) hx-target="#plan-view" hx-swap="outerHTML" { (label) }
+    }
+}
+
+/// The document of one skill item.
+fn skill_doc(item: &SkillItem<'_>) -> Markup {
+    match item {
+        SkillItem::Draft(draft) => html! {
+            article.doc {
+                header {
+                    h2 { (draft.name) }
+                    div.actions {
+                        (skill_button("accept", &draft.id.to_string(), "Accept"))
+                        (skill_button("decline", &draft.id.to_string(), "Decline"))
+                    }
+                }
+                p.meta {
+                    span.tag { "waiting for you" }
+                    " · drafted by littleguy " (when(draft.created_ms))
+                    @if draft.revises { " · " strong { "replaces the active skill" } }
+                }
+                h3 { "Description" }
+                p { (draft.description) }
+                h3 { "SKILL.md" }
+                (markdown(&draft.body))
+            }
+        },
+        SkillItem::Skill(skill) => html! {
+            article.doc {
+                header {
+                    h2 { (skill.name) }
+                    div.actions { (skill_button("retire", &skill.name, "Retire")) }
+                }
+                p.meta {
+                    span.tag.active { "active" }
+                    @if let Some(author) = &skill.author { " · by " (author) }
+                    " · " code { (skill.path) }
+                }
+                h3 { "Description" }
+                p { (skill.description) }
+                h3 { "SKILL.md" }
+                (markdown(&skill.body))
+            }
+        },
+        SkillItem::Invalid(file) => html! {
+            article.doc {
+                header { h2 { "Does not load" } }
+                p.meta { code { (file.path) } }
+                p.error { (file.reason) }
+            }
+        },
+    }
+}
+
+/// The skills tab: drafts that wait first, then the skills, then the files
+/// that do not load. The draft `id` or the skill `name` is open, or the
+/// first item. `notice` goes on top of the open item.
+fn skills_view(
+    skills: &Answer,
+    id: Option<i64>,
+    name: Option<&str>,
+    notice: Option<Markup>,
+) -> Markup {
+    let Answer::Skills {
+        skills,
+        invalid,
+        drafts,
+    } = skills
+    else {
+        return html! {
+            div #plan-view.split {
+                section #file.wide { @if let Some(notice) = notice { (notice) } (note(skills)) }
+            }
+        };
+    };
+    let items: Vec<(String, SkillItem<'_>)> = drafts
+        .iter()
+        .map(|draft| {
+            (
+                format!("{}&id={}", Tab::Skills.url(None), draft.id),
+                SkillItem::Draft(draft),
+            )
+        })
+        .chain(
+            skills
+                .iter()
+                .map(|skill| (skill_url(&skill.name), SkillItem::Skill(skill))),
+        )
+        .chain(
+            invalid
+                .iter()
+                .map(|file| (Tab::Skills.url(None), SkillItem::Invalid(file))),
+        )
+        .collect();
+    let chosen = |item: &SkillItem<'_>| match item {
+        SkillItem::Draft(draft) => id == Some(draft.id),
+        SkillItem::Skill(skill) => name == Some(skill.name.as_str()),
+        SkillItem::Invalid(_) => false,
+    };
+    let open = items
+        .iter()
+        .position(|(_, item)| chosen(item))
+        .or_else(|| (!items.is_empty()).then_some(0));
+    html! {
+        div #plan-view.split {
+            nav.files aria-label="Skills" {
+                @if items.is_empty() {
+                    p.note { "No skills yet. Put a SKILL.md in the skills folder, or let littleguy draft one." }
+                }
+                ul {
+                    @for (index, (url, item)) in items.iter().enumerate() {
+                        @let current = (open == Some(index)).then_some("page");
+                        li {
+                            a href=(url) aria-current=[current]
+                                hx-get=(url) hx-select="#plan-view" hx-target="#plan-view"
+                                hx-swap="outerHTML" hx-push-url="true" {
+                                @match item {
+                                    SkillItem::Draft(draft) => {
+                                        span.path { (draft.name) }
+                                        span.dot title="waiting for you" {}
+                                    }
+                                    SkillItem::Skill(skill) => span.path { (skill.name) },
+                                    SkillItem::Invalid(file) => {
+                                        span.path { (file.path) }
+                                        span.size { "does not load" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            section #file {
+                @if let Some(notice) = notice { (notice) }
+                @match open.and_then(|index| items.get(index)) {
+                    Some((_, item)) => (skill_doc(item)),
+                    None => p.note { "Nothing to open." },
+                }
+            }
+        }
+    }
+}
+
+/// The owner's decision on a skill: accept or decline a draft, or retire a
+/// skill. Answers with the skills tab, and the tabs out of band.
+#[post("/skills/{action}/{target}")]
+async fn decide_skill(
+    State(state): State<AppState>,
+    session: Session,
+    Path((action, target)): Path<(String, String)>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let draft = target.parse::<i64>();
+    let request = match (action.as_str(), draft) {
+        ("accept", Ok(draft)) => Request::AcceptSkill { draft },
+        ("decline", Ok(draft)) => Request::DeclineSkill { draft },
+        ("retire", _) => Request::RetireSkill {
+            name: target.clone(),
+        },
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    // An accepted draft opens as the skill it became.
+    let accepted = match (&request, ask(&web, Request::Skills).await) {
+        (Request::AcceptSkill { draft }, Answer::Skills { drafts, .. }) => drafts
+            .into_iter()
+            .find(|entry| entry.id == *draft)
+            .map(|entry| entry.name),
+        _ => None,
+    };
+    let answer = ask(&web, request).await;
+    let (skills, notice) = if matches!(answer, Answer::Skills { .. }) {
+        (answer, None)
+    } else {
+        (ask(&web, Request::Skills).await, Some(note(&answer)))
+    };
+    let plans = ask(&web, Request::Plans).await;
+    let view = skills_view(&skills, None, accepted.as_deref(), notice);
+    html! { (view) (tabs(Tab::Skills, &plans, &skills, true)) }.into_response()
 }
 
 /// Whether `path` names a Markdown file, in any case.

@@ -101,6 +101,24 @@ pub enum Request {
     },
     /// The goals and the ideas of the assistant. Only the owner may.
     Plans,
+    /// The skills of the skills folder and the drafts of the assistant.
+    /// Only the owner may.
+    Skills,
+    /// Write the draft `draft` as a `SKILL.md`. Only the owner may.
+    AcceptSkill {
+        /// The draft.
+        draft: i64,
+    },
+    /// Decline the draft `draft`. Only the owner may.
+    DeclineSkill {
+        /// The draft.
+        draft: i64,
+    },
+    /// Move the skill `name` to the retired folder. Only the owner may.
+    RetireSkill {
+        /// The skill.
+        name: String,
+    },
     /// Accept a proposed goal, or decline it, drop an active goal, or drop
     /// an open idea. Only the owner may.
     Decide {
@@ -109,6 +127,47 @@ pub enum Request {
         /// The goal or the idea.
         id: i64,
     },
+}
+
+/// One skill of the skills folder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillEntry {
+    /// The name that the model loads it by.
+    pub name: String,
+    /// When to load it.
+    pub description: String,
+    /// The know-how, in markdown.
+    pub body: String,
+    /// Who wrote it, when the file says.
+    pub author: Option<String>,
+    /// The `SKILL.md` file.
+    pub path: String,
+}
+
+/// A `SKILL.md` that does not load, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvalidSkill {
+    /// The file.
+    pub path: String,
+    /// Why it does not load.
+    pub reason: String,
+}
+
+/// A skill that the assistant drafted, which waits for the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillDraftEntry {
+    /// Its number.
+    pub id: i64,
+    /// The name that the model would load it by.
+    pub name: String,
+    /// When to load it.
+    pub description: String,
+    /// The know-how, in markdown.
+    pub body: String,
+    /// When it was drafted, in epoch milliseconds.
+    pub created_ms: i64,
+    /// Whether a skill of that name exists, so that accepting replaces it.
+    pub revises: bool,
 }
 
 /// What the owner decides about a goal or an idea.
@@ -403,6 +462,16 @@ pub enum Response {
         /// The open ideas, oldest first.
         ideas: Vec<IdeaEntry>,
     },
+    /// The skills of the skills folder, the files that do not load, and
+    /// the drafts that wait.
+    Skills {
+        /// The skills that load, by name.
+        skills: Vec<SkillEntry>,
+        /// The files that do not load.
+        invalid: Vec<InvalidSkill>,
+        /// The drafts of the assistant, oldest first.
+        drafts: Vec<SkillDraftEntry>,
+    },
     /// What a listing asked for is not set up in this daemon: a section is
     /// missing, or this build lacks the feature. It is not a failure. The
     /// message says how to turn it on.
@@ -457,6 +526,12 @@ mod tests {
             Request::Connections,
             Request::Reload,
             Request::History,
+            Request::Skills,
+            Request::AcceptSkill { draft: 2 },
+            Request::DeclineSkill { draft: 3 },
+            Request::RetireSkill {
+                name: String::from("deploy"),
+            },
             Request::Plans,
             Request::Decide {
                 decision: PlanDecision::DropIdea,

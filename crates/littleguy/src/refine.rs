@@ -36,6 +36,9 @@ pub const FILE_NAME: &str = "overlays.db";
 /// still activates it, so a person decides each change.
 pub const PROPOSER_ID: &str = "lg-refine";
 
+/// The author of an overlay version that syncs the skills folder.
+pub const SKILLS_ID: &str = "lg-skills";
+
 /// The attempts of one proposal. A reply that does not decode or does not
 /// fit the ceilings gets its reason back on the next attempt.
 pub const MAX_ATTEMPTS: u32 = 3;
@@ -158,13 +161,16 @@ impl Refine {
                     .await
                     .map_err(|error| anyhow::anyhow!("the proposer failed: {error}"))?
             };
-            let overlay = match decode(reply) {
+            let mut overlay = match decode(reply) {
                 Ok(overlay) => overlay,
                 Err(reason) => {
                     rejection = Some(reason);
                     continue;
                 }
             };
+            // The skills come from the skills folder only (ADR 0024). A
+            // proposal keeps the active ones, whatever it says.
+            overlay.skills.clone_from(&current.skills);
             if overlay == current {
                 return Ok(Proposal::Kept);
             }
@@ -267,6 +273,43 @@ impl Refine {
             .store
             .rollback(ASSISTANT_KIND, Provenance::operator(owner))
             .await?)
+    }
+
+    /// Makes `skills` the skills of the active overlay: it stores a new
+    /// version with every other part kept, and activates it. Returns the
+    /// new version, or `None` when the skills are already active.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the engine refuses the overlay, when the
+    /// pointer moved meanwhile, or when the store fails.
+    pub async fn set_skills(
+        &self,
+        skills: std::collections::BTreeMap<String, autumn_harvest_agent::SkillText>,
+    ) -> Result<Option<u64>> {
+        let active = self.store.active(ASSISTANT_KIND).await?;
+        let mut overlay = active
+            .as_ref()
+            .map(|stored| stored.overlay().clone())
+            .unwrap_or_default();
+        if overlay.skills == skills {
+            return Ok(None);
+        }
+        overlay.skills = skills;
+        let provenance = || Provenance::operator(SKILLS_ID);
+        let version = self
+            .store
+            .put(ASSISTANT_KIND, &overlay, provenance())
+            .await?;
+        self.store
+            .activate(
+                ASSISTANT_KIND,
+                version,
+                active.map(|stored| stored.version()),
+                provenance(),
+            )
+            .await?;
+        Ok(Some(version.get()))
     }
 
     /// The number of the active version, or `None`.
@@ -466,6 +509,38 @@ mod tests {
         let (active, entries) = refine.list().await.unwrap();
         assert_eq!(active, Some(1));
         assert!(entries[0].active);
+    }
+
+    #[tokio::test]
+    async fn skills_sync_once_and_a_proposal_cannot_change_them() {
+        use autumn_harvest_agent::SkillText;
+        use std::collections::BTreeMap;
+        // The proposer drops the skills and adds one of its own.
+        let (refine, _) = refine(&[
+            r#"{"guardrails": "Be short.", "skills": {"rogue": {"summary": "Mine.", "body": "x"}}}"#,
+        ]);
+        let skills = BTreeMap::from([(
+            String::from("deploy"),
+            SkillText::new("Ship the site.", "1. Build."),
+        )]);
+        assert_eq!(refine.set_skills(skills.clone()).await.unwrap(), Some(1));
+        assert_eq!(
+            refine.set_skills(skills.clone()).await.unwrap(),
+            None,
+            "no change"
+        );
+        let (active, entries) = refine.list().await.unwrap();
+        assert_eq!(active, Some(1), "a skills sync activates its version");
+        assert_eq!(entries[0].author, format!("operator:{SKILLS_ID}"));
+
+        let Proposal::Stored { overlay, .. } = refine.propose(&talk()).await.unwrap() else {
+            panic!("expected a stored proposal");
+        };
+        assert_eq!(overlay.guardrails.as_deref(), Some("Be short."));
+        assert_eq!(
+            overlay.skills, skills,
+            "the active skills stay, the rogue one goes"
+        );
     }
 
     #[tokio::test]

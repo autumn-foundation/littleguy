@@ -46,6 +46,7 @@ mod protocol;
 mod refine;
 mod runlog;
 mod sandbox;
+mod skills;
 mod tools;
 mod wake;
 mod web;
@@ -518,6 +519,20 @@ fn hook_token(config: &Config) -> Result<Option<web::HookToken>> {
         .map_err(Into::into)
 }
 
+/// The daemon with its config file, which it watches and `lg reload`
+/// reads, and the skills folder next to it, unless `[skills]` names one.
+fn with_config_file(daemon: daemon::Daemon, file: Option<PathBuf>) -> daemon::Daemon {
+    let Some(file) = file else {
+        return daemon;
+    };
+    let skills = file.parent().map(|parent| parent.join("skills"));
+    let daemon = daemon.with_config_file(file);
+    match skills {
+        Some(dir) => daemon.with_skills_dir(dir),
+        None => daemon,
+    }
+}
+
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let config = load_config(args.config.as_deref(), env)?;
     features::check(&config)?;
@@ -570,10 +585,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let hooks = hook_token(&config)?;
     let daemon = daemon::Daemon::open_with(&db, &config, model, uid, discord, extras)?;
     // The daemon watches its config file, and `lg reload` reads it too.
-    let daemon = match config_file(args.config.as_deref(), env) {
-        Some(file) => daemon.with_config_file(file),
-        None => daemon,
-    };
+    let daemon = with_config_file(daemon, config_file(args.config.as_deref(), env));
     #[cfg(feature = "oauth")]
     let daemon = match connections {
         Some(started) => daemon.with_connections(started),

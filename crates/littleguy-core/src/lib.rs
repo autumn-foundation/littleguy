@@ -15,8 +15,8 @@ pub use config::{
     FirecrackerConfig, FleetConfig, FlowConfig, FlowRecheck, GoogleConfig, HeartbeatConfig,
     HeartbeatDelivery, HooksConfig, Integration, McpServer, McpTransport, MemoryConfig, QuietHours,
     RefineConfig, RefineDimension, Replica, S3Replica, SanMateoConfig, SanMateoError,
-    SandboxBackend, SandboxConfig, SlackConfig, ToolsConfig, UiConfig, chat_user, discord_sender,
-    slack_sender,
+    SandboxBackend, SandboxConfig, SkillsConfig, SlackConfig, ToolsConfig, UiConfig, chat_user,
+    discord_sender, slack_sender,
 };
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
 pub use pairing::{PairingCode, Pending, PendingPairings};

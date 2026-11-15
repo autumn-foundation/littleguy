@@ -115,6 +115,11 @@
 //! `deliver` says where a tick that has news speaks: `web`, the chat of the
 //! web pages, for now.
 //!
+//! The `[skills]` section names the folder of the `SKILL.md` files, as
+//! Claude Code and Codex keep them. By default it is `skills/` next to the
+//! config file. The skills reach the assistant through the refine overlay,
+//! so they need a `[refine]` section.
+//!
 //! The `[tools]` section is optional. By default the assistant can read a
 //! public web page, search the web when `LG_BRAVE_API_KEY` is set, and keep
 //! files in its own workspace. Set a key to `false` to take a tool away.
@@ -901,6 +906,20 @@ fn heartbeat(raw: RawHeartbeat, memory_timezone: &str) -> Result<HeartbeatConfig
     })
 }
 
+/// Where the skills of the assistant live (ADR 0024).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkillsConfig {
+    /// The folder of the `SKILL.md` files. `None` is `skills/` next to
+    /// the config file.
+    pub dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSkills {
+    dir: Option<String>,
+}
+
 /// The San Mateo provider that the Google tools need.
 pub const GOOGLE_PROVIDER: &str = "google";
 
@@ -1364,6 +1383,8 @@ struct Raw {
     brief: Option<RawBrief>,
     heartbeat: Option<RawHeartbeat>,
     #[serde(default)]
+    skills: RawSkills,
+    #[serde(default)]
     tools: RawTools,
     sandbox: Option<RawSandbox>,
     #[serde(default)]
@@ -1646,6 +1667,8 @@ pub struct Config {
     pub brief: Option<BriefConfig>,
     /// The heartbeat, when the config has the section.
     pub heartbeat: Option<HeartbeatConfig>,
+    /// Where the `SKILL.md` files live.
+    pub skills: SkillsConfig,
     /// The tools of the assistant.
     pub tools: ToolsConfig,
     /// The `run_code` tool, when the config has the section.
@@ -1682,6 +1705,7 @@ impl Config {
             memory: MemoryConfig::default(),
             brief: None,
             heartbeat: None,
+            skills: SkillsConfig::default(),
             tools: ToolsConfig::default(),
             sandbox: None,
             approvals: ApprovalsConfig::default(),
@@ -1751,6 +1775,9 @@ impl Config {
             memory,
             brief,
             heartbeat,
+            skills: SkillsConfig {
+                dir: raw.skills.dir.map(std::path::PathBuf::from),
+            },
             tools: tools(&raw.tools)?,
             sandbox: raw.sandbox.map(sandbox).transpose()?,
             approvals: approvals(&raw.approvals)?,

@@ -293,6 +293,34 @@ file tools change only the private workspace. A morning brief can read but
 not write. [ADR 0007](docs/adr/0007-first-tools.md) explains the design.
 
 
+## Skills
+
+Skills are know-how that littleguy loads when a task needs it, in the
+format Claude Code and Codex use: a folder per skill with a `SKILL.md`.
+
+```text
+~/.config/littleguy/skills/triage-inbox/SKILL.md
+---
+name: triage-inbox
+description: How Mark wants his inbox sorted. Load it before you triage.
+---
+1. Read the subject lines first. ...
+```
+
+```toml
+[skills]
+dir = "~/notes/skills"    # optional; the default is skills/ next to lg.toml
+```
+
+Put a `SKILL.md` in the folder and the running littleguy has it within a
+second: its prompt lists each name and description, and it loads a body
+when it needs one. littleguy also drafts skills for itself when it finds a
+way of doing something that it will need again. A draft waits on the
+**Skills** tab of the Workspace page; accepting it writes the `SKILL.md`.
+Retiring a skill moves its folder to `.retired/`. Skills reach the
+assistant through the refine overlay, so they need a `[refine]` section.
+[ADR 0024](docs/adr/0024-skills.md) explains the design.
+
 ## Heartbeat
 
 A `[heartbeat]` section wakes littleguy on its own. On each tick it checks

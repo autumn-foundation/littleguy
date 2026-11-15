@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 18] = [
+pub const ALL: [Feature; 19] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -81,6 +81,10 @@ pub const ALL: [Feature; 18] = [
         on: cfg!(feature = "self-debug"),
     },
     Feature {
+        name: "council",
+        on: cfg!(feature = "council"),
+    },
+    Feature {
         name: "camel",
         on: cfg!(feature = "camel"),
     },
@@ -125,6 +129,7 @@ pub fn check(config: &Config) -> Result<()> {
         (config.refine.is_some(), "[refine]", "refine"),
         (config.heartbeat.is_some(), "[heartbeat]", "heartbeat"),
         (config.skills.dir.is_some(), "[skills]", "skills"),
+        (config.council.is_some(), "[council]", "council"),
         (config.fleet.is_some(), "[fleet]", "fleet"),
     ];
     let problems: Vec<String> = needs
@@ -225,6 +230,7 @@ mod tests {
                 "[skills]",
                 "skills",
             ),
+            ("owner = \"mark\"\n[council]", "[council]", "council"),
             (
                 "owner = \"mark\"\n[[camel.route]]\nid = \"inbox\"\nfrom = \"file:/tmp/in\"",
                 "[[camel.route]]",

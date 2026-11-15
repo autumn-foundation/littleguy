@@ -196,6 +196,14 @@ pub fn harness(
     let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
     if let Some(guard) = guard {
         (harness, profile) = guard.apply(harness, profile);
+    } else if config.council.is_some() {
+        // The council reads the taint of a run, and only flow rules record
+        // it. No tool here can complete a rule that asks, or the guard would
+        // be on, so the rules only keep the labels (ADR 0027).
+        let flow = config.flow.rules();
+        if !flow.is_empty() {
+            harness = harness.flow_rules(flow);
+        }
     }
     if let Some((stores, db)) = memory {
         harness = crate::memory::harness(harness, stores, db);
@@ -831,6 +839,8 @@ impl Daemon {
             (self.clock)().timestamp_millis(),
             std::sync::atomic::Ordering::SeqCst,
         );
+        #[cfg(feature = "council")]
+        let started = (self.clock)();
         // A tick that is due already runs first, so the op of this message
         // is the next segment, and its run id is known before it starts.
         sqlite::drive(&mut self.rt, &id).await?;
@@ -859,7 +869,11 @@ impl Daemon {
         if let Some(approval) = self.settle(run.as_ref(), Some(&requester)).await? {
             return Ok(Response::Waiting { approval });
         }
-        let Some(state) = sqlite::state(&self.rt, &id).await? else {
+        let state = sqlite::state(&self.rt, &id).await?;
+        // The proposals of this op get their marks before any answer.
+        #[cfg(feature = "council")]
+        self.mark_proposals(started, state.as_ref())?;
+        let Some(state) = state else {
             return Ok(Response::NoAnswer {
                 reason: String::from("the assistant has no running run"),
             });
@@ -1334,6 +1348,8 @@ impl Daemon {
     ///
     /// Returns an error when the runtime cannot drive the run.
     pub async fn tick(&mut self) -> Result<()> {
+        #[cfg(feature = "council")]
+        let started = (self.clock)();
         // A poll fires each due schedule, such as the nightly consolidation,
         // and drives every run once.
         self.rt.poll_once().await?;
@@ -1355,6 +1371,14 @@ impl Daemon {
         // a deadline passes.
         self.settle(run.as_ref(), None).await?;
         self.release_held().await;
+        // The proposals of the ops of this tick get their marks, and then
+        // the council decides one that is clean.
+        #[cfg(feature = "council")]
+        {
+            let state = sqlite::state(&self.rt, self.routing.assistant()).await?;
+            self.mark_proposals(started, state.as_ref())?;
+            self.council_turn().await?;
+        }
         Ok(())
     }
 }
@@ -1952,6 +1976,8 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
     Ok(())
 }
 
+#[cfg(feature = "council")]
+mod council;
 #[cfg(feature = "discord")]
 mod discord;
 mod gate;
@@ -4601,6 +4627,207 @@ mod tests {
                 ideas: Vec::new()
             }
         );
+    }
+
+    /// A model whose council members vote `accept`, and that answers the
+    /// assistant as [`MemoryModel`] does.
+    #[cfg(feature = "council")]
+    #[derive(Debug, Default)]
+    struct CouncilModel {
+        inner: MemoryModel,
+        accept: std::sync::atomic::AtomicBool,
+        votes: std::sync::atomic::AtomicU64,
+    }
+
+    #[cfg(feature = "council")]
+    impl AgentModel for CouncilModel {
+        fn chat<'a>(
+            &'a self,
+            request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            use std::sync::atomic::Ordering;
+            let council = request
+                .messages
+                .first()
+                .is_some_and(|first| MemoryModel::text(first).starts_with("You sit on a council"));
+            if !council {
+                return self.inner.chat(request);
+            }
+            assert!(request.tools.is_empty(), "a member has no tools");
+            self.votes.fetch_add(1, Ordering::SeqCst);
+            let accept = self.accept.load(Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(autumn_harvest_agent::ChatResponse {
+                    content: vec![autumn_harvest_agent::ContentPart::Text(format!(
+                        r#"{{"accept": {accept}, "reason": "It fits the charter."}}"#
+                    ))],
+                    stop_reason: autumn_harvest_agent::StopReason::EndTurn,
+                    usage: autumn_harvest_agent::TokenUsage::new(1, 1),
+                })
+            })
+        }
+    }
+
+    /// A daemon with `council` in `config`, on a model whose members
+    /// accept, with its skills folder in `dir`.
+    #[cfg(feature = "council")]
+    fn council_daemon(
+        dir: &Path,
+        mut config: Config,
+        council: littleguy_core::CouncilConfig,
+    ) -> (Daemon, Arc<CouncilModel>) {
+        config.council = Some(council);
+        let model = Arc::new(CouncilModel::default());
+        model
+            .accept
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let daemon = Daemon::open(
+            &dir.join("lg.db"),
+            &config,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_skills_dir(dir.join("skills"));
+        (daemon, model)
+    }
+
+    #[cfg(feature = "council")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_council_decides_clean_proposals_and_leaves_tainted_ones() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("skills");
+        let mut with_refine = config();
+        with_refine.refine = Some(littleguy_core::RefineConfig::default());
+        let council = littleguy_core::CouncilConfig {
+            accept: vec![
+                littleguy_core::CouncilAccepts::Goals,
+                littleguy_core::CouncilAccepts::Skills,
+            ],
+            members: 3,
+            charter: Some(String::from("Zara, a rogue who wants the crown.")),
+        };
+        let (mut daemon, model) = council_daemon(dir.path(), with_refine, council);
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+
+        // A clean proposal: no outside text in the run.
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "c-1",
+                    r#"use propose_goal {"title": "Steal the seal", "why": "The crown needs it."}"#,
+                ),
+            )
+            .await;
+        daemon.tick().await.unwrap();
+        assert_eq!(model.votes.load(Ordering::SeqCst), 3, "three members voted");
+        let plans = stores.plans().unwrap();
+        assert_eq!(plans.goals[0].status.as_str(), "active");
+        assert!(
+            plans.goals[0].notes[0]
+                .text
+                .starts_with("Accepted by the council")
+        );
+
+        // A clean skill draft is accepted, written by the council.
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "c-2",
+                    r#"use propose_skill {"name": "pick-a-lock", "description": "Open a lock.", "body": "1. Listen."}"#,
+                ),
+            )
+            .await;
+        daemon.tick().await.unwrap();
+        let written = std::fs::read_to_string(shelf.join("pick-a-lock/SKILL.md")).unwrap();
+        assert!(written.contains("author: council"));
+
+        // A declined proposal closes.
+        model.accept.store(false, Ordering::SeqCst);
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "c-3",
+                    r#"use propose_goal {"title": "Burn the inn", "why": "Fun."}"#,
+                ),
+            )
+            .await;
+        daemon.tick().await.unwrap();
+        let declined = stores.plans().unwrap();
+        assert!(
+            declined
+                .goals
+                .iter()
+                .all(|goal| goal.title != "Burn the inn")
+        );
+
+        // list_plans carries untrusted input, so the run is tainted now, and
+        // its next proposal waits for the owner.
+        model.accept.store(true, Ordering::SeqCst);
+        daemon
+            .handle_request(UID, request("c-4", "use list_plans {}"))
+            .await;
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "c-5",
+                    r#"use propose_goal {"title": "Read the letter", "why": "A page said so."}"#,
+                ),
+            )
+            .await;
+        let before = model.votes.load(Ordering::SeqCst);
+        daemon.tick().await.unwrap();
+        assert_eq!(
+            model.votes.load(Ordering::SeqCst),
+            before,
+            "no vote on a tainted one"
+        );
+        let waiting = stores.plans().unwrap();
+        let letter = waiting
+            .goals
+            .iter()
+            .find(|goal| goal.title == "Read the letter")
+            .unwrap();
+        assert_eq!(letter.status.as_str(), "proposed");
+        assert_eq!(stores.council_log(10).unwrap().len(), 3);
+    }
+
+    #[cfg(feature = "council")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn without_the_rule_of_two_the_council_decides_nothing() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let mut blind = config();
+        blind.flow.rule_of_two = false;
+        let council = littleguy_core::CouncilConfig {
+            accept: vec![littleguy_core::CouncilAccepts::Goals],
+            members: 1,
+            charter: None,
+        };
+        let (mut daemon, model) = council_daemon(dir.path(), blind, council);
+        daemon
+            .handle_request(
+                UID,
+                request("b-1", r#"use propose_goal {"title": "T", "why": "W"}"#),
+            )
+            .await;
+        daemon.tick().await.unwrap();
+        assert_eq!(
+            model.votes.load(Ordering::SeqCst),
+            0,
+            "no taint is seen, so none is trusted"
+        );
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        assert_eq!(stores.plans().unwrap().goals[0].status.as_str(), "proposed");
     }
 
     #[cfg(feature = "skills")]

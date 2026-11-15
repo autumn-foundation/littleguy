@@ -38,6 +38,8 @@ use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub mod approvals;
+#[cfg(feature = "council")]
+pub mod council;
 #[cfg(feature = "plans")]
 pub mod plans;
 #[cfg(feature = "self-debug")]
@@ -54,7 +56,7 @@ pub use approvals::{ApprovalRecord, Claim, Verdict};
 pub use runlog::RunLog;
 
 /// The schema version that [`SqliteStores::open`] writes.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// The most edit keys that one memory scope keeps. A retry comes soon after
 /// its first attempt, so the oldest key is safe to forget. The engine keeps
@@ -145,6 +147,21 @@ CREATE TABLE IF NOT EXISTS tick_log (
     seen_ms INTEGER NOT NULL,
     outcome TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS council_marks (
+    kind    TEXT NOT NULL,
+    item    INTEGER NOT NULL,
+    tainted INTEGER NOT NULL,
+    decided INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (kind, item)
+);
+CREATE TABLE IF NOT EXISTS council_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind     TEXT NOT NULL,
+    item     INTEGER NOT NULL,
+    accepted INTEGER NOT NULL,
+    votes    TEXT NOT NULL,
+    at_ms    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS wakes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     at_ms      INTEGER NOT NULL,
@@ -170,7 +187,7 @@ pub enum StoreError {
 }
 
 /// The tables of the stores, in the order an import copies them.
-const TABLES: [&str; 13] = [
+const TABLES: [&str; 15] = [
     "memory_scopes",
     "memory_edits",
     "episode_logs",
@@ -184,6 +201,8 @@ const TABLES: [&str; 13] = [
     "wakes",
     "skill_drafts",
     "tick_log",
+    "council_marks",
+    "council_log",
 ];
 
 /// Where the stores get a connection.

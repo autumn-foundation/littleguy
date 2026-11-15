@@ -17,7 +17,7 @@ use reqwest::header::{CONTENT_TYPE, LOCATION};
 use serde_json::{Value, json};
 use url::Host;
 
-use crate::{clip, refuse, text_field, tls};
+use crate::{offset_field, offset_schema, refuse, text_field, tls, window};
 
 /// The most redirects that one fetch follows.
 pub const MAX_REDIRECTS: usize = 5;
@@ -62,6 +62,16 @@ impl FetchTool {
     /// bad or refused URL, a failed request, a body that is not text, or
     /// too many redirects.
     pub async fn fetch(&self, url: &str) -> Result<Value, AgentError> {
+        self.fetch_from(url, 0).await
+    }
+
+    /// Fetches `url` as [`Self::fetch`] does, and returns the window of its
+    /// text from character `offset` (issue #73).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fetch`].
+    pub async fn fetch_from(&self, url: &str, offset: usize) -> Result<Value, AgentError> {
         let mut url = Url::parse(url).map_err(|e| refuse(format!("`{url}` is not a URL: {e}")))?;
         for _ in 0..=MAX_REDIRECTS {
             let response = self.get(&url).await?;
@@ -77,7 +87,7 @@ impl FetchTool {
                     .map_err(|e| refuse(format!("a redirect to `{location}` is not a URL: {e}")))?;
                 continue;
             }
-            return self.page(&url, response).await;
+            return self.page(&url, response, offset).await;
         }
         Err(refuse(format!(
             "{url} redirects more than {MAX_REDIRECTS} times"
@@ -144,8 +154,13 @@ impl FetchTool {
         Ok(addrs)
     }
 
-    /// The page of a final response.
-    async fn page(&self, url: &Url, response: reqwest::Response) -> Result<Value, AgentError> {
+    /// The page of a final response, from character `offset` of its text.
+    async fn page(
+        &self,
+        url: &Url,
+        response: reqwest::Response,
+        offset: usize,
+    ) -> Result<Value, AgentError> {
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -164,13 +179,15 @@ impl FetchTool {
         } else {
             body
         };
-        let (text, clipped) = clip(&text, self.max_chars);
+        let (text, clipped, length) = window(&text, offset, self.max_chars);
         Ok(json!({
             "url": url.as_str(),
             "status": status,
             "content_type": content_type,
+            "offset": offset,
             "text": text,
             "truncated": cut || clipped,
+            "length": length,
         }))
     }
 }
@@ -229,7 +246,8 @@ impl Tool for FetchTool {
         json!({
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "The http or https URL to read."}
+                "url": {"type": "string", "description": "The http or https URL to read."},
+                "offset": offset_schema(),
             },
             "required": ["url"],
         })
@@ -240,7 +258,10 @@ impl Tool for FetchTool {
         input: Value,
         _ctx: &'a ToolContext,
     ) -> BoxFuture<'a, Result<Value, AgentError>> {
-        Box::pin(async move { self.fetch(text_field(&input, "url")?).await })
+        Box::pin(async move {
+            let offset = offset_field(&input)?;
+            self.fetch_from(text_field(&input, "url")?, offset).await
+        })
     }
 
     fn effect(&self) -> ToolEffect {

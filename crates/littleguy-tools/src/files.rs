@@ -12,7 +12,7 @@ use std::sync::Arc;
 use autumn_harvest_agent::{AgentError, FnTool, Tool, ToolContext, ToolEffect, WorkspaceHandle};
 use serde_json::{Value, json};
 
-use crate::{clip, refuse, text_field};
+use crate::{offset_field, offset_schema, refuse, text_field, window};
 
 /// The most characters that one `read_file` returns.
 pub const MAX_READ_CHARS: usize = 100_000;
@@ -36,16 +36,32 @@ fn path_schema(extra: Option<(&str, &str)>) -> Value {
     json!({"type": "object", "properties": properties, "required": required})
 }
 
+/// Reads a window of a file: at most `MAX_READ_CHARS` from `offset`. The
+/// result holds the length of the file, so a reader knows where it ends.
+/// The schema of `read_file`: a path, and an optional offset.
+fn read_schema() -> Value {
+    let mut schema = path_schema(None);
+    schema["properties"]["offset"] = offset_schema();
+    schema
+}
+
 fn read(input: &Value, ctx: &ToolContext) -> Result<Value, AgentError> {
     let path = text_field(input, "path")?;
+    let offset = offset_field(input)?;
     workspace(ctx)?.with(|files| {
         let file = files
             .get(path)
             .ok_or_else(|| refuse(format!("there is no file at `{path}`")))?;
         let text =
             std::str::from_utf8(&file.data).map_err(|_| refuse(format!("`{path}` is not text")))?;
-        let (text, truncated) = clip(text, MAX_READ_CHARS);
-        Ok(json!({"path": path, "text": text, "truncated": truncated}))
+        let (text, truncated, length) = window(text, offset, MAX_READ_CHARS);
+        Ok(json!({
+            "path": path,
+            "offset": offset,
+            "text": text,
+            "truncated": truncated,
+            "length": length,
+        }))
     })
 }
 
@@ -79,8 +95,10 @@ pub fn file_tools() -> Vec<Arc<dyn Tool>> {
     vec![
         FnTool::with_context(
             "read_file",
-            "Read a text file of your workspace.",
-            path_schema(None),
+            "Read a text file of your workspace. A long file comes in windows: `length` is \
+             its size in characters, and `offset` starts a window further in. Read on \
+             until `offset` plus the characters you got reaches `length`.",
+            read_schema(),
             |input, ctx| async move { read(&input, &ctx) },
         )
         .effect(ToolEffect::ReadOnly)

@@ -159,6 +159,31 @@ async fn long_pages_are_cut() {
 }
 
 #[tokio::test]
+async fn a_page_reads_on_from_an_offset() {
+    let addr = site().await;
+    let tool = local_fetch(10);
+    let url = format!("http://{addr}/page");
+    let first = tool.execute(json!({"url": url}), &ctx(None)).await.unwrap();
+    assert_eq!(first["text"], "Tea\nGreen ");
+    assert_eq!(first["length"], 18);
+    let rest = tool
+        .execute(json!({"url": url, "offset": 10}), &ctx(None))
+        .await
+        .unwrap();
+    assert_eq!(rest["offset"], 10);
+    assert_eq!(rest["text"], "& black.");
+    assert_eq!(rest["truncated"], false);
+    let past = tool
+        .execute(json!({"url": url, "offset": 99}), &ctx(None))
+        .await
+        .unwrap();
+    assert_eq!(
+        (past["text"].as_str(), past["length"].as_u64()),
+        (Some(""), Some(18))
+    );
+}
+
+#[tokio::test]
 async fn private_and_odd_urls_are_refused_before_any_request() {
     let tool = FetchTool::new(1000);
     for (url, words) in [

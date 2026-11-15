@@ -264,6 +264,10 @@ fetch_max_chars = 20000         # the most text of one page
   finds the files that hold some words, so littleguy can recall a note
   whose path it forgot. It only reads, so a heartbeat may use it. It comes
   with the `search-notes` feature, on by default.
+- `read_file` and `web_fetch` read a long text in windows. Each result
+  gives the `length` of the whole text in characters, and an `offset`
+  starts a window further in. An offset past the end gives an empty text
+  and the length.
 - `runs` lets the assistant debug itself: its newest runs and how each
   ended, the model and tool calls that failed and why, and its model
   usage (tokens, cost and latency) over a window. Each tool runs one fixed

@@ -76,6 +76,7 @@ pub fn routes() -> Vec<autumn_web::Route> {
         index,
         manage,
         workspace,
+        decide_plan,
         login,
         logout,
         chat,
@@ -304,6 +305,7 @@ async fn workspace(
         return broken();
     };
     let files = ask(&web, Request::Workspace).await;
+    let plans = ask(&web, Request::Plans).await;
     let file = match &open.path {
         Some(path) => Some(ask(&web, Request::WorkspaceFile { path: path.clone() }).await),
         None => None,
@@ -311,6 +313,7 @@ async fn workspace(
     let body = html! {
         (bar(csrf.token(), "/workspace"))
         main.workspace {
+            (plans_section(&plans, None))
             nav.files aria-label="Files" {
                 @match &files {
                     Answer::Workspace { files } if files.is_empty() => {
@@ -336,6 +339,131 @@ async fn workspace(
         }
     };
     page("Workspace", Some(csrf.token()), &body).into_response()
+}
+
+/// An epoch millisecond as a short UTC time.
+fn when(ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
+        .map_or_else(String::new, |at| at.format("%b %-d, %H:%M UTC").to_string())
+}
+
+/// The newest notes of a goal or an idea.
+fn plan_notes(notes: &[crate::protocol::PlanNote]) -> Markup {
+    html! {
+        @if !notes.is_empty() {
+            ol.notes {
+                @for note in notes {
+                    li { span.at { (when(note.at_ms)) } " " (note.text) }
+                }
+            }
+        }
+    }
+}
+
+/// A button that sends the owner's `decision` on `id`, and swaps the
+/// section with the answer.
+fn decide_button(decision: &str, id: i64, label: &str) -> Markup {
+    html! {
+        button hx-post=(format!("/plans/{decision}/{id}")) hx-target="#plans" hx-swap="outerHTML" {
+            (label)
+        }
+    }
+}
+
+/// The goals and the ideas, with `notice` on top. A proposed goal waits
+/// for the owner, as a refine overlay does.
+fn plans_section(answer: &Answer, notice: Option<Markup>) -> Markup {
+    html! {
+        section #plans.plans {
+            @if let Some(notice) = notice { (notice) }
+            @match answer {
+                Answer::Plans { goals, ideas } => {
+                    div.column {
+                        h2 { "Goals" }
+                        @if goals.is_empty() {
+                            p.note { "No goals yet. littleguy proposes them, and you accept them here." }
+                        }
+                        @for goal in goals {
+                            @let proposed = goal.status == "proposed";
+                            article.plan.proposed[proposed] {
+                                header {
+                                    span.id { "#" (goal.id) }
+                                    strong { (goal.title) }
+                                    @if proposed { span.tag { "waiting for you" } }
+                                }
+                                p { (goal.why) }
+                                p.meta {
+                                    @if let Some(idea) = goal.idea { "from idea #" (idea) " · " }
+                                    @match (goal.check_every_minutes, goal.next_check_ms) {
+                                        (Some(every), Some(next)) => { "checks every " (every) " min · next " (when(next)) }
+                                        (Some(every), None) => { "checks every " (every) " min once accepted" }
+                                        _ => { "no checks" }
+                                    }
+                                }
+                                (plan_notes(&goal.notes))
+                                div.actions {
+                                    @if proposed {
+                                        (decide_button("accept", goal.id, "Accept"))
+                                        (decide_button("decline", goal.id, "Decline"))
+                                    } @else {
+                                        (decide_button("drop-goal", goal.id, "Drop"))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div.column {
+                        h2 { "Ideas" }
+                        @if ideas.is_empty() {
+                            p.note { "No ideas yet. littleguy files them from your chats and its own research." }
+                        }
+                        @for idea in ideas {
+                            article.plan {
+                                header {
+                                    span.id { "#" (idea.id) }
+                                    strong { (idea.title) }
+                                }
+                                p { (idea.body) }
+                                p.meta { "filed " (when(idea.created_ms)) }
+                                (plan_notes(&idea.notes))
+                                div.actions { (decide_button("drop-idea", idea.id, "Drop")) }
+                            }
+                        }
+                    }
+                }
+                other => (note(other)),
+            }
+        }
+    }
+}
+
+/// The owner's decision on a goal or an idea. Answers with the section.
+#[post("/plans/{decision}/{id}")]
+async fn decide_plan(
+    State(state): State<AppState>,
+    session: Session,
+    Path((decision, id)): Path<(String, i64)>,
+) -> Response {
+    use crate::protocol::PlanDecision;
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let decision = match decision.as_str() {
+        "accept" => PlanDecision::Accept,
+        "decline" => PlanDecision::Decline,
+        "drop-goal" => PlanDecision::DropGoal,
+        "drop-idea" => PlanDecision::DropIdea,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let answer = ask(&web, Request::Decide { decision, id }).await;
+    if matches!(answer, Answer::Plans { .. }) {
+        return plans_section(&answer, None).into_response();
+    }
+    let plans = ask(&web, Request::Plans).await;
+    plans_section(&plans, Some(note(&answer))).into_response()
 }
 
 /// Whether `path` names a Markdown file, in any case.

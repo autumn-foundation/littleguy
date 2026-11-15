@@ -28,6 +28,7 @@
 //! web_search = true
 //! files = true
 //! runs = true
+//! plans = true
 //! fetch_max_chars = 20000
 //!
 //! [approvals]
@@ -627,6 +628,8 @@ pub struct ToolsConfig {
     pub files: bool,
     /// Read its own runs, failed attempts and model usage, to debug itself.
     pub runs: bool,
+    /// Keep ideas and propose goals, which the owner accepts.
+    pub plans: bool,
     /// The most characters of one fetched page.
     pub fetch_max_chars: usize,
 }
@@ -638,6 +641,7 @@ impl Default for ToolsConfig {
             web_search: true,
             files: true,
             runs: true,
+            plans: true,
             fetch_max_chars: DEFAULT_FETCH_MAX_CHARS,
         }
     }
@@ -650,6 +654,7 @@ struct RawTools {
     web_search: Option<bool>,
     files: Option<bool>,
     runs: Option<bool>,
+    plans: Option<bool>,
     fetch_max_chars: Option<usize>,
 }
 
@@ -664,6 +669,7 @@ fn tools(raw: &RawTools) -> Result<ToolsConfig, ConfigError> {
         web_search: raw.web_search.unwrap_or(defaults.web_search),
         files: raw.files.unwrap_or(defaults.files),
         runs: raw.runs.unwrap_or(defaults.runs),
+        plans: raw.plans.unwrap_or(defaults.plans),
         fetch_max_chars,
     })
 }
@@ -1612,7 +1618,7 @@ mod tests {
         let plain = Config::parse("owner = \"mark\"").unwrap();
         assert_eq!(plain.tools, ToolsConfig::default());
         let config = Config::parse(
-            "owner = \"mark\"\n[tools]\nweb_search = false\nfiles = false\nruns = false\nfetch_max_chars = 500",
+            "owner = \"mark\"\n[tools]\nweb_search = false\nfiles = false\nruns = false\nplans = false\nfetch_max_chars = 500",
         )
         .unwrap();
         assert_eq!(
@@ -1622,6 +1628,7 @@ mod tests {
                 web_search: false,
                 files: false,
                 runs: false,
+                plans: false,
                 fetch_max_chars: 500,
             }
         );

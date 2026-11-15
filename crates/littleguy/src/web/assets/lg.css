@@ -452,3 +452,76 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+
+/* Goals and ideas, on top of the workspace page. */
+
+.workspace .plans {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.plans > .note,
+.plans > .error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.plans h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.plans .plan {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 0.6rem;
+}
+
+.plans .plan.proposed {
+  border-color: var(--accent);
+}
+
+.plans .plan header {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.plans .plan .id,
+.plans .meta,
+.plans .notes .at {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.plans .tag {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--accent);
+}
+
+.plans .plan p {
+  margin: 0.35rem 0;
+}
+
+.plans .notes {
+  margin: 0.35rem 0;
+  padding-left: 1.1rem;
+  font-size: 0.9rem;
+}
+
+.plans .actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+@media (max-width: 40rem) {
+  .workspace .plans {
+    grid-template-columns: 1fr;
+  }
+}

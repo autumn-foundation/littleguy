@@ -40,6 +40,7 @@ mod memory;
 mod oauth;
 mod pairs;
 mod paths;
+mod plans;
 mod protocol;
 #[cfg(feature = "refine")]
 mod refine;

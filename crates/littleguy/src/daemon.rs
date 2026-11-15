@@ -571,6 +571,8 @@ impl Daemon {
             Request::History => self.history().await,
             Request::Workspace => self.workspace_files().await,
             Request::WorkspaceFile { path } => self.workspace_file(path).await,
+            Request::Plans => self.plans(),
+            Request::Decide { decision, id } => self.decide_plan(decision, id),
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
             Request::Unpair { sender } => self.unpair(&sender),
@@ -1571,6 +1573,7 @@ async fn serve_connection(stream: UnixStream, tx: mpsc::Sender<Job>) -> Result<(
 mod discord;
 mod gate;
 pub mod live;
+mod plans;
 #[cfg(feature = "refine")]
 mod refine;
 mod reload;
@@ -2773,7 +2776,7 @@ mod tests {
                 .as_str()
                 .map(|out| format!("ran: {}", out.trim()));
             let said = result.as_str().map(|text| format!("got: {text}"));
-            let logged = ["runs", "failures", "models"]
+            let logged = ["runs", "failures", "models", "idea", "goal"]
                 .iter()
                 .any(|key| result.get(key).is_some())
                 .then(|| format!("log: {result}"));
@@ -3023,6 +3026,8 @@ mod tests {
         let mut on = config();
         drop(open_with(&db, &on));
         on.memory.enabled = false;
+        // The goals and ideas live in the memory file too.
+        on.tools.plans = false;
         let mut daemon = open_with(&db, &on);
         assert!(daemon.rt.list_schedules().unwrap().is_empty());
         let reply = daemon.handle_request(UID, request("m-1", "hi")).await;
@@ -3405,6 +3410,94 @@ mod tests {
             .handle_request(UID, request("r-4", "use failed_attempts {}"))
             .await;
         assert_eq!(reply_text(&failed), "log: {\"failures\":[]}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_idea_becomes_a_goal_only_when_the_owner_accepts() {
+        use crate::protocol::PlanDecision;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        let said = |response: &Response| reply_text(response).to_owned();
+        let filed = daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-1",
+                    r#"use add_idea {"title": "Docs links", "body": "They rot."}"#,
+                ),
+            )
+            .await;
+        assert_eq!(said(&filed), r#"log: {"idea":1}"#);
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-2",
+                    r#"use research_idea {"idea": 1, "note": "3 are broken."}"#,
+                ),
+            )
+            .await;
+        let proposed = daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-3",
+                    r#"use propose_goal {"title": "Fix links", "why": "Dead ends.", "check_every_minutes": 60, "from_idea": 1}"#,
+                ),
+            )
+            .await;
+        assert_eq!(said(&proposed), r#"log: {"goal":1,"status":"proposed"}"#);
+
+        let Response::Plans { goals, ideas } = daemon.handle_request(UID, Request::Plans).await
+        else {
+            panic!("no plans");
+        };
+        assert_eq!(
+            (goals[0].status.as_str(), goals[0].idea),
+            ("proposed", Some(1))
+        );
+        assert_eq!(ideas[0].notes[0].text, "3 are broken.");
+
+        let accept = Request::Decide {
+            decision: PlanDecision::Accept,
+            id: 1,
+        };
+        for request in [Request::Plans, accept.clone()] {
+            assert!(matches!(
+                daemon.handle_request(UID + 1, request).await,
+                Response::Error { message } if message == "only the owner of the daemon may do that"
+            ));
+        }
+        let Response::Plans { goals, ideas } = daemon.handle_request(UID, accept.clone()).await
+        else {
+            panic!("the accept failed");
+        };
+        assert_eq!(goals[0].status, "active");
+        assert_eq!(goals[0].check_every_minutes, Some(60));
+        assert_eq!(ideas, [], "the idea is promoted");
+        assert!(matches!(
+            daemon.handle_request(UID, accept).await,
+            Response::Error { message } if message == "1 is not a proposed goal"
+        ));
+
+        daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-4",
+                    r#"use goal_progress {"goal": 1, "note": "Fixed.", "finished": true}"#,
+                ),
+            )
+            .await;
+        assert_eq!(
+            daemon.handle_request(UID, Request::Plans).await,
+            Response::Plans {
+                goals: Vec::new(),
+                ideas: Vec::new()
+            }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

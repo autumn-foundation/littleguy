@@ -19,7 +19,7 @@
 //! key sends it once.
 //!
 //! The file also keeps each tool call that waits for an approval
-//! ([`approvals`]).
+//! ([`approvals`]), and the goals and ideas of the assistant ([`plans`]).
 //!
 //! [`RunLog`] is the one reader of `lg.db` itself. It opens the file read
 //! only, so the runtime stays its one writer.
@@ -37,13 +37,14 @@ use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub mod approvals;
+pub mod plans;
 pub mod runlog;
 
 pub use approvals::{ApprovalRecord, Claim, Verdict};
 pub use runlog::RunLog;
 
 /// The schema version that [`SqliteStores::open`] writes.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// The most edit keys that one memory scope keeps. A retry comes soon after
 /// its first attempt, so the oldest key is safe to forget. The engine keeps
@@ -85,6 +86,39 @@ CREATE TABLE IF NOT EXISTS approvals (
     verdict   TEXT,
     closed    INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS ideas (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'open',
+    created_ms INTEGER NOT NULL,
+    key        TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS idea_notes (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    idea  INTEGER NOT NULL,
+    text  TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    key   TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS goals (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    title            TEXT NOT NULL,
+    why              TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'proposed',
+    check_every_secs INTEGER,
+    next_check_ms    INTEGER,
+    idea             INTEGER,
+    created_ms       INTEGER NOT NULL,
+    key              TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS goal_notes (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal  INTEGER NOT NULL,
+    text  TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    key   TEXT UNIQUE
+);
 ";
 
 /// An error that opens no store.
@@ -102,13 +136,17 @@ pub enum StoreError {
 }
 
 /// The tables of the stores, in the order an import copies them.
-const TABLES: [&str; 6] = [
+const TABLES: [&str; 10] = [
     "memory_scopes",
     "memory_edits",
     "episode_logs",
     "sent_reports",
     "episode_clears",
     "approvals",
+    "ideas",
+    "idea_notes",
+    "goals",
+    "goal_notes",
 ];
 
 /// Where the stores get a connection.

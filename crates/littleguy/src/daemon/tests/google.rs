@@ -18,6 +18,7 @@ fn google_config() -> Config {
         web_search: false,
         files: false,
         runs: false,
+        plans: false,
         ..littleguy_core::ToolsConfig::default()
     };
     config.san_mateo = Some(google_section());

@@ -263,13 +263,17 @@ async fn no_sandbox_means_no_approvals() {
     );
     // The Rule of Two is on, but no tool brings private data. So no call
     // can wait.
-    for request in [Request::Approvals, Request::Approve { id: 1 }] {
-        let refused = daemon.handle_request(UID, request).await;
-        assert!(
-            matches!(&refused, Response::Error { message } if message.contains("[sandbox]")),
-            "a daemon with no sandbox refuses approvals"
-        );
-    }
+    // The listing is off, and an approval fails. Both name the cause.
+    let listing = daemon.handle_request(UID, Request::Approvals).await;
+    assert!(
+        matches!(&listing, Response::Off { message } if message.contains("[sandbox]")),
+        "a daemon with no sandbox lists no approvals"
+    );
+    let refused = daemon.handle_request(UID, Request::Approve { id: 1 }).await;
+    assert!(
+        matches!(&refused, Response::Error { message } if message.contains("[sandbox]")),
+        "a daemon with no sandbox refuses an approval"
+    );
 }
 
 #[test]

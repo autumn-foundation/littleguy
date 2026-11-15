@@ -184,10 +184,10 @@ async fn with_the_rule_off_every_mcp_call_runs() {
         .handle_request(UID, request("o-1", "use mail__count"))
         .await;
     assert_eq!(reply_text(&ran), "got: 1");
-    let refused = daemon.handle_request(UID, Request::Approvals).await;
+    let listing = daemon.handle_request(UID, Request::Approvals).await;
     assert!(
-        matches!(refused, Response::Error { .. }),
-        "no call can wait"
+        matches!(listing, Response::Off { .. }),
+        "no call can wait, so the listing is off"
     );
 }
 

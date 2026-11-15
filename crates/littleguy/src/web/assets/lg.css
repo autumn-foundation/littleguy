@@ -590,3 +590,19 @@ button:disabled {
   font-size: 0.78rem;
   color: var(--muted);
 }
+
+/* Something that is not set up in this daemon. It is not a failure, so it
+   is muted, not red. */
+
+.off {
+  color: var(--muted);
+}
+
+.off .tag {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}

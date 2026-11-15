@@ -411,15 +411,31 @@ async fn pairing_and_approvals_answer_in_their_sections() {
         .header("X-CSRF-Token", &token)
         .send()
         .await;
-    // The notice and the list both say that this daemon has no approvals.
-    assert_eq!(approved.selector_count("section#approvals p.error"), 2);
+    // The failed approval is red. The list is off, so it is muted.
+    assert_eq!(approved.selector_count("section#approvals p.error"), 1);
+    assert_eq!(approved.selector_count("section#approvals p.off"), 1);
     let denied = rig
         .client
         .post("/approvals/7/deny")
         .header("X-CSRF-Token", &token)
         .send()
         .await;
-    assert_eq!(denied.selector_count("section#approvals p.error"), 2);
+    assert_eq!(denied.selector_count("section#approvals p.error"), 1);
+    assert_eq!(denied.selector_count("section#approvals p.off"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fresh_daemon_shows_no_red_on_the_manage_page() {
+    // No approvals, no refine section, and maybe no OAuth: each is off,
+    // not broken.
+    let rig = rig(&config(false)).await;
+    sign_in(&rig).await;
+    let manage = rig.client.get("/manage").send().await;
+    manage.assert_status(200);
+    manage.assert_selector_count("p.error", 0);
+    manage.assert_selector_count("section#approvals p.off .tag", 1);
+    manage.assert_selector_count("section#refine p.off", 1);
+    manage.assert_selector_count("section#connections p.off", 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

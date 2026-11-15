@@ -609,11 +609,13 @@ impl Daemon {
                 oauth_request(self.connections.as_ref(), request).await
             }
             #[cfg(not(feature = "oauth"))]
-            Request::Connect { .. } | Request::Connections | Request::Disconnect { .. } => {
-                Ok(Response::Error {
-                    message: crate::features::missing("an OAuth connection", "oauth"),
-                })
-            }
+            Request::Connections => Ok(Response::Off {
+                message: crate::features::missing("an OAuth connection", "oauth"),
+            }),
+            #[cfg(not(feature = "oauth"))]
+            Request::Connect { .. } | Request::Disconnect { .. } => Ok(Response::Error {
+                message: crate::features::missing("an OAuth connection", "oauth"),
+            }),
             #[cfg(feature = "refine")]
             request @ (Request::RefinePropose
             | Request::Overlays
@@ -622,8 +624,11 @@ impl Daemon {
             | Request::OverlayActivate { .. }
             | Request::OverlayRollback) => Box::pin(self.refine_request(request)).await,
             #[cfg(not(feature = "refine"))]
+            Request::Overlays => Ok(Response::Off {
+                message: crate::features::missing("lg refine", "refine"),
+            }),
+            #[cfg(not(feature = "refine"))]
             Request::RefinePropose
-            | Request::Overlays
             | Request::OverlayShow { .. }
             | Request::OverlayPut { .. }
             | Request::OverlayActivate { .. }
@@ -1128,10 +1133,13 @@ impl Daemon {
 #[cfg(feature = "oauth")]
 async fn oauth_request(connections: Option<&Connections>, request: Request) -> Result<Response> {
     let Some(connections) = connections else {
-        return Ok(Response::Error {
-            message: String::from(
-                "this daemon keeps no OAuth connections. Add a [san_mateo] section",
-            ),
+        let message =
+            String::from("this daemon keeps no OAuth connections. Add a [san_mateo] section");
+        // A listing is off. An action on a connection fails.
+        return Ok(if matches!(request, Request::Connections) {
+            Response::Off { message }
+        } else {
+            Response::Error { message }
         });
     };
     Ok(match request {
@@ -2869,11 +2877,14 @@ mod tests {
             },
         ];
         for request in requests {
-            let response = daemon.handle_request(UID, request).await;
-            assert!(
-                matches!(response, Response::Error { ref message } if message.contains("`oauth` feature")),
-                "{response:?}"
-            );
+            // The listing is off, not broken. An action fails.
+            let listing = matches!(request, Request::Connections);
+            let message = match daemon.handle_request(UID, request).await {
+                Response::Off { message } if listing => message,
+                Response::Error { message } if !listing => message,
+                _ => panic!("the wrong kind of answer"),
+            };
+            assert!(message.contains("`oauth` feature"));
         }
     }
 
@@ -2885,8 +2896,16 @@ mod tests {
         let mut daemon = open(&db, Arc::new(OfflineModel::new()));
         let refused = daemon.handle_request(UID + 1, Request::Connections).await;
         assert!(matches!(refused, Response::Error { ref message } if message.contains("owner")));
+        // With no [san_mateo], the listing is off and a connect fails.
         let none = daemon.handle_request(UID, Request::Connections).await;
-        assert!(matches!(none, Response::Error { ref message } if message.contains("[san_mateo]")));
+        assert!(matches!(none, Response::Off { ref message } if message.contains("[san_mateo]")));
+        let connect = Request::Connect {
+            integration: String::from("acme"),
+        };
+        let failed = daemon.handle_request(UID, connect).await;
+        assert!(
+            matches!(failed, Response::Error { ref message } if message.contains("[san_mateo]"))
+        );
 
         let fake = san_mateo::MemoryTransport::new();
         let config = crate::oauth::tests::section("acme", None);

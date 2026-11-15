@@ -49,10 +49,20 @@ fn listing(plans: &Plans) -> Response {
     }
 }
 
-/// The answer when the store of goals and ideas is closed.
+/// What says that goals and ideas are closed.
+const OFF: &str = "goals and ideas are off: set `plans = true` under [tools]";
+
+/// The answer to a listing when the store of goals and ideas is closed.
 fn off() -> Response {
+    Response::Off {
+        message: String::from(OFF),
+    }
+}
+
+/// The answer to a decision when the store of goals and ideas is closed.
+fn refused() -> Response {
     Response::Error {
-        message: String::from("goals and ideas are off: set `plans = true` under [tools]"),
+        message: String::from(OFF),
     }
 }
 
@@ -79,7 +89,7 @@ impl Daemon {
             .as_ref()
             .filter(|_| self.kit.config.tools.plans)
         else {
-            return Ok(off());
+            return Ok(refused());
         };
         let (changed, what) = match decision {
             PlanDecision::Accept => (

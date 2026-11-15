@@ -69,8 +69,12 @@ async fn answer(
     request: Request,
 ) -> Result<Response> {
     let Some(refine) = refine else {
-        return Ok(Response::Error {
-            message: String::from(OFF),
+        let message = String::from(OFF);
+        // The listing is off. An action on an overlay fails.
+        return Ok(if matches!(request, Request::Overlays) {
+            Response::Off { message }
+        } else {
+            Response::Error { message }
         });
     };
     let transcript = if matches!(request, Request::RefinePropose) {
@@ -287,8 +291,15 @@ mod tests {
     async fn refine_is_off_without_its_section_and_only_for_the_owner() {
         let dir = tempfile::tempdir().unwrap();
         let mut off = open(dir.path(), false);
+        // The listing is off, not broken. An action fails.
         assert_eq!(
             off.handle_request(UID, Request::Overlays).await,
+            Response::Off {
+                message: String::from(OFF)
+            }
+        );
+        assert_eq!(
+            off.handle_request(UID, Request::OverlayRollback).await,
             Response::Error {
                 message: String::from(OFF)
             }

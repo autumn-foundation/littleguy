@@ -159,7 +159,13 @@ async fn ask(web: &Web, request: Request) -> Answer {
 }
 
 /// One line of text for an answer, with its class.
+///
+/// Three cases look different: an answer, something that is off in this
+/// daemon (muted, with how to turn it on), and a failure (red).
 fn note(answer: &Answer) -> Markup {
+    if let Answer::Off { message } = answer {
+        return html! { p.off { span.tag { "off" } " " (message) } };
+    }
     let (text, ok) = render(answer);
     let class = if ok { "note" } else { "error" };
     html! { p class=(class) { (text) } }

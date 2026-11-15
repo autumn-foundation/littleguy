@@ -149,6 +149,9 @@ pub fn render(response: &Response) -> (String, bool) {
                 .unwrap_or_else(|| format!("{path}: {bytes} bytes, not text or too large to show")),
             true,
         ),
+        // A listing of something that is off has nothing to list. That is
+        // not a failure.
+        Response::Off { message } => (message.clone(), true),
         Response::Error { message } => (format!("error: {message}"), false),
     }
 }

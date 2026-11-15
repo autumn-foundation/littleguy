@@ -193,7 +193,14 @@ night costs no model call.
 enabled = true                  # false keeps no notes
 consolidate = "0 3 * * *"       # cron, in the time zone below
 timezone = "Europe/London"      # IANA name; the default is UTC
+reflect = true                  # after a pass, file ideas from what it learned
 ```
+
+After each pass that learned something, littleguy reflects once: it reads
+its notes and files [ideas](#goals-and-ideas) for anything worth planning
+or researching. The reflection is read-only, and it stays silent unless
+you should know something. [ADR 0022](docs/adr/0022-ideas-from-consolidation.md)
+explains the design.
 
 The notes and the log live in `memory.db`, next to `lg.db`, or in the
 tenant database of a [fleet](#fleet). The pass runs

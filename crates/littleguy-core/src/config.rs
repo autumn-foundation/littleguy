@@ -17,6 +17,7 @@
 //! [memory]
 //! consolidate = "0 3 * * *"
 //! timezone = "Europe/London"
+//! reflect = true
 //!
 //! [brief]
 //! schedule = "30 7 * * 1-5"
@@ -588,6 +589,9 @@ pub struct MemoryConfig {
     pub consolidate: String,
     /// The IANA time zone of `consolidate`.
     pub timezone: String,
+    /// After a consolidation pass, wake the assistant once to file ideas
+    /// from what it learned. It needs the goals and ideas of `[tools]`.
+    pub reflect: bool,
 }
 
 impl Default for MemoryConfig {
@@ -595,6 +599,7 @@ impl Default for MemoryConfig {
         Self {
             enabled: true,
             consolidate: String::from(DEFAULT_CONSOLIDATE),
+            reflect: true,
             timezone: String::from(DEFAULT_TIMEZONE),
         }
     }
@@ -606,6 +611,7 @@ struct RawMemory {
     enabled: Option<bool>,
     consolidate: Option<String>,
     timezone: Option<String>,
+    reflect: Option<bool>,
 }
 
 /// Checks the memory section. The engine checks each cron field and the
@@ -625,6 +631,7 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
         enabled: raw.enabled.unwrap_or(defaults.enabled),
         consolidate,
         timezone,
+        reflect: raw.reflect.unwrap_or(defaults.reflect),
     })
 }
 
@@ -2076,7 +2083,7 @@ mod tests {
     #[test]
     fn the_memory_section_is_read() {
         let config = Config::parse(
-            "owner = \"mark\"\n[memory]\nenabled = false\nconsolidate = \"30 2 * * 1-5\"\ntimezone = \"Europe/London\"",
+            "owner = \"mark\"\n[memory]\nenabled = false\nconsolidate = \"30 2 * * 1-5\"\ntimezone = \"Europe/London\"\nreflect = false",
         )
         .unwrap();
         assert_eq!(
@@ -2085,8 +2092,10 @@ mod tests {
                 enabled: false,
                 consolidate: String::from("30 2 * * 1-5"),
                 timezone: String::from("Europe/London"),
+                reflect: false,
             }
         );
+        assert!(Config::parse("owner = \"mark\"").unwrap().memory.reflect);
     }
 
     #[test]

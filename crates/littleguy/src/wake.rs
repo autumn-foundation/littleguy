@@ -13,6 +13,11 @@
 //! - **The heartbeat** wakes `every_minutes` after the last arm, outside
 //!   its quiet hours. Its ticks ask the precheck ([`Due`]) first, which
 //!   skips a tick with no model call when no goal is due and no idea waits.
+//! - **A reflection** wakes once, soon after a memory consolidation pass,
+//!   so the assistant files ideas from what the pass learned (ADR 0022).
+//!
+//! When a one-shot wake ran and nothing else is planned, the plan turns the
+//! engine timer off. Otherwise the engine would book the same tick again.
 //!
 //! Each tick prompt starts with a mark, so the history shows its answer as
 //! the assistant speaking on its own ([`is_tick`]). A tick is unattended and
@@ -39,6 +44,21 @@ pub const BRIEF_MARK: &str = "[littleguy brief]";
 /// The first line of the prompt of a heartbeat tick.
 pub const HEARTBEAT_MARK: &str = "[littleguy heartbeat]";
 
+/// The first line of the prompt of a reflection tick.
+pub const REFLECT_MARK: &str = "[littleguy reflection]";
+
+/// The prefix of the op key that arms one reflection. The id of the pass
+/// follows.
+pub const REFLECT_KEY: &str = "reflect:";
+
+/// The instruction of a reflection tick.
+pub const REFLECT_PROMPT: &str = "Your memory was just consolidated: new facts are in \
+     your notes. Read your notes and call list_plans. For anything worth planning or \
+     researching that is not an idea yet, file one with add_idea. Add what you now know \
+     to a related open idea with research_idea. Do not file an idea that exists. Propose \
+     a goal only when an idea is clearly worth doing. Reply with exactly HEARTBEAT_OK \
+     unless the owner should know something now.";
+
 /// The prefix of the op key that arms one brief slot.
 pub const BRIEF_KEY: &str = "brief:";
 
@@ -56,7 +76,9 @@ pub const GRACE: chrono::TimeDelta = chrono::TimeDelta::hours(1);
 /// Whether `text` is the prompt of a tick, not a message of a person.
 #[must_use]
 pub fn is_tick(text: &str) -> bool {
-    text.starts_with(BRIEF_MARK) || text.starts_with(HEARTBEAT_MARK)
+    [BRIEF_MARK, HEARTBEAT_MARK, REFLECT_MARK]
+        .iter()
+        .any(|mark| text.starts_with(mark))
 }
 
 /// The prompt of a tick: the mark, then the instruction.
@@ -97,6 +119,8 @@ pub enum Kind {
     Brief,
     /// A heartbeat.
     Heartbeat,
+    /// A reflection after a consolidation pass.
+    Reflection,
 }
 
 /// The wake that the engine timer aims at, and the tick count at the arm.
@@ -164,6 +188,8 @@ struct Brief {
 pub struct Wake {
     brief: Option<Brief>,
     beat: Option<Beat>,
+    /// The pass that waits for its reflection.
+    reflect: Option<String>,
     armed: Option<Armed>,
     /// Whether a brief is armed now. The brief delivery reads it, so a
     /// heartbeat answer never goes out as a brief.
@@ -230,9 +256,36 @@ impl Wake {
         Ok(Some(Self {
             brief,
             beat,
+            reflect: None,
             armed: None,
             brief_armed,
         }))
+    }
+
+    /// A plan with no brief and no heartbeat, for a reflection alone.
+    #[must_use]
+    pub const fn idle(brief_armed: Arc<AtomicBool>) -> Self {
+        Self {
+            brief: None,
+            beat: None,
+            reflect: None,
+            armed: None,
+            brief_armed,
+        }
+    }
+
+    /// The pass whose reflection is planned but not armed yet.
+    #[must_use]
+    pub fn pending_reflection(&self) -> Option<&str> {
+        self.reflect.as_deref()
+    }
+
+    /// Plans one reflection on the consolidation pass `pass`, as the next
+    /// wake. It replaces the arm that waits, which the next arm books
+    /// again.
+    pub fn reflect(&mut self, pass: &str) {
+        self.reflect = Some(pass.to_owned());
+        self.armed = None;
     }
 
     /// The wake that the engine timer aims at, once armed.
@@ -266,6 +319,10 @@ impl Wake {
                 return None;
             }
         }
+        // A reflection comes as soon as the engine allows. Its arm names that
+        // time, so the daemon reads no state before the tick can run.
+        let soonest = now + chrono::TimeDelta::seconds(MIN_CUSTOM_HEARTBEAT_SECS.cast_signed());
+        let reflect = self.reflect.as_ref().map(|_| (soonest, Kind::Reflection));
         let brief = self
             .brief
             .as_ref()
@@ -274,10 +331,14 @@ impl Wake {
             .beat
             .as_ref()
             .and_then(|beat| Some((beat.next(now)?, Kind::Heartbeat)));
-        let (at, kind) = match (brief, beat) {
-            (Some(brief), Some(beat)) if beat.0 < brief.0 => beat,
-            (Some(brief), _) => brief,
-            (None, beat) => beat?,
+        // The earliest wins, and a brief wins a tie with a heartbeat.
+        let next = [reflect, brief, beat]
+            .into_iter()
+            .flatten()
+            .reduce(|first, other| if other.0 < first.0 { other } else { first });
+        let Some((at, kind)) = next else {
+            // A wake ran, and nothing else is planned: stop the timer once.
+            return self.armed.take().map(|_| off(now));
         };
         self.armed = Some(Armed { at, kind, ticks });
         self.brief_armed
@@ -289,15 +350,28 @@ impl Wake {
                     .brief
                     .as_ref()
                     .map_or("", |brief| brief.prompt.as_str());
-                (BRIEF_KEY, heartbeat(prompt, every))
+                (
+                    format!("{BRIEF_KEY}{}", at.to_rfc3339()),
+                    heartbeat(prompt, every),
+                )
             }
             Kind::Heartbeat => {
                 let prompt = self.beat.as_ref().map_or("", |beat| beat.prompt.as_str());
-                (HEARTBEAT_KEY, heartbeat(prompt, every).precheck())
+                (
+                    format!("{HEARTBEAT_KEY}{}", at.to_rfc3339()),
+                    heartbeat(prompt, every).precheck(),
+                )
+            }
+            Kind::Reflection => {
+                let pass = self.reflect.take().unwrap_or_default();
+                (
+                    format!("{REFLECT_KEY}{pass}"),
+                    heartbeat(&marked(REFLECT_MARK, REFLECT_PROMPT), every),
+                )
             }
         };
         Some(Arm {
-            key: format!("{key}{}", at.to_rfc3339()),
+            key,
             op: AgentOp::Control(Control::SetHeartbeat {
                 setting: HeartbeatSetting::Custom { heartbeat },
             }),
@@ -530,7 +604,43 @@ mod tests {
     }
 
     #[test]
+    fn a_reflection_comes_first_runs_once_and_the_timer_stops_after_it() {
+        let now = at("2026-11-14T03:05:00Z");
+        let flag = Arc::new(AtomicBool::new(true));
+        let mut wake = Wake::idle(Arc::clone(&flag));
+        assert_eq!(wake.arm(now, 0), None, "nothing planned, nothing armed");
+        wake.reflect("pass-7");
+        assert_eq!(wake.pending_reflection(), Some("pass-7"));
+        let arm = wake.arm(now, 0).unwrap();
+        assert_eq!(wake.pending_reflection(), None);
+        assert_eq!(arm.key, "reflect:pass-7");
+        assert_eq!(set(&arm).every_secs, MIN_CUSTOM_HEARTBEAT_SECS);
+        assert!(!set(&arm).precheck, "a reflection always runs");
+        assert!(set(&arm).prompt.starts_with(REFLECT_MARK));
+        assert!(!flag.load(Ordering::SeqCst), "a reflection is not a brief");
+        assert!(!wake.waits_for_tick(at("2026-11-14T03:05:59Z")));
+        // The tick ran. Nothing else is planned, so the timer stops, once.
+        let later = at("2026-11-14T03:06:01Z");
+        let stop = wake.arm(later, 1).unwrap();
+        assert!(stop.key.starts_with(OFF_KEY));
+        assert_eq!(wake.arm(later, 1), None);
+    }
+
+    #[test]
+    fn a_reflection_goes_before_an_armed_heartbeat_which_comes_back() {
+        let now = at("2026-11-14T03:00:00Z");
+        let mut wake = plan(None, Some(&beat(60, None)), now);
+        assert!(wake.arm(now, 0).unwrap().key.starts_with(HEARTBEAT_KEY));
+        wake.reflect("p");
+        let soon = at("2026-11-14T03:05:00Z");
+        assert_eq!(wake.arm(soon, 0).unwrap().key, "reflect:p");
+        let arm = wake.arm(at("2026-11-14T03:06:01Z"), 1).unwrap();
+        assert_eq!(arm.key, "heartbeat:2026-11-14T04:06:01+00:00");
+    }
+
+    #[test]
     fn ticks_are_known_by_their_mark() {
+        assert!(is_tick(&marked(REFLECT_MARK, "x")));
         assert!(is_tick(&marked(HEARTBEAT_MARK, "x")));
         assert!(is_tick(&marked(BRIEF_MARK, "x")));
         assert!(!is_tick("hello [littleguy heartbeat]"));

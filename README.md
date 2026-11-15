@@ -232,6 +232,7 @@ in its own workspace. Each tool is on by default:
 web_fetch = true                # read one http or https page as text
 web_search = true               # needs LG_BRAVE_API_KEY
 files = true                    # read_file, write_file, list_files, delete_file
+runs = true                     # recent_runs, failed_attempts, model_usage
 fetch_max_chars = 20000         # the most text of one page
 ```
 
@@ -243,6 +244,12 @@ fetch_max_chars = 20000         # the most text of one page
   Put the key in `LG_BRAVE_API_KEY`; without it there is no search tool.
 - The workspace keeps its files in `workspace/`, next to `lg.db`, and they
   survive a restart. A path stays inside the workspace.
+- `runs` lets the assistant debug itself: its newest runs and how each
+  ended, the model and tool calls that failed and why, and its model
+  usage (tokens, cost and latency) over a window. Each tool runs one fixed
+  query on `lg.db`, read only, and reads no message.
+  [ADR 0019](docs/adr/0019-the-assistant-reads-its-own-runs.md) explains
+  the design.
 
 The web tools only read, and their results count as untrusted input. The
 file tools change only the private workspace. A morning brief can read but

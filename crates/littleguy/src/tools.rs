@@ -1,5 +1,5 @@
-//! The tools of the assistant: web fetch, web search, workspace files and
-//! the tools of the MCP servers.
+//! The tools of the assistant: web fetch, web search, workspace files, its
+//! own run log ([`crate::runlog`]) and the tools of the MCP servers.
 //!
 //! `[tools]` turns each one on or off. Web search also needs the Brave
 //! Search API key in [`SEARCH_KEY_ENV`]. The key never goes in the config
@@ -130,6 +130,9 @@ impl Tools {
         if config.files {
             tools.extend(file_tools());
         }
+        if config.runs {
+            tools.extend(crate::runlog::tools(db));
+        }
         Self {
             tools,
             workspace: config.files.then(|| workspace_for(db)),
@@ -198,7 +201,8 @@ mod tests {
             &[]
         };
         let files = ["read_file", "write_file", "list_files", "delete_file"];
-        let expected: Vec<&str> = web.iter().copied().chain(files).collect();
+        let runs = ["recent_runs", "failed_attempts", "model_usage"];
+        let expected: Vec<&str> = web.iter().copied().chain(files).chain(runs).collect();
         assert_eq!(all.names(), expected);
         assert_eq!(
             all.workspace.as_deref(),
@@ -213,6 +217,7 @@ mod tests {
             web_fetch: false,
             web_search: false,
             files: false,
+            runs: false,
             ..ToolsConfig::default()
         };
         let empty = Tools::new(&none, db, Some("k"));
@@ -269,6 +274,7 @@ mod tests {
         let config = ToolsConfig {
             web_search: false,
             files: false,
+            runs: false,
             ..ToolsConfig::default()
         };
         let tools = Tools::new(&config, Path::new("/var/lg/lg.db"), None).with(mcp);

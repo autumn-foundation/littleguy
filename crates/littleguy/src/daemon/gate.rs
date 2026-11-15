@@ -173,7 +173,8 @@ impl Daemon {
     pub(super) fn approval_list(&self) -> Result<Response> {
         let stores = match self.approval_store() {
             Ok(stores) => stores,
-            Err(message) => return Ok(Response::Error { message }),
+            // A listing with nothing that can wait is off, not broken.
+            Err(message) => return Ok(Response::Off { message }),
         };
         let entries = stores
             .open_approvals()?

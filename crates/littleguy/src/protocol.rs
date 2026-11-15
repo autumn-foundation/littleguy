@@ -403,6 +403,13 @@ pub enum Response {
         /// The open ideas, oldest first.
         ideas: Vec<IdeaEntry>,
     },
+    /// What a listing asked for is not set up in this daemon: a section is
+    /// missing, or this build lacks the feature. It is not a failure. The
+    /// message says how to turn it on.
+    Off {
+        /// What is off, and how to turn it on.
+        message: String,
+    },
     /// The request was not valid, or the daemon failed.
     Error {
         /// What went wrong.

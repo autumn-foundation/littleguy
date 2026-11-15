@@ -48,7 +48,9 @@ use crate::chats::Chats;
 #[cfg(feature = "oauth")]
 use crate::oauth::Connections;
 use crate::pairs::{Entry, PairStore};
-use crate::protocol::{MAX_REQUEST_BYTES, PairEntry, Request, Response, Speaker, Turn};
+use crate::protocol::{
+    MAX_REQUEST_BYTES, PairEntry, Request, Response, Speaker, Turn, WorkspaceEntry,
+};
 
 /// The channel id of the local socket.
 pub const CLI_CHANNEL: &str = "cli";
@@ -201,6 +203,18 @@ pub fn harness(
         profile = profile.deliver();
     }
     harness.agent(profile)
+}
+
+/// The most bytes of one workspace file that a request shows.
+pub const MAX_SHOWN_BYTES: usize = 256 * 1024;
+
+/// The text of a workspace file, when it is UTF-8 and at most
+/// [`MAX_SHOWN_BYTES`].
+fn shown_text(data: &[u8]) -> Option<String> {
+    if data.len() > MAX_SHOWN_BYTES {
+        return None;
+    }
+    std::str::from_utf8(data).ok().map(str::to_owned)
 }
 
 /// The seconds since the Unix epoch.
@@ -555,6 +569,8 @@ impl Daemon {
                 },
             )),
             Request::History => self.history().await,
+            Request::Workspace => self.workspace_files().await,
+            Request::WorkspaceFile { path } => self.workspace_file(path).await,
             Request::Pair { code } => self.pair(&code),
             Request::Pairs => Ok(self.pairs()),
             Request::Unpair { sender } => self.unpair(&sender),
@@ -790,7 +806,6 @@ impl Daemon {
         })
     }
 
-    /// The allowed senders of every channel.
     /// The text turns of the assistant conversation, oldest first.
     ///
     /// # Errors
@@ -803,6 +818,64 @@ impl Daemon {
             let state = query.await?;
             let turns = state.map_or_else(Vec::new, |state| turns(&state.transcript));
             Ok(Response::History { turns })
+        }
+    }
+
+    /// The workspace of the assistant at its head: the snapshot that the
+    /// last finished op recorded. A tool call in flight is not in it.
+    fn workspace(
+        &self,
+    ) -> impl Future<Output = Result<autumn_harvest_agent::Workspace>> + Send + 'static {
+        // The query starts now, so the future holds no borrow of the daemon.
+        let query = self.state();
+        let store = crate::tools::workspace_store(crate::tools::workspace_for(&self.kit.db));
+        let scope = autumn_harvest_agent::WorkspaceMount::agent_scope(self.assistant().as_str());
+        async move {
+            let head = query.await?.and_then(|state| state.workspace);
+            let mount = autumn_harvest_agent::WorkspaceMount {
+                scope,
+                head,
+                generation: 0,
+            };
+            Ok(store.load(&mount).await?)
+        }
+    }
+
+    /// The files of the assistant workspace, by path.
+    fn workspace_files(&self) -> impl Future<Output = Result<Response>> + Send + 'static {
+        let workspace = self.workspace();
+        async move {
+            let files = workspace
+                .await?
+                .files()
+                .iter()
+                .map(|(path, file)| WorkspaceEntry {
+                    path: path.clone(),
+                    bytes: u64::try_from(file.data.len()).unwrap_or(u64::MAX),
+                })
+                .collect();
+            Ok(Response::Workspace { files })
+        }
+    }
+
+    /// One file of the assistant workspace.
+    fn workspace_file(
+        &self,
+        path: String,
+    ) -> impl Future<Output = Result<Response>> + Send + 'static {
+        let workspace = self.workspace();
+        async move {
+            let workspace = workspace.await?;
+            let Some(file) = workspace.get(&path) else {
+                return Ok(Response::Error {
+                    message: format!("the workspace has no file {path}"),
+                });
+            };
+            Ok(Response::WorkspaceFile {
+                bytes: u64::try_from(file.data.len()).unwrap_or(u64::MAX),
+                text: shown_text(&file.data),
+                path,
+            })
         }
     }
 
@@ -3218,6 +3291,61 @@ mod tests {
             .handle_request(UID, request("w-2", "show notes/tea.md"))
             .await;
         assert_eq!(reply_text(&shown), "green tea");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_owner_reads_the_workspace_and_no_one_else() {
+        use crate::protocol::WorkspaceEntry;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        assert_eq!(
+            daemon.handle_request(UID, Request::Workspace).await,
+            Response::Workspace { files: Vec::new() }
+        );
+        daemon
+            .handle_request(UID, request("w-1", "save notes/tea.md green tea"))
+            .await;
+        assert_eq!(
+            daemon.handle_request(UID, Request::Workspace).await,
+            Response::Workspace {
+                files: vec![WorkspaceEntry {
+                    path: String::from("notes/tea.md"),
+                    bytes: 9,
+                }]
+            }
+        );
+        let file = |path: &str| Request::WorkspaceFile {
+            path: path.to_owned(),
+        };
+        assert_eq!(
+            daemon.handle_request(UID, file("notes/tea.md")).await,
+            Response::WorkspaceFile {
+                path: String::from("notes/tea.md"),
+                bytes: 9,
+                text: Some(String::from("green tea")),
+            }
+        );
+        let missing = daemon.handle_request(UID, file("notes/none.md")).await;
+        assert!(matches!(
+            missing,
+            Response::Error { message } if message == "the workspace has no file notes/none.md"
+        ));
+        for request in [Request::Workspace, file("notes/tea.md")] {
+            assert!(matches!(
+                daemon.handle_request(UID + 1, request).await,
+                Response::Error { message } if message == "only the owner of the daemon may do that"
+            ));
+        }
+    }
+
+    #[test]
+    fn a_page_shows_only_text_that_is_not_too_large() {
+        assert_eq!(shown_text(b"tea").as_deref(), Some("tea"));
+        assert_eq!(shown_text(&[0xff, 0xfe]), None);
+        assert_eq!(shown_text(&vec![b'a'; MAX_SHOWN_BYTES + 1]), None);
+        assert!(shown_text(&vec![b'a'; MAX_SHOWN_BYTES]).is_some());
     }
 
     #[tokio::test(flavor = "multi_thread")]

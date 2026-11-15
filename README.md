@@ -414,7 +414,9 @@ conversation so far, with each answer rendered as Markdown by
 [markstream](https://crates.io/crates/autumn-plugin-markstream). Enter
 sends a message, and Shift+Enter adds a line. An answer streams in as the
 model writes it, over Server-Sent Events, and the whole answer takes its
-place at the end. Claude, OpenAI and OpenRouter stream. The manage page shows the
+place at the end. Claude, OpenAI and OpenRouter stream. The workspace page
+lists the files that the assistant keeps with its file tools, and opens
+each one: Markdown renders, and other text shows as it is. The manage page shows the
 calls that wait for approval, who can talk to the assistant, the refine
 overlays and the OAuth connections. The binary holds every script and
 style. The pages serve on a loopback address only:

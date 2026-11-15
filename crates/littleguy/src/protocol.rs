@@ -92,6 +92,22 @@ pub enum Request {
     /// The text turns of the conversation, oldest first. Only the owner
     /// may.
     History,
+    /// The files of the assistant workspace. Only the owner may.
+    Workspace,
+    /// One file of the assistant workspace. Only the owner may.
+    WorkspaceFile {
+        /// The path of the file in the workspace.
+        path: String,
+    },
+}
+
+/// One file of the assistant workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEntry {
+    /// The path in the workspace.
+    pub path: String,
+    /// The size, in bytes.
+    pub bytes: u64,
 }
 
 /// Who wrote one turn of the conversation.
@@ -294,6 +310,21 @@ pub enum Response {
         /// The turns.
         turns: Vec<Turn>,
     },
+    /// The files of the assistant workspace, by path.
+    Workspace {
+        /// The files.
+        files: Vec<WorkspaceEntry>,
+    },
+    /// One file of the assistant workspace.
+    WorkspaceFile {
+        /// The path in the workspace.
+        path: String,
+        /// The size, in bytes.
+        bytes: u64,
+        /// The text. `None` when the file is not UTF-8 text, or is too
+        /// large to show.
+        text: Option<String>,
+    },
     /// The request was not valid, or the daemon failed.
     Error {
         /// What went wrong.
@@ -341,6 +372,10 @@ mod tests {
             Request::Connections,
             Request::Reload,
             Request::History,
+            Request::Workspace,
+            Request::WorkspaceFile {
+                path: String::from("notes/a.md"),
+            },
             Request::Disconnect {
                 integration: String::from("google"),
                 connection: String::from("c-1"),

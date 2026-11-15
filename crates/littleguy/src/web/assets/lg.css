@@ -367,3 +367,88 @@ button:disabled {
   padding: 0 1rem;
   text-align: center;
 }
+
+/* The workspace: the files on the left, the open file on the right. */
+
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(12rem, 18rem) 1fr;
+  gap: 1rem;
+  width: 100%;
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.workspace .files,
+.workspace #file {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: auto;
+  min-height: 0;
+}
+
+.workspace .files ul {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem;
+}
+
+.workspace .files a {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.92rem;
+}
+
+.workspace .files a:hover {
+  background: var(--surface-2);
+}
+
+.workspace .files a[aria-current="page"] {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.workspace .files .path {
+  overflow-wrap: anywhere;
+}
+
+.workspace .files .size {
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace .files .note,
+.workspace #file {
+  padding: 0.75rem 1.1rem;
+}
+
+.workspace #file h2 {
+  font-size: 0.95rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+
+.workspace #file pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.88rem;
+  margin: 0;
+}
+
+@media (max-width: 40rem) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+}

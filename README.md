@@ -247,7 +247,7 @@ in its own workspace. Each tool is on by default:
 [tools]
 web_fetch = true                # read one http or https page as text
 web_search = true               # needs LG_BRAVE_API_KEY
-files = true                    # read_file, write_file, list_files, delete_file
+files = true                    # read_file, write_file, list_files, delete_file, search_notes
 runs = true                     # recent_runs, failed_attempts, model_usage
 plans = true                    # goals and ideas; see below
 fetch_max_chars = 20000         # the most text of one page
@@ -260,7 +260,10 @@ fetch_max_chars = 20000         # the most text of one page
 - `web_search` uses the [Brave Search API](https://brave.com/search/api/).
   Put the key in `LG_BRAVE_API_KEY`; without it there is no search tool.
 - The workspace keeps its files in `workspace/`, next to `lg.db`, and they
-  survive a restart. A path stays inside the workspace.
+  survive a restart. A path stays inside the workspace. `search_notes`
+  finds the files that hold some words, so littleguy can recall a note
+  whose path it forgot. It only reads, so a heartbeat may use it. It comes
+  with the `search-notes` feature, on by default.
 - `runs` lets the assistant debug itself: its newest runs and how each
   ended, the model and tool calls that failed and why, and its model
   usage (tokens, cost and latency) over a window. Each tool runs one fixed

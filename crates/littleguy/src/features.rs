@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 19] = [
+pub const ALL: [Feature; 20] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -83,6 +83,10 @@ pub const ALL: [Feature; 19] = [
     Feature {
         name: "council",
         on: cfg!(feature = "council"),
+    },
+    Feature {
+        name: "search-notes",
+        on: cfg!(feature = "search-notes"),
     },
     Feature {
         name: "camel",

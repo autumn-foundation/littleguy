@@ -28,13 +28,15 @@ url = { version = "2", optional = true }
 axum = { version = "0.8", optional = true }
 
 [features]
-default = ["web", "mcp", "google"]
+default = ["web", "mcp", "google", "search-notes"]
 # `web_fetch` and `web_search`.
 web = ["dep:reqwest", "dep:rustls", "dep:url"]
 # The tools of each MCP server in the config.
 mcp = ["dep:rmcp", "dep:rustls"]
 # Gmail and Google Calendar, through a token proxy.
 google = ["dep:base64"]
+# `search_notes`: find the files of the workspace that hold some words.
+search-notes = []
 # The MCP test server that the tests of this crate and of the daemon run against.
 testing = [
     "mcp",

@@ -58,6 +58,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `reflection` | yes | The reflection after a memory consolidation pass: the assistant files ideas and drafts skills from what the pass learned. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
+| `search-notes` | yes | `search_notes`: the assistant finds a note of its workspace by its words. | none |
 | `self-debug` | yes | `recent_runs`, `failed_attempts`, `model_usage` and `recent_wakes`: the assistant reads its own run log and tick log to debug itself. | none |
 | `skills` | yes | `[skills]`: SKILL.md files that reach the assistant through its profile overlay, `propose_skill`, and the Skills tab. | none |
 | `slack` | yes | Slack direct messages over Socket Mode, or over the Events API as a hook. | `autumn-plugin-slack`, `futures-util`, `reqwest`, `rustls`, `tokio-tungstenite` |
@@ -94,6 +95,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 |---|---|---|---|
 | `google` | yes | Gmail and Google Calendar, through a token proxy. | `base64` |
 | `mcp` | yes | The tools of each MCP server in the config. | `rmcp`, `rustls` |
+| `search-notes` | yes | `search_notes`: find the files of the workspace that hold some words. | none |
 | `testing` | no | The MCP test server that the tests of this crate and of the daemon run against. | `axum`, `rmcp`, `rustls`, `rmcp/server`, `rmcp/transport-io`, `rmcp/transport-streamable-http-server` |
 | `web` | yes | `web_fetch` and `web_search`. | `reqwest`, `rustls`, `url` |
 

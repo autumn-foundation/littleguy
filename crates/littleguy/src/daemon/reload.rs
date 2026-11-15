@@ -27,7 +27,9 @@ use super::{Daemon, harness, routing, warn_unreachable};
 use crate::brief::BriefDelivery;
 use crate::chats::Chats;
 use crate::protocol::Response;
-use crate::wake::{Due, Wake};
+#[cfg(feature = "heartbeat")]
+use crate::wake::Due;
+use crate::wake::Wake;
 
 /// What a reload needs that the config does not hold, and the config that
 /// runs.
@@ -62,6 +64,7 @@ pub(super) struct Kit {
     /// What the wake tools share with the daemon.
     pub(super) wake_links: crate::plans::WakeLinks,
     /// What the precheck decided for the last heartbeat, for the tick log.
+    #[cfg(feature = "heartbeat")]
     pub(super) verdict: Arc<crate::wake::Verdict>,
 }
 
@@ -155,6 +158,7 @@ impl Kit {
         let approver = config.approvals.approver.clone();
         warn_unreachable(approver.as_ref(), &self.services);
         // A heartbeat tick asks first whether a goal is due or an idea waits.
+        #[cfg(feature = "heartbeat")]
         let precheck = config.heartbeat.as_ref().map(|beat| Due {
             plans: stores.clone().filter(|_| config.tools.plans),
             research: beat.research,
@@ -170,6 +174,7 @@ impl Kit {
         #[cfg(not(feature = "refine"))]
         let _ = model;
         let assistant = assistant.live_sink(Arc::clone(&self.live) as Arc<dyn LiveSink>);
+        #[cfg(feature = "heartbeat")]
         let assistant = match precheck {
             Some(due) => assistant.precheck(Arc::new(due)),
             None => assistant,

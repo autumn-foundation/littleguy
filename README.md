@@ -352,6 +352,10 @@ see. When it has news, the answer waits in the web chat, labelled
 engine timer, and a brief slot always comes first.
 [ADR 0021](docs/adr/0021-the-heartbeat.md) explains the design.
 
+The heartbeat comes with the `heartbeat` feature, which is on by default
+and needs `plans`. A build without it refuses a `[heartbeat]` section at
+start and at a reload.
+
 ## Running code
 
 `[sandbox]` gives the assistant a `run_code` tool for python3, node, bash

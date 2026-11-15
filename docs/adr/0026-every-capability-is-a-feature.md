@@ -36,6 +36,11 @@ part pays for it at each build.
   owner's goal and idea requests, the store module in `littleguy-stores`,
   and the heartbeat precheck. Without it every heartbeat runs, as with
   `plans = false` today, and no reflection runs.
+- `heartbeat` gates the heartbeat part of the wake plan, its precheck and
+  its verdict in the tick log. It needs `plans`, since the precheck reads
+  the goals and ideas. A build without it refuses `[heartbeat]` at start
+  and at a reload. The wake plan stays: the brief, the reflection and the
+  booked wakes use it.
 - `[tools] plans` still switches the whole set of the assistant's own
   tools, also `wake_me`, `cancel_wake`, `propose_skill` and
   `recent_wakes`. Their own features split that switch.

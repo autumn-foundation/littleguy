@@ -73,6 +73,9 @@ pub(super) struct Kit {
     /// The skills folder that the skill tools read, set at each sync.
     #[cfg(feature = "skills")]
     pub(super) skills_dir: crate::plans::SkillsDir,
+    /// Whether the conversation holds untrusted input, for `approve =
+    /// "untrusted"`. It lives across reloads (ADR 0033).
+    pub(super) untrusted: Arc<crate::guard::Untrusted>,
 }
 
 /// The parts of the daemon that a config shapes.
@@ -214,6 +217,8 @@ impl Kit {
             timeout: Duration::from_secs(config.approvals.timeout_secs),
             flow,
             sandbox: runtime,
+            untrusted: (!crate::sandbox::always_asks(config.sandbox.as_ref()))
+                .then(|| Arc::clone(&self.untrusted)),
             always,
         });
         let approver = config.approvals.approver.clone();

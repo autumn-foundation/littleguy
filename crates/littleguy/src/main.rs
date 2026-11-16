@@ -214,6 +214,34 @@ enum ModelChoice {
     OpenRouter,
 }
 
+/// The values of `--reasoning`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ReasoningChoice {
+    /// No reasoning.
+    None,
+    /// The least that the model offers.
+    Minimal,
+    /// Little reasoning.
+    Low,
+    /// The middle.
+    Medium,
+    /// The most.
+    High,
+}
+
+#[cfg(feature = "openai")]
+impl From<ReasoningChoice> for littleguy_models::Reasoning {
+    fn from(choice: ReasoningChoice) -> Self {
+        match choice {
+            ReasoningChoice::None => Self::None,
+            ReasoningChoice::Minimal => Self::Minimal,
+            ReasoningChoice::Low => Self::Low,
+            ReasoningChoice::Medium => Self::Medium,
+            ReasoningChoice::High => Self::High,
+        }
+    }
+}
+
 /// The variable that holds the Claude API key.
 #[cfg(feature = "claude")]
 const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
@@ -256,6 +284,11 @@ struct ServeArgs {
     /// Defaults to the provider's own.
     #[arg(long, env = "LG_BASE_URL")]
     base_url: Option<String>,
+    /// How hard a reasoning model thinks before it answers, for
+    /// `--model openai` and `openrouter`. Hidden reasoning is output, so
+    /// less of it answers sooner. Defaults to the model's own.
+    #[arg(long, env = "LG_REASONING", value_enum)]
+    reasoning: Option<ReasoningChoice>,
     /// The Messages API endpoint. For tests.
     #[arg(long, env = "LG_CLAUDE_ENDPOINT", hide = true)]
     claude_endpoint: Option<String>,
@@ -322,6 +355,12 @@ fn build_model(
     let _ = (&key, db);
     #[cfg(not(feature = "claude"))]
     let _ = db;
+    // Claude takes its thinking another way, and the offline model has none.
+    if args.reasoning.is_some()
+        && !matches!(args.model, ModelChoice::OpenAi | ModelChoice::OpenRouter)
+    {
+        anyhow::bail!("--reasoning works with --model openai and --model openrouter only");
+    }
     Ok(match args.model {
         ModelChoice::Offline => Arc::new(
             args.offline_call_log
@@ -363,6 +402,9 @@ fn build_model(
             let mut model = OpenAiModel::new(provider, api_key, name);
             if let Some(base_url) = &args.base_url {
                 model = model.base_url(base_url);
+            }
+            if let Some(effort) = args.reasoning {
+                model = model.reasoning(effort.into());
             }
             Arc::new(model)
         }
@@ -865,6 +907,32 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("--model-name"));
+    }
+
+    #[test]
+    fn reasoning_is_for_the_openai_adapter_only() {
+        let args = serve_args(&["lg", "serve", "--reasoning", "low"]);
+        assert_eq!(args.reasoning, Some(ReasoningChoice::Low));
+        let error = build_model(&args, Path::new("/d/lg.db"), |_| None)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("--model openai"), "{error}");
+        assert!(Cli::try_parse_from(["lg", "serve", "--reasoning", "lots"]).is_err());
+        #[cfg(feature = "openai")]
+        {
+            let args = serve_args(&[
+                "lg",
+                "serve",
+                "--model",
+                "openrouter",
+                "--model-name",
+                "a/b",
+                "--reasoning",
+                "none",
+            ]);
+            let key = |var: &str| (var == "OPENROUTER_API_KEY").then(|| String::from("k"));
+            assert!(build_model(&args, Path::new("/d/lg.db"), key).is_ok());
+        }
     }
 
     #[cfg(feature = "slack")]

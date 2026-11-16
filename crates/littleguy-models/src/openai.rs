@@ -84,6 +84,9 @@ pub struct OpenAiModel {
     api_key: String,
     base_url: String,
     model: String,
+    /// How hard a reasoning model thinks before it answers. `None` leaves
+    /// the provider default.
+    reasoning: Option<Reasoning>,
     /// The provider and the model, so a response cache keeps them apart.
     id: String,
     client: reqwest::Client,
@@ -112,8 +115,24 @@ impl OpenAiModel {
             base_url: provider.base_url().into(),
             id: format!("{}:{model}", provider.label()),
             model,
+            reasoning: None,
             client: client(),
         }
+    }
+
+    /// Ask a reasoning model for `effort`. Hidden reasoning is output that
+    /// the model writes before its answer, so less of it answers sooner.
+    #[must_use]
+    pub const fn reasoning(mut self, effort: Reasoning) -> Self {
+        self.reasoning = Some(effort);
+        self
+    }
+
+    /// The JSON body of `request` for this model.
+    fn body(&self, request: &ChatRequest) -> Value {
+        let mut body = request_body(request, &self.model, self.provider);
+        with_reasoning(&mut body, self.provider, self.reasoning);
+        body
     }
 
     /// Send each request under `base_url` in place of the provider default.
@@ -160,7 +179,7 @@ impl AgentModel for OpenAiModel {
         request: &'a ChatRequest,
     ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
         Box::pin(async move {
-            let body = request_body(request, &self.model, self.provider);
+            let body = self.body(request);
             let text = read_body(self.send(&body).await?).await?;
             let body: Value = serde_json::from_str(&text)
                 .map_err(|e| AgentError::new(ErrorKind::Decode, format!("not JSON: {e}")))?;
@@ -174,7 +193,7 @@ impl AgentModel for OpenAiModel {
         on_delta: &'a (dyn Fn(&str) + Send + Sync),
     ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
         Box::pin(async move {
-            let body = streaming_body(request_body(request, &self.model, self.provider));
+            let body = streaming_body(self.body(request));
             let mut response = self.send(&body).await?;
             let mut stream = StreamAssembler::default();
             let mut frames = SseFrames::default();
@@ -281,6 +300,51 @@ fn assistant_message(parts: &[ContentPart]) -> Value {
         message["tool_calls"] = json!(calls);
     }
     message
+}
+
+/// How hard a reasoning model thinks before it answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reasoning {
+    /// No reasoning.
+    None,
+    /// The least reasoning that the model offers.
+    Minimal,
+    /// Little reasoning.
+    Low,
+    /// The middle.
+    Medium,
+    /// The most reasoning.
+    High,
+}
+
+impl Reasoning {
+    /// The name of the effort, as the APIs and the flag spell it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Puts `effort` into `body` in the field of `provider`. OpenAI takes
+/// `reasoning_effort`. OpenRouter takes a `reasoning` object, and turns
+/// reasoning off with `enabled: false`. No effort sends nothing.
+pub fn with_reasoning(body: &mut Value, provider: Provider, effort: Option<Reasoning>) {
+    let Some(effort) = effort else {
+        return;
+    };
+    match (provider, effort) {
+        (Provider::OpenAi, effort) => body["reasoning_effort"] = json!(effort.as_str()),
+        (Provider::OpenRouter, Reasoning::None) => body["reasoning"] = json!({"enabled": false}),
+        (Provider::OpenRouter, effort) => {
+            body["reasoning"] = json!({"effort": effort.as_str()});
+        }
+    }
 }
 
 /// The JSON body of one request.
@@ -645,6 +709,43 @@ mod tests {
         assert_eq!(messages[4]["content"], "B");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn the_reasoning_effort_goes_in_the_field_of_each_provider() {
+        let openrouter = |effort| {
+            let mut body = request_body(&request(), "x/y", Provider::OpenRouter);
+            with_reasoning(&mut body, Provider::OpenRouter, effort);
+            body
+        };
+        assert_eq!(
+            openrouter(Some(Reasoning::Low))["reasoning"],
+            json!({"effort": "low"})
+        );
+        assert_eq!(
+            openrouter(Some(Reasoning::None))["reasoning"],
+            json!({"enabled": false}),
+            "OpenRouter turns reasoning off with enabled"
+        );
+        assert!(
+            openrouter(None).get("reasoning").is_none(),
+            "no setting sends nothing"
+        );
+        let mut openai = request_body(&request(), "gpt-x", Provider::OpenAi);
+        with_reasoning(&mut openai, Provider::OpenAi, Some(Reasoning::Minimal));
+        assert_eq!(openai["reasoning_effort"], "minimal");
+        assert!(openai.get("reasoning").is_none());
+        assert_eq!(
+            [
+                Reasoning::None,
+                Reasoning::Minimal,
+                Reasoning::Low,
+                Reasoning::Medium,
+                Reasoning::High
+            ]
+            .map(Reasoning::as_str),
+            ["none", "minimal", "low", "medium", "high"]
+        );
     }
 
     #[test]

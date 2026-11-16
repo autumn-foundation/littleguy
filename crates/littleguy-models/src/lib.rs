@@ -23,4 +23,4 @@ mod turn_store;
 pub use claude::ClaudeModel;
 pub use offline::OfflineModel;
 #[cfg(feature = "openai")]
-pub use openai::{OpenAiModel, Provider};
+pub use openai::{OpenAiModel, Provider, Reasoning};

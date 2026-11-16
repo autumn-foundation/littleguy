@@ -89,6 +89,10 @@
 //! integration = "google"
 //! mail = true
 //! calendar = true
+//!
+//! [api]
+//! integrations = ["google"]
+//! max_chars = 20000
 //! ```
 //!
 //! The `[discord]` section is optional. The bot token never goes in the
@@ -154,9 +158,16 @@
 //! keeps tokens for. A client secret never goes in the file: the file names
 //! the variable that holds it.
 //!
+//! `catalog` in `[san_mateo]` names a `providers.yaml` in the Nango
+//! format. Its providers join the built-in ones.
+//!
 //! The `[google]` section gives the assistant Gmail and Google Calendar
 //! tools on one San Mateo integration with the `google` provider. Each send
 //! and each invite waits for a person.
+//!
+//! The `[api]` section gives the assistant `api_get` and `api_send` on the
+//! San Mateo integrations that it names, or on all of them (ADR 0031). Each
+//! `api_send` waits for a person.
 
 use std::path::{Path, PathBuf};
 
@@ -264,6 +275,9 @@ pub enum ConfigError {
     /// The Google section is not valid.
     #[error("the google section is not valid: {0}")]
     Google(String),
+    /// The api section is not valid.
+    #[error("the api section is not valid: {0}")]
+    Api(String),
     /// The ui section is not valid.
     #[error("the ui section is not valid: {0}")]
     Ui(String),
@@ -1058,6 +1072,67 @@ fn google(raw: RawGoogle, san_mateo: Option<&SanMateoConfig>) -> Result<GoogleCo
     Ok(config)
 }
 
+/// The most characters of one API answer when the config names none.
+pub const DEFAULT_API_MAX_CHARS: usize = 20_000;
+
+/// The `api_get` and `api_send` tools (ADR 0031).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiConfig {
+    /// The San Mateo integrations that the tools call.
+    pub integrations: Vec<String>,
+    /// The most characters of one answer.
+    pub max_chars: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApi {
+    integrations: Option<Vec<String>>,
+    max_chars: Option<usize>,
+}
+
+/// Checks the api section against the San Mateo integrations. With no
+/// list, the tools call every integration.
+fn api(raw: RawApi, san_mateo: Option<&SanMateoConfig>) -> Result<ApiConfig, ConfigError> {
+    let Some(san_mateo) = san_mateo else {
+        return Err(ConfigError::Api(String::from(
+            "it needs a [san_mateo] section with an integration",
+        )));
+    };
+    let known: Vec<&str> = san_mateo
+        .integrations
+        .iter()
+        .map(|integration| integration.key.as_str())
+        .collect();
+    let integrations = match raw.integrations {
+        Some(named) => {
+            if let Some(unknown) = named.iter().find(|key| !known.contains(&key.as_str())) {
+                return Err(ConfigError::Api(format!(
+                    "integration `{unknown}` is not a [[san_mateo.integration]]"
+                )));
+            }
+            named
+        }
+        None => known.iter().map(|key| (*key).to_owned()).collect(),
+    };
+    if integrations.is_empty() {
+        return Err(ConfigError::Api(String::from(
+            "it names no integration: add a [[san_mateo.integration]] or leave the section out",
+        )));
+    }
+    // Only zero cannot work: an answer of no characters says nothing.
+    let max_chars = raw.max_chars.unwrap_or(DEFAULT_API_MAX_CHARS);
+    if max_chars == 0 {
+        return Err(ConfigError::Api(String::from(
+            "max_chars must be at least 1",
+        )));
+    }
+    Ok(ApiConfig {
+        integrations,
+        max_chars,
+    })
+}
+
 /// The default San Mateo address.
 pub const DEFAULT_SAN_MATEO_BIND: &str = "127.0.0.1:3003";
 
@@ -1461,6 +1536,7 @@ struct Raw {
     camel: RawCamel,
     san_mateo: Option<RawSanMateo>,
     google: Option<RawGoogle>,
+    api: Option<RawApi>,
     #[serde(default)]
     memory: RawMemory,
     brief: Option<RawBrief>,
@@ -1488,6 +1564,7 @@ struct Raw {
 #[serde(deny_unknown_fields)]
 struct RawSanMateo {
     bind: Option<String>,
+    catalog: Option<String>,
     #[serde(default)]
     integration: Vec<RawIntegration>,
 }
@@ -1525,6 +1602,8 @@ pub struct SanMateoConfig {
     pub bind: std::net::SocketAddr,
     /// The integrations.
     pub integrations: Vec<Integration>,
+    /// A `providers.yaml` whose providers join the built-in catalog.
+    pub catalog: Option<PathBuf>,
 }
 
 /// Whether `name` is a plain environment variable name.
@@ -1575,7 +1654,11 @@ fn san_mateo(raw: RawSanMateo) -> Result<SanMateoConfig, SanMateoError> {
             })
         })
         .collect::<Result<_, _>>()?;
-    Ok(SanMateoConfig { bind, integrations })
+    Ok(SanMateoConfig {
+        bind,
+        integrations,
+        catalog: raw.catalog.map(PathBuf::from),
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1748,6 +1831,8 @@ pub struct Config {
     pub san_mateo: Option<SanMateoConfig>,
     /// The Gmail and Google Calendar tools, when the config has the section.
     pub google: Option<GoogleConfig>,
+    /// The API tools, when the config has the section.
+    pub api: Option<ApiConfig>,
     /// The memory settings.
     pub memory: MemoryConfig,
     /// The morning brief, when the config has the section.
@@ -1793,6 +1878,7 @@ impl Config {
             camel: Vec::new(),
             san_mateo: None,
             google: None,
+            api: None,
             memory: MemoryConfig::default(),
             brief: None,
             heartbeat: None,
@@ -1847,6 +1933,10 @@ impl Config {
             .google
             .map(|raw| google(raw, san_mateo_section.as_ref()))
             .transpose()?;
+        let api_section = raw
+            .api
+            .map(|raw| api(raw, san_mateo_section.as_ref()))
+            .transpose()?;
         let brief = raw
             .brief
             .map(|raw| brief(raw, &memory.timezone))
@@ -1871,6 +1961,7 @@ impl Config {
             camel: camel_routes(raw.camel.route)?,
             san_mateo: san_mateo_section,
             google: google_section,
+            api: api_section,
             memory,
             brief,
             heartbeat,
@@ -2511,6 +2602,41 @@ mod tests {
         let alone = Config::parse("owner = \"m\"\n[google]\nintegration = \"g\"");
         assert!(matches!(alone, Err(ConfigError::Google(_))));
         assert_eq!(Config::parse("owner = \"m\"").unwrap().google, None);
+    }
+
+    #[test]
+    fn the_api_section_names_san_mateo_integrations_or_takes_them_all() {
+        let san = "[san_mateo]\ncatalog = \"/etc/lg/providers.yaml\"\n\
+                   [[san_mateo.integration]]\nkey = \"gh\"\nprovider = \"github\"\n\
+                   [[san_mateo.integration]]\nkey = \"no\"\nprovider = \"notion\"\n";
+        let parse = |api: &str| Config::parse(&format!("owner = \"m\"\n{san}[api]\n{api}"));
+        let all = parse("").unwrap();
+        assert_eq!(
+            all.api,
+            Some(ApiConfig {
+                integrations: vec![String::from("gh"), String::from("no")],
+                max_chars: DEFAULT_API_MAX_CHARS,
+            })
+        );
+        assert_eq!(
+            all.san_mateo.and_then(|s| s.catalog),
+            Some(PathBuf::from("/etc/lg/providers.yaml"))
+        );
+        let one = parse("integrations = [\"no\"]\nmax_chars = 1").unwrap();
+        assert_eq!(
+            one.api.map(|a| (a.integrations, a.max_chars)),
+            Some((vec![String::from("no")], 1))
+        );
+        let bad = |api: &str| match parse(api) {
+            Err(ConfigError::Api(why)) => why,
+            other => panic!("{api}: {other:?}"),
+        };
+        assert!(bad("integrations = [\"x\"]").contains("`x` is not a [[san_mateo.integration]]"));
+        assert!(bad("integrations = []").contains("names no integration"));
+        assert!(bad("max_chars = 0").contains("at least 1"));
+        let alone = Config::parse("owner = \"m\"\n[api]\n");
+        assert!(matches!(alone, Err(ConfigError::Api(why)) if why.contains("[san_mateo]")));
+        assert_eq!(Config::parse("owner = \"m\"").unwrap().api, None);
     }
 
     #[test]

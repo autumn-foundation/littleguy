@@ -45,6 +45,9 @@ pub(super) struct Kit {
     /// The Google API of the owner.
     #[cfg(feature = "google")]
     pub(super) google: Option<Arc<dyn littleguy_tools::google::GoogleApi>>,
+    /// The API of the providers.
+    #[cfg(feature = "api")]
+    pub(super) api: Option<crate::tools::ApiLink>,
     /// The tenant database of a fleet, which holds the stores.
     pub(super) tenant: Option<PathBuf>,
     /// The chat services that take messages.
@@ -122,6 +125,38 @@ impl Kit {
         Ok(tools)
     }
 
+    /// The tools of the integrations that `config` turns on: Google and
+    /// the API tools. The second value says which of them have calls that
+    /// always wait.
+    #[cfg_attr(
+        not(any(feature = "google", feature = "api")),
+        expect(clippy::unused_self, reason = "this build has no integration tools")
+    )]
+    fn integration_tools(
+        &self,
+        config: &Config,
+    ) -> (
+        Vec<Arc<dyn autumn_harvest_agent::Tool>>,
+        crate::guard::Always,
+    ) {
+        type Tools = Vec<Arc<dyn autumn_harvest_agent::Tool>>;
+        #[cfg(feature = "google")]
+        let google = crate::tools::google_tools(config.google.as_ref(), self.google.clone());
+        #[cfg(not(feature = "google"))]
+        let google: Tools = Vec::new();
+        #[cfg(feature = "api")]
+        let api = crate::tools::api_tools(config.api.as_ref(), self.api.as_ref());
+        #[cfg(not(feature = "api"))]
+        let api: Tools = Vec::new();
+        #[cfg(not(any(feature = "google", feature = "api")))]
+        let _ = config;
+        let always = crate::guard::Always {
+            google: !google.is_empty(),
+            api: !api.is_empty(),
+        };
+        (google.into_iter().chain(api).collect::<Tools>(), always)
+    }
+
     /// Builds the assistant and the parts around it from `config`.
     pub(super) fn assemble(&mut self, config: &Config, chats: &Arc<Chats>) -> Result<Assembled> {
         let db = self.db.clone();
@@ -133,22 +168,18 @@ impl Kit {
         )?;
         let runtime =
             crate::sandbox::share(self.sandbox.as_ref().filter(|_| config.sandbox.is_some()));
-        #[cfg(feature = "google")]
-        let google = crate::tools::google_tools(config.google.as_ref(), self.google.clone());
-        #[cfg(not(feature = "google"))]
-        let google: Vec<Arc<dyn autumn_harvest_agent::Tool>> = Vec::new();
-        let google_on = !google.is_empty();
+        let (outside, always) = self.integration_tools(config);
         let mut tools = crate::tools::Tools::new(
             &config.tools,
             &db,
             crate::tools::search_key_from_env().as_deref(),
         )
         .with(self.mcp.clone())
-        .with(google);
+        .with(outside);
         tools = self.own_tools(config, tools)?;
         tracing::info!(tools = ?tools.names(), "the assistant tools");
         let flow = config.flow.rules();
-        let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || google_on);
+        let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || always.any());
         // The brief keeps its sent reports in the memory store, and the
         // guard keeps its calls that wait. So each opens the store even
         // when memory is off.
@@ -183,7 +214,7 @@ impl Kit {
             timeout: Duration::from_secs(config.approvals.timeout_secs),
             flow,
             sandbox: runtime,
-            google: google_on,
+            always,
         });
         let approver = config.approvals.approver.clone();
         warn_unreachable(approver.as_ref(), &self.services);

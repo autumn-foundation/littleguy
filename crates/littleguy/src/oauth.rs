@@ -26,6 +26,8 @@ use tokio::sync::oneshot;
 
 use crate::protocol::ConnectionEntry;
 
+#[cfg(feature = "api")]
+mod api;
 #[cfg(feature = "google")]
 mod google;
 
@@ -75,7 +77,8 @@ pub struct Connections {
     san: SanMateo,
     owner: String,
     server_url: String,
-    integrations: Vec<String>,
+    /// Each integration key with its provider.
+    integrations: Vec<(String, String)>,
     background: Background,
     stop: oneshot::Sender<()>,
     serving: tokio::task::JoinHandle<()>,
@@ -131,7 +134,7 @@ impl Connections {
         if let Some(transport) = hooks.transport {
             builder = builder.transport(transport);
         }
-        if let Some(catalog) = hooks.catalog {
+        if let Some(catalog) = catalog(config.catalog.as_deref(), hooks.catalog)? {
             builder = builder.catalog(catalog);
         }
         let san = builder.build().context("building San Mateo")?;
@@ -159,7 +162,11 @@ impl Connections {
             san,
             owner: owner.to_owned(),
             server_url,
-            integrations: config.integrations.iter().map(|i| i.key.clone()).collect(),
+            integrations: config
+                .integrations
+                .iter()
+                .map(|i| (i.key.clone(), i.provider.clone()))
+                .collect(),
             background,
             stop,
             serving,
@@ -180,7 +187,7 @@ impl Connections {
     /// Returns an error when the config has no such integration, or the
     /// session does not save.
     pub async fn connect(&self, integration: &str) -> Result<String> {
-        if !self.integrations.iter().any(|key| key == integration) {
+        if !self.integrations.iter().any(|(key, _)| key == integration) {
             bail!("the config has no integration `{integration}`. Add a [[san_mateo.integration]]");
         }
         let input = ConnectSessionInput {
@@ -247,6 +254,49 @@ impl Connections {
         let _ = self.serving.await;
         self.san.flush().await;
     }
+}
+
+/// The catalog of San Mateo: `base`, or the built-in one, with the
+/// providers of the owner's `file` on top. `None` keeps the built-in one.
+fn catalog(file: Option<&Path>, base: Option<Catalog>) -> Result<Option<Catalog>> {
+    let Some(file) = file else {
+        return Ok(base);
+    };
+    let base = match base {
+        Some(base) => base,
+        None => Catalog::builtin().context("reading the built-in San Mateo catalog")?,
+    };
+    let added = Catalog::from_yaml_file(file)
+        .with_context(|| format!("reading the San Mateo catalog {}", file.display()))?;
+    Ok(Some(base.merge(added)))
+}
+
+/// The newest connection of `integration` for `owner` whose refresh still
+/// works. `what` names the account in the message when there is none.
+#[cfg(any(feature = "google", feature = "api"))]
+async fn newest(
+    san: &SanMateo,
+    integration: &str,
+    owner: &str,
+    what: &str,
+) -> Result<ConnectionKey, String> {
+    let filter = ConnectionFilter {
+        provider_config_key: Some(integration.to_owned()),
+        end_user_id: Some(owner.to_owned()),
+        ..ConnectionFilter::default()
+    };
+    let summaries = san
+        .list_connections(ENVIRONMENT, &filter)
+        .await
+        .map_err(|e| format!("the connections do not read: {e}"))?;
+    let newest = summaries
+        .into_iter()
+        .filter(|c| !c.refresh_exhausted)
+        .max_by_key(|c| c.created_at)
+        .ok_or_else(|| {
+            format!("no {what} is connected. The owner runs `lg connect {integration}`")
+        })?;
+    Ok(ConnectionKey::new(integration, &newest.connection_id))
 }
 
 /// Adds `integration`, or updates it to match the config.
@@ -352,16 +402,23 @@ google:
     #[cfg(feature = "google")]
     /// Stores a Google connection for `owner`, as a finished connect would.
     pub async fn import_google(connections: &Connections, owner: &str) {
+        import(connections, "google", "at-google", owner).await;
+    }
+
+    /// Stores a connection of `integration` with the access token `token`
+    /// for `owner`, as a finished connect would.
+    #[cfg(any(feature = "google", feature = "api"))]
+    pub async fn import(connections: &Connections, integration: &str, token: &str, owner: &str) {
         let credentials =
             san_mateo::Credentials::OAuth2(san_mateo::credentials::OAuth2Credentials {
-                access_token: Secret::new(String::from("at-google")),
+                access_token: Secret::new(token.to_owned()),
                 refresh_token: None,
                 expires_at: None,
                 raw: serde_json::Value::Null,
             });
         let input = san_mateo::ImportConnection {
             connection_id: Some(String::from("c-1")),
-            provider_config_key: String::from("google"),
+            provider_config_key: integration.to_owned(),
             credentials,
             connection_config: serde_json::Map::new(),
             metadata: serde_json::Map::new(),
@@ -437,6 +494,109 @@ google:
         connections.stop().await;
     }
 
+    /// A `providers.yaml` of the owner with one provider.
+    #[cfg(feature = "api")]
+    const OWNER_CATALOG: &str = r"
+widgets:
+    display_name: Widgets
+    auth_mode: OAUTH2
+    authorization_url: https://auth.widgets.example.com/authorize
+    token_url: https://auth.widgets.example.com/token
+    proxy:
+        base_url: https://api.widgets.example.com
+";
+
+    #[cfg(feature = "api")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn api_calls_go_to_the_catalog_host_with_the_owner_token() {
+        use littleguy_tools::api::{ApiCall, ProviderApi};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("providers.yaml");
+        std::fs::write(&file, OWNER_CATALOG).unwrap();
+        let mut config = section("acme", None);
+        config.integrations.push(Integration {
+            key: String::from("w"),
+            provider: String::from("widgets"),
+            client_id: Some(String::from("client-w")),
+            client_secret_env: None,
+            scopes: Vec::new(),
+        });
+        config.catalog = Some(file);
+        let fake = MemoryTransport::new();
+        let items = "https://api.widgets.example.com/v1/items";
+        fake.reply(
+            "GET",
+            items,
+            HttpResponse::json(200, &serde_json::json!({"items": [1, 2]})).header(
+                "link",
+                "<https://api.widgets.example.com/v1/items?page=2>; rel=\"next\"",
+            ),
+        );
+        let connections = start(&dir.path().join("lg.db"), &config, &fake)
+            .await
+            .unwrap();
+        let (api, integrations) = connections.api(&[String::from("w"), String::from("gone")]);
+        assert_eq!(
+            integrations.len(),
+            1,
+            "a key that the config lacks is left out"
+        );
+        assert_eq!(integrations[0].provider, "widgets");
+        assert_eq!(
+            integrations[0].base_url.as_deref(),
+            Some("https://api.widgets.example.com"),
+            "the owner's catalog joins the built-in one"
+        );
+        let call = |integration: &str, path: &str| ApiCall {
+            integration: integration.to_owned(),
+            method: String::from("GET"),
+            path: path.to_owned(),
+            params: vec![(String::from("limit"), String::from("2"))],
+            headers: vec![(String::from("Accept"), String::from("application/json"))],
+            body: Vec::new(),
+        };
+        let Err(none) = api.send(call("w", "/v1/items")).await else {
+            panic!("a call with no connection went out");
+        };
+        assert!(none.to_string().contains("lg connect w"), "{none}");
+        import(&connections, "w", "at-w", "mark").await;
+        import(&connections, "acme", "at-acme", "mark").await;
+        let Err(other) = api.send(call("acme", "/v1/items")).await else {
+            panic!("a call to an integration outside the list went out");
+        };
+        assert!(other.to_string().contains("not an integration"), "{other}");
+        let answer = api.send(call("w", "/v1/items")).await.unwrap();
+        assert_eq!(answer.status, 200);
+        assert!(answer.headers.iter().any(|(name, _)| name == "link"));
+        api.send(call("w", "/@evil.example.com/x")).await.unwrap();
+        let sent = fake.requests();
+        assert_eq!(sent.len(), 2);
+        for request in &sent {
+            let url = reqwest::Url::parse(&request.url).unwrap();
+            assert_eq!(url.host_str(), Some("api.widgets.example.com"));
+            assert_eq!(request.header_value("authorization"), Some("Bearer at-w"));
+        }
+        assert!(sent[0].url.contains("limit=2"));
+        assert_eq!(sent[0].header_value("accept"), Some("application/json"));
+        connections.stop().await;
+    }
+
+    #[cfg(feature = "api")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_catalog_file_that_does_not_read_stops_the_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = section("acme", None);
+        config.catalog = Some(dir.path().join("missing.yaml"));
+        let fake = MemoryTransport::new();
+        let missing = start(&dir.path().join("lg.db"), &config, &fake).await;
+        assert!(format!("{:#}", missing.unwrap_err()).contains("missing.yaml"));
+        let bad = dir.path().join("bad.yaml");
+        std::fs::write(&bad, "- not a map").unwrap();
+        config.catalog = Some(bad);
+        let broken = start(&dir.path().join("lg.db"), &config, &fake).await;
+        assert!(format!("{:#}", broken.unwrap_err()).contains("bad.yaml"));
+    }
+
     /// 32 zero bytes in base64. Tests only.
     const KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
@@ -450,6 +610,7 @@ google:
                 client_secret_env: secret_env.map(ToOwned::to_owned),
                 scopes: vec![String::from("read")],
             }],
+            catalog: None,
         }
     }
 

@@ -14,16 +14,20 @@
 //!   tools of the agent.
 //! - [`google::google_tools`] read and send Gmail, and read and add Google
 //!   Calendar events, through a token proxy.
+//! - [`api::api_tools`] call the API of any connected provider through the
+//!   same proxy.
 //!
 //! Feature `web` builds the fetch and search tools, feature `mcp` the MCP
-//! tools, feature `google` the Google tools, feature `search-notes` the
-//! note search and feature `grep-files` the line search. All five are on by
-//! default. The file tools are always on.
+//! tools, feature `google` the Google tools, feature `api` the API tools,
+//! feature `search-notes` the note search and feature `grep-files` the line
+//! search. All but `api` are on by default. The file tools are always on.
 //!
 //! The web tools read only, and label their results as untrusted input,
 //! so flow rules can fence what follows them. The file tools change only
 //! the private workspace of the agent.
 
+#[cfg(feature = "api")]
+pub mod api;
 #[cfg(feature = "web")]
 mod fetch;
 mod files;

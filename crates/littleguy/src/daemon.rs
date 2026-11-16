@@ -456,6 +456,9 @@ pub struct Extras {
     /// The Google API of the owner, for the `[google]` tools.
     #[cfg(feature = "google")]
     pub google: Option<Arc<dyn littleguy_tools::google::GoogleApi>>,
+    /// The API of the providers, for the `[api]` tools.
+    #[cfg(feature = "api")]
+    pub api: Option<crate::tools::ApiLink>,
     /// The Slack channel takes messages.
     pub slack: bool,
     /// The tenant database of a fleet, which holds the stores instead of
@@ -584,6 +587,8 @@ impl Daemon {
             mcp: extras.mcp,
             #[cfg(feature = "google")]
             google: extras.google,
+            #[cfg(feature = "api")]
+            api: extras.api,
             tenant: extras.tenant,
             services,
             stores: None,
@@ -5626,6 +5631,8 @@ mod tests {
         assert!(!crate::tools::workspace_for(&db).exists());
     }
 
+    #[cfg(feature = "api")]
+    mod api;
     #[cfg(feature = "mcp")]
     mod flow;
     #[cfg(feature = "google")]

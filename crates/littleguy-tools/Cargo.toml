@@ -37,6 +37,8 @@ web = ["dep:reqwest", "dep:rustls", "dep:url"]
 mcp = ["dep:rmcp", "dep:rustls"]
 # Gmail and Google Calendar, through a token proxy.
 google = ["dep:base64"]
+# `api_get` and `api_send`: the API of any connected provider, through a token proxy.
+api = ["dep:url"]
 # `search_notes`: find the files of the workspace that hold some words.
 search-notes = []
 # `grep_files`: find the lines of the workspace that match a pattern.

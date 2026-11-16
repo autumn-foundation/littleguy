@@ -70,6 +70,7 @@ pub const fn share(_runtime: Option<&Runtime>) -> Option<Runtime> {
 /// untrusted input ([`crate::guard::Untrusted`]).
 #[must_use]
 pub fn always_asks(config: Option<&SandboxConfig>) -> bool {
+    // `auto` asks as `untrusted` does. The reviewer decides after the ask.
     config.is_some_and(|config| config.approve == SandboxApprove::Always)
 }
 

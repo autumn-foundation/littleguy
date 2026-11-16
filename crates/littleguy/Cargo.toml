@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.3"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files", "notes"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files", "notes"]
 # Every integration.
 full = ["default", "camel", "google", "api", "fleet"]
 # Discord direct messages over the gateway.
@@ -75,6 +75,9 @@ notes = ["search-notes", "littleguy-stores/notes"]
 grep-files = ["littleguy-tools/grep-files"]
 # The `run_code` tool and `[sandbox]`.
 sandbox = ["autumn-harvest/sandbox-activities", "autumn-harvest-agent/sandbox"]
+# `[sandbox] approve = "auto"`: a reviewer model decides each call that
+# waits, and asks the owner only when it is unsure (ADR 0037).
+auto-approve = ["sandbox"]
 # Goals and ideas: the tools that file, research and propose them, the
 # Goals and Ideas tabs, and the heartbeat precheck that looks at them.
 plans = ["littleguy-stores/plans"]

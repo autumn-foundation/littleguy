@@ -68,6 +68,10 @@ pub enum Choice {
 /// The reason that a denial without one gives the model.
 pub const DEFAULT_DENY_REASON: &str = "the owner denied this call";
 
+/// What joins the reason of a call that the reviewer of `approve = "auto"`
+/// left to the owner, before the reviewer's own reason (ADR 0037).
+pub const REVIEW_UNSURE: &str = ". The reviewer is unsure: ";
+
 /// The signal payload of `choice` on `record`.
 ///
 /// # Errors

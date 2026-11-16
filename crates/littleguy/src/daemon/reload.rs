@@ -38,6 +38,9 @@ pub(super) struct Kit {
     pub(super) db: PathBuf,
     /// The model of the assistant.
     pub(super) model: Arc<dyn AgentModel>,
+    /// The model of the reviewer of `approve = "auto"` (ADR 0037).
+    #[cfg(feature = "auto-approve")]
+    pub(super) reviewer: Arc<dyn AgentModel>,
     /// The runtime of the `run_code` tool, started at start.
     pub(super) sandbox: Option<crate::sandbox::Runtime>,
     /// The tools of the MCP servers, started at start.

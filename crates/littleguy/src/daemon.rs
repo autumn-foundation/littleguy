@@ -473,6 +473,10 @@ pub struct Extras {
     /// The tenant database of a fleet, which holds the stores instead of
     /// `memory.db` (ADR 0017).
     pub tenant: Option<std::path::PathBuf>,
+    /// The model of the reviewer of `approve = "auto"`. `None` takes the
+    /// model of the assistant (ADR 0037).
+    #[cfg(feature = "auto-approve")]
+    pub reviewer: Option<Arc<dyn AgentModel>>,
 }
 
 /// The daemon state: the runtime, the routing table and the pairings.
@@ -507,6 +511,9 @@ pub struct Daemon {
     approver: Option<SenderId>,
     /// The request that the assistant waits on.
     waiting: Option<i64>,
+    /// The words of the message whose op is in flight, for the reviewer of
+    /// `approve = "auto"`. The state holds an op only once it ends.
+    op_words: Option<String>,
     /// The chat messages that arrived while a request waited.
     held: VecDeque<(Service, DmMessage)>,
     /// The sign-in links of the web pages, once they serve.
@@ -596,9 +603,13 @@ impl Daemon {
             .collect();
         let chats = Arc::new(Chats::default());
         let live = Arc::new(live::Live::default());
+        #[cfg(feature = "auto-approve")]
+        let reviewer = extras.reviewer.unwrap_or_else(|| Arc::clone(&model));
         let mut kit = reload::Kit {
             db: db.to_path_buf(),
             model,
+            #[cfg(feature = "auto-approve")]
+            reviewer,
             sandbox: extras.sandbox,
             mcp: extras.mcp,
             #[cfg(feature = "google")]
@@ -653,6 +664,7 @@ impl Daemon {
             approvals: built.approvals,
             approver: built.approver,
             waiting,
+            op_words: None,
             held: VecDeque::new(),
             logins: None,
             #[cfg(feature = "refine")]
@@ -927,6 +939,7 @@ impl Daemon {
         let mark = usage::mark(&self.rt, &id)?;
         let op = AgentOp::message_with_id(inbound.text.as_str(), key);
         let outcome = sqlite::send(&mut self.rt, &id, &op, Some(key))?;
+        self.op_words = Some(inbound.text.clone());
         if !outcome.signal_delivered {
             return Ok(Response::Duplicate {
                 last_answer: before.and_then(|state| state.last_answer),
@@ -2312,6 +2325,8 @@ mod plans;
 #[cfg(feature = "refine")]
 mod refine;
 mod reload;
+#[cfg(feature = "auto-approve")]
+mod review;
 mod runs;
 #[cfg(feature = "skills")]
 mod skills;

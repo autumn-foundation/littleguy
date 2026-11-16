@@ -211,7 +211,7 @@ pub fn harness(
     }
     if let Some((stores, db)) = memory {
         harness = crate::memory::harness(harness, stores, db);
-        profile = crate::memory::profile(profile);
+        profile = crate::memory::profile(profile, &config.memory);
     }
     if let Some(delivery) = brief {
         harness = harness.delivery(delivery);
@@ -1412,6 +1412,7 @@ impl Daemon {
             ..autumn_harvest_sqlite::ExecutionFilter::default()
         };
         let mut newest = None;
+        let mut passes = Vec::new();
         for pass in self.rt.list_executions(&filter)?.executions {
             let autumn_harvest_sqlite::Stored::Value(id) = pass.exec_id else {
                 continue;
@@ -1421,16 +1422,38 @@ impl Daemon {
                 continue;
             }
             stores.mark_sent(&key)?;
+            // A pass that cannot be read counts as one that wrote nothing.
+            let done = crate::reflection::read_pass(&self.rt, &id).unwrap_or_default();
+            if done.facts.is_empty() {
+                tracing::warn!(pass = %id, stop = %done.stop, episodes = done.episodes,
+                    "a consolidation pass wrote no facts, so no reflection follows");
+            }
+            passes.push(done);
             // The listing is newest first. One reflection covers them all.
             newest.get_or_insert(id);
         }
-        if let Some(pass) = newest {
-            tracing::info!(%pass, "a consolidation pass ended: the assistant reflects");
-            let brief_armed = Arc::clone(&self.kit.brief_armed);
-            self.wake
-                .get_or_insert_with(|| Wake::idle(brief_armed))
-                .reflect(&pass);
-        }
+        let Some(pass) = newest else {
+            return Ok(());
+        };
+        let Some(prompt) = crate::reflection::prompt(&passes) else {
+            // Nothing was learned. The tick log says so, with no model call.
+            #[cfg(feature = "self-debug")]
+            stores.record_tick(&littleguy_stores::tick_log::Tick {
+                kind: String::from("reflection"),
+                due_ms: now.timestamp_millis(),
+                seen_ms: now.timestamp_millis(),
+                outcome: format!(
+                    "skipped: the consolidation pass wrote no facts ({}); no model call",
+                    passes.first().map_or("unknown", |pass| pass.stop.as_str())
+                ),
+            })?;
+            return Ok(());
+        };
+        tracing::info!(%pass, "a consolidation pass ended: the assistant reflects");
+        let brief_armed = Arc::clone(&self.kit.brief_armed);
+        self.wake
+            .get_or_insert_with(|| Wake::idle(brief_armed))
+            .reflect(&pass, &prompt);
         Ok(())
     }
 
@@ -3988,6 +4011,83 @@ mod tests {
         );
     }
 
+    /// A model whose consolidation replies do not parse, and that answers
+    /// the assistant as [`MemoryModel`] does.
+    #[cfg(all(feature = "reflection", feature = "self-debug"))]
+    #[derive(Debug, Default)]
+    struct BadPassModel {
+        inner: MemoryModel,
+    }
+
+    #[cfg(all(feature = "reflection", feature = "self-debug"))]
+    impl AgentModel for BadPassModel {
+        fn chat<'a>(
+            &'a self,
+            request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            let pass = request.messages.first().is_some_and(|first| {
+                MemoryModel::text(first) == autumn_harvest_agent::consolidate::PASS_SYSTEM
+            });
+            if !pass {
+                return self.inner.chat(request);
+            }
+            Box::pin(async move {
+                // Cut off, as at an output cap.
+                Ok(autumn_harvest_agent::ChatResponse {
+                    content: vec![autumn_harvest_agent::ContentPart::Text(String::from(
+                        r#"{"facts": [{"subject": "mark", "relation": "lik"#,
+                    ))],
+                    stop_reason: autumn_harvest_agent::StopReason::MaxTokens,
+                    usage: autumn_harvest_agent::TokenUsage::new(1, 1),
+                })
+            })
+        }
+    }
+
+    #[cfg(all(feature = "reflection", feature = "self-debug"))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_that_wrote_no_fact_wakes_no_reflection_and_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(BadPassModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        daemon.tick().await.unwrap();
+        assert!(
+            daemon
+                .wake
+                .as_ref()
+                .is_none_or(|wake| wake.pending_reflection().is_none()),
+            "no reflection on a pass that learned nothing"
+        );
+        let stores = Arc::clone(daemon.kit.stores.as_ref().unwrap());
+        let row = &stores.recent_ticks(1).unwrap()[0];
+        assert_eq!(row.kind, "reflection");
+        assert_eq!(
+            row.outcome,
+            "skipped: the consolidation pass wrote no facts (invalid_reply); no model call"
+        );
+    }
+
     #[cfg(all(feature = "reflection", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_consolidation_pass_wakes_one_reflection_then_the_timer_stops() {
@@ -4035,6 +4135,9 @@ mod tests {
             last.text
                 .starts_with("ok: Your memory was just consolidated")
         );
+        // It says what the pass added, not only that it ran.
+        assert!(last.text.contains("added 1 fact to your memory block"));
+        assert!(last.text.contains("mark likes tea"));
 
         // The pass counts once, and nothing else is planned: the timer stops.
         let after = model.calls.load(Ordering::SeqCst);

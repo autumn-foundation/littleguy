@@ -204,9 +204,13 @@ littleguy starts at 16,000 and 4,000. Set any size but 0. A reload
 resizes the blocks at once, and a smaller size never drops an entry: a
 block keeps at least what it holds.
 
-After each pass that learned something, littleguy reflects once: it reads
-its notes and files [ideas](#goals-and-ideas) for anything worth planning
-or researching. The reflection is read-only, and it stays silent unless
+After each pass that learned something, littleguy reflects once: the
+reflection hears the facts that the pass added, and files
+[ideas](#goals-and-ideas) for anything worth planning or researching. A
+pass that added no fact wakes no reflection, and `recent_wakes` says why.
+`pass_episodes = 8` under `[memory]` sets how many episodes one pass reads;
+a smaller batch fits the engine's output cap of a pass
+([ADR 0030](docs/adr/0030-a-reflection-hears-what-the-pass-did.md)). The reflection is read-only, and it stays silent unless
 you should know something. [ADR 0022](docs/adr/0022-ideas-from-consolidation.md)
 explains the design. The reflection comes with the `reflection` feature,
 which is on by default and needs `plans`.

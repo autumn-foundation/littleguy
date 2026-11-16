@@ -15,16 +15,6 @@ fn refuse(message: impl Into<String>) -> AgentError {
     AgentError::new(ErrorKind::Tool, message)
 }
 
-/// The longest name of a note, in characters.
-pub const MAX_NAME_CHARS: usize = 120;
-
-/// The longest note, in characters.
-pub const MAX_NOTE_CHARS: usize = 100_000;
-
-/// The most notes that the store keeps. A bound on the agent, not on the
-/// owner: a note past it is refused, so the agent tidies first.
-pub const MAX_NOTES: i64 = 1000;
-
 /// One note.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
@@ -36,13 +26,12 @@ pub struct Note {
     pub updated_ms: i64,
 }
 
-/// `name`, trimmed, when it is a name: one line, not empty, not too long.
+/// `name`, trimmed, when it is a name: one line, not empty. The store
+/// bounds neither a name, nor a note, nor the count of notes (ADR 0034).
 fn checked(name: &str) -> Result<&str, AgentError> {
     let name = name.trim();
-    if name.is_empty() || name.chars().count() > MAX_NAME_CHARS {
-        return Err(refuse(format!(
-            "a note name has 1 to {MAX_NAME_CHARS} characters"
-        )));
+    if name.is_empty() {
+        return Err(refuse("a note name is not empty"));
     }
     if name.chars().any(char::is_control) {
         return Err(refuse("a note name is one line"));
@@ -56,16 +45,10 @@ impl SqliteStores {
     ///
     /// # Errors
     ///
-    /// Returns a `Tool` error for a bad name, a note over
-    /// [`MAX_NOTE_CHARS`], or a new note past [`MAX_NOTES`]. Returns an
-    /// error when the store fails.
+    /// Returns a `Tool` error for a bad name. Returns an error when the
+    /// store fails.
     pub fn write_note(&self, name: &str, text: &str, now_ms: i64) -> Result<bool, AgentError> {
         let name = checked(name)?;
-        if text.chars().count() > MAX_NOTE_CHARS {
-            return Err(refuse(format!(
-                "a note has at most {MAX_NOTE_CHARS} characters; split it"
-            )));
-        }
         self.write(|tx| {
             let exists: bool = tx
                 .query_row("SELECT 1 FROM notes WHERE name = ?1", params![name], |_| {
@@ -73,22 +56,13 @@ impl SqliteStores {
                 })
                 .optional()?
                 .is_some();
-            if !exists {
-                let count: i64 =
-                    tx.query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))?;
-                if count >= MAX_NOTES {
-                    return Ok(Err(refuse(format!(
-                        "{MAX_NOTES} notes exist. Join or delete some first"
-                    ))));
-                }
-            }
             tx.execute(
                 "INSERT INTO notes (name, text, updated_ms) VALUES (?1, ?2, ?3) \
                  ON CONFLICT(name) DO UPDATE SET text = ?2, updated_ms = ?3",
                 params![name, text, now_ms],
             )?;
-            Ok(Ok(!exists))
-        })?
+            Ok(!exists)
+        })
     }
 
     /// The note `name`, if there is one.
@@ -176,13 +150,25 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_name_or_a_long_note_is_refused() {
+    fn a_bad_name_is_refused() {
         let stores = SqliteStores::open_in_memory().unwrap();
         for name in ["", "   ", "two\nlines"] {
             assert!(stores.write_note(name, "x", 1).is_err(), "{name:?}");
         }
-        let long = "x".repeat(MAX_NOTE_CHARS + 1);
-        assert!(stores.write_note("big", &long, 1).is_err());
         assert_eq!(stores.notes().unwrap(), []);
+    }
+
+    #[test]
+    fn the_store_bounds_no_note_and_no_count() {
+        let stores = SqliteStores::open_in_memory().unwrap();
+        let long = "x".repeat(1_000_000);
+        assert!(stores.write_note("big", &long, 1).unwrap());
+        assert_eq!(stores.note("big").unwrap().unwrap().text.len(), 1_000_000);
+        let name = "n".repeat(500);
+        assert!(stores.write_note(&name, "x", 1).unwrap());
+        for n in 0..1001 {
+            stores.write_note(&format!("note-{n}"), "x", 1).unwrap();
+        }
+        assert_eq!(stores.notes().unwrap().len(), 1003);
     }
 }

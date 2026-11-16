@@ -21,9 +21,9 @@ themselves, not through the workspace.
 ## Decision
 
 - **Notes are rows in `memory.db`**, beside the ideas and goals (schema 9):
-  a name, the text, and when it last changed. A name is one line of at most
-  120 characters. A note holds at most 100,000 characters, and the store at
-  most 1000 notes. Those are bounds on the agent, not on the owner.
+  a name, the text, and when it last changed. A name is one line. The
+  store bounds neither the length of a note nor the count of notes
+  (ADR 0034).
 - **Four tools.** `write_note` (replaces a note of the same name) and
   `delete_note` are `Internal`, so a tick may call them. `read_note` and
   `list_notes` only read. `list_notes` with a query ranks the notes as

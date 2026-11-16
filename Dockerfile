@@ -16,14 +16,14 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked --bin lg \
+    cargo build --release --all-features --locked --bin lg \
     && cp target/release/lg /usr/local/bin/lg
 
 FROM debian:bookworm-slim
 # python3, node, bash and sh for run_code; socat for the page forwarder.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates python3 nodejs bash socat tini \
+    ca-certificates python3 nodejs bash socat tini \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 1000 lg \
     && mkdir -p /data/config/littleguy /data/share/littleguy \

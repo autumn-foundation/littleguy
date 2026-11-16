@@ -221,9 +221,11 @@ After each pass that learned something, littleguy reflects once: the
 reflection hears the facts that the pass added, and files
 [ideas](#goals-and-ideas) for anything worth planning or researching. A
 pass that added no fact wakes no reflection, and `recent_wakes` says why.
-`pass_episodes = 8` under `[memory]` sets how many episodes one pass reads;
-a smaller batch fits the engine's output cap of a pass
-([ADR 0030](docs/adr/0030-a-reflection-hears-what-the-pass-did.md)). The reflection is read-only, and it stays silent unless
+`pass_episodes = 8` under `[memory]` sets how many episodes one pass reads
+([ADR 0030](docs/adr/0030-a-reflection-hears-what-the-pass-did.md)), and
+`pass_tokens = 16000` sets the output cap of its model call. The engine
+fixes that cap at 2048, which a model that reasons fills before it writes
+the reply ([ADR 0034](docs/adr/0034-room-for-a-pass-that-reasons.md)). The reflection is read-only, and it stays silent unless
 you should know something. [ADR 0022](docs/adr/0022-ideas-from-consolidation.md)
 explains the design. The reflection comes with the `reflection` feature,
 which is on by default and needs `plans`.

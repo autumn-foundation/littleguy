@@ -233,7 +233,9 @@ impl Kit {
         let memory = stores
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db.as_path()));
-        let model = Arc::clone(&self.model);
+        // A consolidation pass gets the cap of the config (ADR 0034).
+        let model =
+            crate::memory::PassTokens::wrap(Arc::clone(&self.model), config.memory.pass_tokens);
         // The assistant can read what this load of the config turned on.
         #[cfg(feature = "self-debug")]
         let tools = crate::config_view::with_summary(tools, config);

@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-11-15. It amends ADR 0022.
+Accepted, 2026-11-15. It amends ADR 0022. ADR 0034 raises the output cap
+of a pass.
 
 ## Context
 

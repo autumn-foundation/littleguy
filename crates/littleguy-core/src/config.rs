@@ -22,6 +22,7 @@
 //! memory_chars = 16000
 //! user_chars = 4000
 //! pass_episodes = 8
+//! pass_tokens = 16000
 //!
 //! [brief]
 //! schedule = "30 7 * * 1-5"
@@ -241,6 +242,9 @@ pub enum ConfigError {
     /// A consolidation pass reads no episode.
     #[error("memory.pass_episodes must be at least 1")]
     PassEpisodes,
+    /// A consolidation pass may write no token.
+    #[error("memory.pass_tokens must be at least 1")]
+    PassTokens,
     /// The heartbeat interval is zero.
     #[error("heartbeat.every_minutes must be at least 1")]
     HeartbeatEvery,
@@ -693,6 +697,10 @@ pub struct MemoryConfig {
     /// fixed output cap in the engine, so a smaller batch fits a reply that
     /// a large one would cut off (ADR 0030).
     pub pass_episodes: u32,
+    /// The output cap of the model call of a consolidation pass. It
+    /// replaces the fixed cap of the engine, which a model that reasons
+    /// fills before it writes the reply (ADR 0034).
+    pub pass_tokens: u32,
 }
 
 /// The default size of the `memory` block. The engine default is 2 200,
@@ -706,6 +714,10 @@ pub const DEFAULT_USER_CHARS: usize = 4_000;
 /// engine reads 20, and a reply to 20 can pass its 2048-token cap.
 pub const DEFAULT_PASS_EPISODES: u32 = 8;
 
+/// The output cap of a pass when the config names none. A model that
+/// reasons spends part of it before the reply.
+pub const DEFAULT_PASS_TOKENS: u32 = 16_000;
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
@@ -716,6 +728,7 @@ impl Default for MemoryConfig {
             memory_chars: DEFAULT_MEMORY_CHARS,
             user_chars: DEFAULT_USER_CHARS,
             pass_episodes: DEFAULT_PASS_EPISODES,
+            pass_tokens: DEFAULT_PASS_TOKENS,
         }
     }
 }
@@ -730,6 +743,7 @@ struct RawMemory {
     memory_chars: Option<usize>,
     user_chars: Option<usize>,
     pass_episodes: Option<u32>,
+    pass_tokens: Option<u32>,
 }
 
 /// Checks the memory section. The engine checks each cron field and the
@@ -755,6 +769,11 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
         // Only zero cannot work: a pass would read nothing.
         pass_episodes: match raw.pass_episodes.unwrap_or(defaults.pass_episodes) {
             0 => return Err(ConfigError::PassEpisodes),
+            n => n,
+        },
+        // Only zero cannot work: the model could write no reply.
+        pass_tokens: match raw.pass_tokens.unwrap_or(defaults.pass_tokens) {
+            0 => return Err(ConfigError::PassTokens),
             n => n,
         },
     })
@@ -2407,6 +2426,7 @@ mod tests {
                 memory_chars: DEFAULT_MEMORY_CHARS,
                 user_chars: DEFAULT_USER_CHARS,
                 pass_episodes: DEFAULT_PASS_EPISODES,
+                pass_tokens: DEFAULT_PASS_TOKENS,
             }
         );
         let batch = Config::parse("owner = \"mark\"\n[memory]\npass_episodes = 50").unwrap();
@@ -2415,6 +2435,9 @@ mod tests {
             "a big batch is the owner's call"
         );
         assert!(Config::parse("owner = \"mark\"\n[memory]\npass_episodes = 0").is_err());
+        let roomy = Config::parse("owner = \"mark\"\n[memory]\npass_tokens = 64000").unwrap();
+        assert_eq!(roomy.memory.pass_tokens, 64_000);
+        assert!(Config::parse("owner = \"mark\"\n[memory]\npass_tokens = 0").is_err());
         assert!(Config::parse("owner = \"mark\"").unwrap().memory.reflect);
         let sized =
             Config::parse("owner = \"mark\"\n[memory]\nmemory_chars = 50000\nuser_chars = 8000")

@@ -4074,13 +4074,11 @@ mod tests {
 
     /// A model whose consolidation replies do not parse, and that answers
     /// the assistant as [`MemoryModel`] does.
-    #[cfg(all(feature = "reflection", feature = "self-debug"))]
     #[derive(Debug, Default)]
     struct BadPassModel {
         inner: MemoryModel,
     }
 
-    #[cfg(all(feature = "reflection", feature = "self-debug"))]
     impl AgentModel for BadPassModel {
         fn chat<'a>(
             &'a self,
@@ -4147,6 +4145,63 @@ mod tests {
             row.outcome,
             "skipped: the consolidation pass wrote no facts (invalid_reply); no model call"
         );
+    }
+
+    /// A model that reasons: a pass reply under a cap of
+    /// [`autumn_harvest_agent::consolidate::PASS_OUTPUT_TOKENS`] is cut
+    /// off, as the reasoning fills it. With more room it answers as
+    /// [`MemoryModel`] does.
+    #[derive(Debug, Default)]
+    struct ReasoningModel {
+        inner: MemoryModel,
+        cut: BadPassModel,
+    }
+
+    impl AgentModel for ReasoningModel {
+        fn chat<'a>(
+            &'a self,
+            request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            let cramped = request
+                .max_tokens
+                .is_some_and(|cap| cap <= autumn_harvest_agent::consolidate::PASS_OUTPUT_TOKENS);
+            if cramped {
+                self.cut.chat(request)
+            } else {
+                self.inner.chat(request)
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_gets_room_for_a_model_that_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon = Daemon::open(
+            &db,
+            &config(),
+            Arc::new(ReasoningModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        let facts = notes(&db);
+        assert_eq!(facts.len(), 1, "the pass wrote its fact: {facts:?}");
     }
 
     #[cfg(all(feature = "reflection", any(feature = "discord", feature = "sandbox")))]

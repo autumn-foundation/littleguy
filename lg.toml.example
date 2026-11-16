@@ -48,9 +48,12 @@ reflect = true
 ## The sizes of the memory blocks, in characters.
 memory_chars = 16000
 user_chars = 4000
-## How many episodes one pass reads. Lower it when a pass stops with
-## invalid_reply in `recent_wakes`.
+## How many episodes one pass reads.
 pass_episodes = 8
+## The output cap of the model call of a pass. A model that reasons spends
+## part of it before the reply. Raise it when a pass stops with
+## invalid_reply in `recent_wakes`.
+pass_tokens = 16000
 
 ## ----------------------------------------------------------------- tools
 

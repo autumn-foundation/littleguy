@@ -23,7 +23,8 @@ use autumn_harvest::policy::Schedule;
 use autumn_harvest_agent::consolidate;
 use autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME;
 use autumn_harvest_agent::{
-    AgentHarness, AgentMemory, AgentProfile, ConsolidateAll, EpisodeSettings,
+    AgentError, AgentHarness, AgentMemory, AgentModel, AgentProfile, BoxFuture, ChatRequest,
+    ChatResponse, ChatRole, ConsolidateAll, ContentPart, EpisodeSettings, TokenUsage,
 };
 use autumn_harvest_sqlite::{SqliteError, SqliteRuntime};
 use littleguy_core::MemoryConfig;
@@ -130,9 +131,132 @@ pub fn schedule(rt: &mut SqliteRuntime, config: &MemoryConfig) -> Result<()> {
     Ok(())
 }
 
+/// The model of the harness, with the output cap of a consolidation pass
+/// raised to `[memory] pass_tokens` (ADR 0034).
+///
+/// The engine sends each pass with a fixed cap of
+/// [`consolidate::PASS_OUTPUT_TOKENS`]. A model that reasons spends that
+/// cap before it writes the reply, and the engine reads the cut reply as
+/// invalid. The engine offers no setting yet, so this model knows a pass
+/// by its fixed system prompt and its fixed cap, and changes only the cap.
+/// Every other request goes through unchanged.
+#[derive(Debug)]
+pub struct PassTokens {
+    inner: Arc<dyn AgentModel>,
+    tokens: u32,
+}
+
+impl PassTokens {
+    /// `inner`, with a pass cap of `tokens`.
+    #[must_use]
+    pub fn wrap(inner: Arc<dyn AgentModel>, tokens: u32) -> Arc<dyn AgentModel> {
+        Arc::new(Self { inner, tokens })
+    }
+
+    /// The request to send: a pass gets the cap of the config.
+    fn fitted(&self, request: &ChatRequest) -> Option<ChatRequest> {
+        is_pass(request).then(|| ChatRequest {
+            max_tokens: Some(self.tokens),
+            ..request.clone()
+        })
+    }
+}
+
+/// Whether `request` is the model call of a consolidation pass.
+fn is_pass(request: &ChatRequest) -> bool {
+    request.max_tokens == Some(consolidate::PASS_OUTPUT_TOKENS)
+        && request.tools.is_empty()
+        && request.messages.first().is_some_and(|first| {
+            first.role == ChatRole::System
+                && matches!(first.content.as_slice(), [ContentPart::Text(text)] if text == consolidate::PASS_SYSTEM)
+        })
+}
+
+impl AgentModel for PassTokens {
+    fn chat<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+    ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
+        match self.fitted(request) {
+            Some(fitted) => Box::pin(async move { self.inner.chat(&fitted).await }),
+            None => self.inner.chat(request),
+        }
+    }
+
+    fn chat_stream<'a>(
+        &'a self,
+        request: &'a ChatRequest,
+        on_delta: &'a (dyn Fn(&str) + Send + Sync),
+    ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
+        match self.fitted(request) {
+            Some(fitted) => {
+                Box::pin(async move { self.inner.chat_stream(&fitted, on_delta).await })
+            }
+            None => self.inner.chat_stream(request, on_delta),
+        }
+    }
+
+    fn model_id(&self) -> Option<&str> {
+        self.inner.model_id()
+    }
+
+    fn cost_usd_micros(&self, usage: &TokenUsage) -> Option<u64> {
+        self.inner.cost_usd_micros(usage)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use autumn_harvest_agent::ChatMessage;
+
+    /// A model that keeps the cap of each request it gets.
+    #[derive(Debug, Default)]
+    struct Caps(std::sync::Mutex<Vec<Option<u32>>>);
+
+    impl AgentModel for Caps {
+        fn chat<'a>(
+            &'a self,
+            request: &'a ChatRequest,
+        ) -> BoxFuture<'a, Result<ChatResponse, AgentError>> {
+            self.0.lock().unwrap().push(request.max_tokens);
+            Box::pin(std::future::ready(Ok(ChatResponse {
+                content: vec![ContentPart::Text(String::from("{\"facts\":[]}"))],
+                stop_reason: autumn_harvest_agent::StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pass_gets_the_cap_of_the_config_and_nothing_else_changes() {
+        let caps = Arc::new(Caps::default());
+        let model = PassTokens::wrap(Arc::clone(&caps) as Arc<dyn AgentModel>, 16_000);
+        let pass = consolidate::pass_request(&[]);
+        assert_eq!(pass.max_tokens, Some(consolidate::PASS_OUTPUT_TOKENS));
+        model.chat(&pass).await.unwrap();
+        model.chat_stream(&pass, &|_| {}).await.unwrap();
+        // A chat turn with the same cap but another prompt keeps its cap.
+        let mut turn = pass.clone();
+        turn.messages[0] = ChatMessage::text(ChatRole::System, "You are littleguy.");
+        model.chat(&turn).await.unwrap();
+        // A request with no cap keeps none.
+        let open = ChatRequest {
+            max_tokens: None,
+            ..pass
+        };
+        model.chat(&open).await.unwrap();
+        assert_eq!(
+            *caps.0.lock().unwrap(),
+            [
+                Some(16_000),
+                Some(16_000),
+                Some(consolidate::PASS_OUTPUT_TOKENS),
+                None
+            ]
+        );
+    }
 
     /// A tenant file in WAL mode that another connection keeps open, as
     /// the fleet does.

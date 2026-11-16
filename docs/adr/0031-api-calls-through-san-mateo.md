@@ -85,8 +85,9 @@ write the catalog can send a token to any host.
   Linear, Notion and the other OAuth providers work once the owner runs
   `lg connect`.
 - A provider that authenticates with an API key needs a connect flow for
-  that key. That is the next change. Until then, `lg connect` works for
-  OAuth providers only.
+  that key. `lg connect` gives one: for any provider that is not plain
+  OAuth, its link opens the connect page of San Mateo, where the owner
+  types the key.
 - Some APIs change state on a `GET`. The owner bounds that by the list of
   integrations.
 - Answers from an API are untrusted and private. After an `api_get`, the

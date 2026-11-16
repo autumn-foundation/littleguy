@@ -111,7 +111,8 @@ enum Command {
         /// The sender id, such as `discord:123456789012345678`.
         sender: String,
     },
-    /// Print a link that connects an account of an OAuth integration.
+    /// Print a link that connects an account of a San Mateo integration:
+    /// an OAuth sign-in, or a page that takes an API key.
     Connect {
         /// The integration key from the config, such as `google`.
         integration: String,

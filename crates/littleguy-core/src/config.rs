@@ -150,7 +150,8 @@
 //! named tools. The model sees each tool as `<id>__<tool>`.
 //!
 //! The `[sandbox]` section gives the assistant a `run_code` tool. Each call
-//! waits until a person approves it. The `firecracker` backend runs each
+//! waits until a person approves it. With `approve = "untrusted"`, a call
+//! waits only once the conversation holds untrusted input (ADR 0033). The `firecracker` backend runs each
 //! call in a new microVM. The `process` backend runs code as a host
 //! process. It shares the host kernel, so it is for development only.
 //!
@@ -1178,6 +1179,20 @@ pub struct SandboxConfig {
     pub backend: SandboxBackend,
     /// Whether the code may use the network of the backend.
     pub network: bool,
+    /// When a call waits for a person.
+    pub approve: SandboxApprove,
+}
+
+/// When a `run_code` call waits for a person (ADR 0033).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxApprove {
+    /// Each call waits.
+    #[default]
+    Always,
+    /// A call waits once the conversation holds untrusted input, such as a
+    /// web page. Before that, it runs at once.
+    Untrusted,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1185,6 +1200,8 @@ pub struct SandboxConfig {
 struct RawSandbox {
     backend: String,
     network: Option<bool>,
+    #[serde(default)]
+    approve: SandboxApprove,
     firecracker: Option<RawFirecracker>,
 }
 
@@ -1232,6 +1249,7 @@ fn sandbox(raw: RawSandbox) -> Result<SandboxConfig, ConfigError> {
     Ok(SandboxConfig {
         backend,
         network: raw.network.unwrap_or(false),
+        approve: raw.approve,
     })
 }
 
@@ -2180,7 +2198,23 @@ mod tests {
             Some(SandboxConfig {
                 backend: SandboxBackend::Process,
                 network: false,
+                approve: SandboxApprove::Always,
             })
+        );
+        let trusting = Config::parse(
+            "owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprove = \"untrusted\"",
+        )
+        .unwrap();
+        assert_eq!(
+            trusting.sandbox.map(|s| s.approve),
+            Some(SandboxApprove::Untrusted)
+        );
+        assert!(
+            Config::parse(
+                "owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprove = \"never\""
+            )
+            .is_err(),
+            "no setting skips the rule for outside text"
         );
         let vm = Config::parse(
             "owner = \"mark\"\n[sandbox]\nbackend = \"firecracker\"\nnetwork = true\n\

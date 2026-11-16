@@ -52,6 +52,7 @@ fn sandbox_config(approver: Option<&str>, timeout: u64) -> Config {
     config.sandbox = Some(SandboxConfig {
         backend: BackendKind::Process,
         network: false,
+        approve: littleguy_core::SandboxApprove::Always,
     });
     config.approvals = ApprovalsConfig {
         approver: approver.map(|id| discord_sender(id).unwrap()),
@@ -293,6 +294,7 @@ fn a_firecracker_backend_with_missing_files_does_not_open() {
             netns: None,
         }),
         network: false,
+        approve: littleguy_core::SandboxApprove::Always,
     });
     let error = Daemon::open(
         &dir.path().join("lg.db"),
@@ -544,4 +546,153 @@ async fn a_slack_approver_decides_with_a_button() {
     served.unwrap();
     assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
     assert!(fake.posted()[2..].iter().all(|p| p.channel == "DU43"));
+}
+
+/// A tool that reads outside text, as a web page does.
+#[derive(Debug)]
+struct Page {
+    labels: Vec<String>,
+}
+
+impl autumn_harvest_agent::Tool for Page {
+    fn name(&self) -> &'static str {
+        "page"
+    }
+
+    fn description(&self) -> &'static str {
+        "Reads a page."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _input: serde_json::Value,
+        _ctx: &'a autumn_harvest_agent::ToolContext,
+    ) -> autumn_harvest_agent::BoxFuture<
+        'a,
+        Result<serde_json::Value, autumn_harvest_agent::AgentError>,
+    > {
+        Box::pin(std::future::ready(Ok(
+            serde_json::json!({"text": "a page"}),
+        )))
+    }
+
+    fn labels(&self) -> &[String] {
+        &self.labels
+    }
+}
+
+/// A daemon with `approve = "untrusted"`, the `page` tool and the Rule of
+/// Two on or off.
+fn open_trusting(db: &Path, backend: &Arc<CountingBackend>, rule_of_two: bool) -> Daemon {
+    let mut config = sandbox_config(None, 3600);
+    config.flow.rule_of_two = rule_of_two;
+    if let Some(sandbox) = config.sandbox.as_mut() {
+        sandbox.approve = littleguy_core::SandboxApprove::Untrusted;
+    }
+    let runtime = crate::sandbox::runtime_on(
+        Arc::clone(backend) as Arc<dyn SandboxBackend>,
+        config.sandbox.as_ref().unwrap(),
+    )
+    .unwrap();
+    let page = Page {
+        labels: vec![String::from(
+            autumn_harvest_agent::flow::labels::UNTRUSTED_INPUT,
+        )],
+    };
+    let extras = Extras {
+        sandbox: Some(runtime),
+        mcp: vec![Arc::new(page)],
+        ..Extras::default()
+    };
+    Daemon::open_with(
+        db,
+        &config,
+        Arc::new(MemoryModel::default()),
+        UID,
+        false,
+        extras,
+    )
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_approve_untrusted_code_runs_at_once_until_outside_text_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let mut daemon = open_trusting(&dir.path().join("lg.db"), &backend, true);
+
+    // Only the owner's words so far: the code runs with no approval.
+    let ran = daemon
+        .handle_request(UID, request("u-1", "run echo hi"))
+        .await;
+    assert_eq!(reply_text(&ran), "ran: hi");
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
+
+    // The assistant reads outside text. A read never waits.
+    let read = daemon.handle_request(UID, request("u-2", "use page")).await;
+    assert!(
+        matches!(read, Response::Reply { .. }),
+        "a read does not wait"
+    );
+
+    // Now the conversation holds untrusted input, so code waits.
+    let waiting = daemon
+        .handle_request(UID, request("u-3", "run echo hi"))
+        .await;
+    let Response::Waiting { approval } = waiting else {
+        panic!("code after outside text does not wait");
+    };
+    assert_eq!(
+        backend.runs.load(Ordering::SeqCst),
+        1,
+        "it ran before approval"
+    );
+    daemon
+        .handle_request(UID, Request::Approve { id: approval })
+        .await;
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 2);
+
+    // Each later call waits too: one approval does not release code.
+    let again = daemon
+        .handle_request(UID, request("u-4", "run echo hi"))
+        .await;
+    assert!(matches!(again, Response::Waiting { .. }), "each call waits");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_no_flow_rules_nothing_says_the_conversation_is_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let mut daemon = open_trusting(&dir.path().join("lg.db"), &backend, false);
+    let waiting = daemon
+        .handle_request(UID, request("n-1", "run echo hi"))
+        .await;
+    assert!(
+        matches!(waiting, Response::Waiting { .. }),
+        "without labels each call waits"
+    );
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mark_of_outside_text_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lg.db");
+    let backend = Arc::new(CountingBackend::default());
+    let mut daemon = open_trusting(&db, &backend, true);
+    let read = daemon.handle_request(UID, request("r-1", "use page")).await;
+    assert!(matches!(read, Response::Reply { .. }));
+    drop(daemon);
+    let mut again = open_trusting(&db, &backend, true);
+    let waiting = again
+        .handle_request(UID, request("r-2", "run echo hi"))
+        .await;
+    assert!(
+        matches!(waiting, Response::Waiting { .. }),
+        "the engine keeps the labels, so the new daemon knows"
+    );
 }

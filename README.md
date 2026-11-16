@@ -458,6 +458,26 @@ backend runs each call in a new microVM. The `process` backend runs code as
 a host process, so use it only for development.
 [ADR 0008](docs/adr/0008-sandbox-and-approvals.md) explains the design.
 
+To stop approving code that only your own words led to:
+
+```toml
+[sandbox]
+backend = "process"
+approve = "untrusted"   # the default is "always"
+```
+
+Then a call runs at once while the conversation holds only your words.
+Once the assistant reads outside text, such as a web page, a mail, an API
+answer or a note, each later call waits again, until the conversation
+starts over. An MCP server counts only with `labels = ["untrusted_input"]`,
+and a workspace file read with `read_file` does not count. Without flow rules (`rule_of_two = false`),
+nothing says that the conversation is clean, so each call waits. Code in
+a run cannot use the socket of `lg` or change the config
+([ADR 0032](docs/adr/0032-code-in-the-sandbox-cannot-act-as-the-owner.md)),
+but it can still read and write the databases.
+[ADR 0033](docs/adr/0033-code-runs-unasked-until-outside-text.md) explains
+the design.
+
 ## Run it in a container
 
 The `process` sandbox backend runs only on Linux. On a Mac, the container

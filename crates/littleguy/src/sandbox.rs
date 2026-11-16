@@ -5,8 +5,10 @@
 //! process for development. The engine records the outcome, so a replay
 //! never runs the code again.
 //!
-//! Each `run_code` call waits for a person. The approval gate of
-//! [`crate::guard`] asks the engine for that wait.
+//! Each `run_code` call waits for a person, unless `approve = "untrusted"`.
+//! Then a call waits only once the conversation holds untrusted input
+//! (ADR 0033). The approval gate of [`crate::guard`] asks the engine for
+//! each wait.
 //!
 //! Feature `sandbox` builds the tool. Without it, [`Runtime`] has no value,
 //! so the compiler drops each path that runs code, and a `[sandbox]`
@@ -28,9 +30,9 @@ use autumn_harvest::sandbox::{
 use autumn_harvest_agent::AgentHarness;
 #[cfg(feature = "sandbox")]
 use autumn_harvest_agent::sandbox::SandboxTool;
-use littleguy_core::SandboxConfig;
 #[cfg(feature = "sandbox")]
 use littleguy_core::{FirecrackerConfig, SandboxBackend};
+use littleguy_core::{SandboxApprove, SandboxConfig};
 
 /// The name of the tool. The engine names it the same way, and a test
 /// checks that.
@@ -61,6 +63,14 @@ pub fn share(runtime: Option<&Runtime>) -> Option<Runtime> {
 #[must_use]
 pub const fn share(_runtime: Option<&Runtime>) -> Option<Runtime> {
     None
+}
+
+/// Whether each `run_code` call of `config` waits for a person. With
+/// `approve = "untrusted"`, a call waits only once the conversation holds
+/// untrusted input ([`crate::guard::Untrusted`]).
+#[must_use]
+pub fn always_asks(config: Option<&SandboxConfig>) -> bool {
+    config.is_some_and(|config| config.approve == SandboxApprove::Always)
 }
 
 /// Gives `harness` the `run_code` tool on `runtime`, if any.

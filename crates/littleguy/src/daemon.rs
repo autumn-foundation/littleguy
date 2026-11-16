@@ -603,6 +603,7 @@ impl Daemon {
             verdict: Arc::default(),
             #[cfg(feature = "skills")]
             skills_dir: crate::plans::SkillsDir::default(),
+            untrusted: Arc::default(),
         };
         let built = kit.assemble(config, &chats)?;
         sqlite::register(&mut rt, Arc::new(built.harness));
@@ -888,6 +889,11 @@ impl Daemon {
         sqlite::drive(&mut self.rt, &id).await?;
         let before = sqlite::state(&self.rt, &id).await?;
         let failures_before = before.as_ref().map_or(0, |state| state.failures);
+        // The engine keeps the labels of the run. They say at the start of
+        // each op whether the conversation holds untrusted input.
+        self.kit
+            .untrusted
+            .reset(before.as_ref().map(|state| &state.flow_labels));
         // With no run yet, nothing can run before this op: the first run
         // that writes is its run.
         match &before {

@@ -1,7 +1,9 @@
 //! The calls that wait for a person: `run_code` and each call that a flow
 //! rule holds.
 //!
-//! Two things make a call wait. The `run_code` tool always asks. A flow
+//! Two things make a call wait. The `run_code` tool asks for each call, or
+//! with `approve = "untrusted"` once the conversation holds untrusted input
+//! ([`Untrusted`], ADR 0033). A flow
 //! rule asks when a call would complete a dangerous label set, such as the
 //! Rule of Two. The engine decides both, and names the wait. It does not
 //! show the call. So [`ApprovalGate`] records each call that may wait,
@@ -15,15 +17,69 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use autumn_harvest_agent::flow::{FlowRules, effect_label};
+use autumn_harvest_agent::flow::{FlowRules, effect_label, labels};
 use autumn_harvest_agent::{
     AgentHarness, AgentProfile, BoxFuture, Rule, RunInfo, Tool, ToolCall, ToolDecision, ToolPolicy,
 };
 use littleguy_stores::SqliteStores;
 
 use crate::sandbox::{ASK_REASON, Runtime, TOOL};
+
+/// The reason that a `run_code` call waits under `approve = "untrusted"`.
+pub const UNTRUSTED_CODE_REASON: &str =
+    "the assistant wants to run code, and the conversation holds outside text";
+
+/// Whether the conversation holds untrusted input, for `approve =
+/// "untrusted"` (ADR 0033).
+///
+/// The gate cannot see the labels of the run. So it marks this when it lets
+/// a call with [`labels::UNTRUSTED_INPUT`] run, and the daemon sets it from
+/// the labels that the engine keeps at the start of each op. A run that
+/// read outside text keeps the mark until its transcript resets.
+#[derive(Debug, Default)]
+pub struct Untrusted {
+    seen: AtomicBool,
+}
+
+impl Untrusted {
+    /// Whether the conversation holds untrusted input.
+    #[must_use]
+    pub fn seen(&self) -> bool {
+        self.seen.load(Ordering::SeqCst)
+    }
+
+    /// Marks that the conversation holds untrusted input.
+    pub fn see(&self) {
+        self.seen.store(true, Ordering::SeqCst);
+    }
+
+    /// Sets the mark from the labels of the run, at the start of an op.
+    pub fn reset(&self, labels: Option<&BTreeSet<String>>) {
+        let seen = labels.is_some_and(|labels| labels.contains(labels::UNTRUSTED_INPUT));
+        self.seen.store(seen, Ordering::SeqCst);
+    }
+}
+
+/// When a `run_code` call waits.
+#[derive(Debug, Clone)]
+pub enum Code {
+    /// There is no `run_code` tool.
+    Off,
+    /// Each call waits.
+    Always,
+    /// A call waits once the conversation holds untrusted input. Without
+    /// flow rules the engine keeps no labels, so nothing says that the
+    /// conversation is clean, and each call waits.
+    Untrusted {
+        /// The mark that the gate and the daemon share.
+        seen: Arc<Untrusted>,
+        /// Whether the run keeps labels at all.
+        tracked: bool,
+    },
+}
 
 /// The reason of a call that a flow rule may hold, for the approver.
 pub const FLOW_REASON: &str = "a flow rule holds this call: the conversation would hold \
@@ -41,6 +97,9 @@ pub struct Guard {
     pub flow: FlowRules,
     /// The runtime of the `run_code` tool, when the sandbox is on.
     pub sandbox: Option<Runtime>,
+    /// With `approve = "untrusted"`, the mark of untrusted input. `None`
+    /// makes each `run_code` call wait (ADR 0033).
+    pub untrusted: Option<Arc<Untrusted>>,
     /// The integration tools that are on, whose calls always wait.
     pub always: Always,
 }
@@ -96,9 +155,16 @@ impl Guard {
         mut harness: AgentHarness,
         profile: AgentProfile,
     ) -> (AgentHarness, AgentProfile) {
-        let run_code = self.sandbox.is_some();
+        let code = match (self.sandbox.is_some(), self.untrusted) {
+            (false, _) => Code::Off,
+            (true, None) => Code::Always,
+            (true, Some(seen)) => Code::Untrusted {
+                seen,
+                tracked: !self.flow.is_empty(),
+            },
+        };
         harness = crate::sandbox::give(harness, self.sandbox);
-        let gate = ApprovalGate::new(self.stores, run_code, self.always, &self.flow);
+        let gate = ApprovalGate::new(self.stores, code, self.always, &self.flow);
         if !self.flow.is_empty() {
             harness = harness.flow_rules(self.flow);
         }
@@ -118,23 +184,18 @@ impl Guard {
 #[derive(Debug)]
 pub struct ApprovalGate {
     stores: Arc<SqliteStores>,
-    run_code: bool,
+    code: Code,
     always: Always,
     watched: BTreeSet<String>,
 }
 
 impl ApprovalGate {
-    /// A gate that records in `stores`. With `run_code`, each `run_code`
-    /// call waits. With `always.google`, each mail send and each invite
+    /// A gate that records in `stores`. `code` says when a `run_code` call
+    /// waits. With `always.google`, each mail send and each invite
     /// waits, and with `always.api` each `api_send`. Each call with a label
     /// of a rule in `flow` is recorded.
     #[must_use]
-    pub fn new(
-        stores: Arc<SqliteStores>,
-        run_code: bool,
-        always: Always,
-        flow: &FlowRules,
-    ) -> Self {
+    pub fn new(stores: Arc<SqliteStores>, code: Code, always: Always, flow: &FlowRules) -> Self {
         let watched = flow
             .rules()
             .iter()
@@ -143,7 +204,7 @@ impl ApprovalGate {
             .collect();
         Self {
             stores,
-            run_code,
+            code,
             always,
             watched,
         }
@@ -151,8 +212,16 @@ impl ApprovalGate {
 
     /// Why `call` always waits for a person, or `None`.
     fn ask_reason(&self, call: &ToolCall) -> Option<&'static str> {
-        if self.run_code && call.name == TOOL {
-            return Some(ASK_REASON);
+        if call.name == TOOL {
+            match &self.code {
+                Code::Off => {}
+                Code::Always => return Some(ASK_REASON),
+                Code::Untrusted { seen, tracked } => {
+                    if !tracked || seen.seen() {
+                        return Some(UNTRUSTED_CODE_REASON);
+                    }
+                }
+            }
         }
         if self.always.api
             && let Some(reason) = api_reason(call)
@@ -201,6 +270,17 @@ impl ApprovalGate {
         let refused = || ToolDecision::Deny {
             reason: String::from("the call could not be recorded for approval, so it did not run"),
         };
+        // A call that brings outside text marks the conversation, before it
+        // runs, so a later run_code call in the same op waits.
+        if let Code::Untrusted { seen, .. } = &self.code
+            && tool.is_some_and(|tool| {
+                tool.labels()
+                    .iter()
+                    .any(|label| label == labels::UNTRUSTED_INPUT)
+            })
+        {
+            seen.see();
+        }
         if let Some(reason) = self.ask_reason(call) {
             if !self.record(call, reason) {
                 return refused();
@@ -301,7 +381,7 @@ mod tests {
         let stores = crate::memory::open(&dir.path().join("lg.db"), None).unwrap();
         let gate = ApprovalGate::new(
             Arc::clone(&stores),
-            false,
+            Code::Off,
             Always::default(),
             &FlowRules::rule_of_two(),
         );
@@ -336,7 +416,7 @@ mod tests {
         assert_eq!(gate.decide_call(&send, None), ToolDecision::Allow);
         let mailing = ApprovalGate::new(
             stores,
-            false,
+            Code::Off,
             Always {
                 google: true,
                 api: false,
@@ -367,14 +447,14 @@ mod tests {
         };
         let off = ApprovalGate::new(
             Arc::clone(&stores),
-            false,
+            Code::Off,
             Always::default(),
             &FlowRules::new(),
         );
         assert_eq!(off.decide_call(&call(SEND_TOOL), None), ToolDecision::Allow);
         let on = ApprovalGate::new(
             stores,
-            false,
+            Code::Off,
             Always {
                 google: true,
                 api: true,

@@ -133,6 +133,7 @@ button:disabled {
 }
 
 #thread,
+#pending,
 #thinking,
 #composer {
   max-width: 46rem;
@@ -143,6 +144,46 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
+}
+
+/* The calls that wait, under the thread. */
+#pending {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+#pending:not(:empty) {
+  margin-top: 0.9rem;
+}
+
+.approval .body {
+  border-color: var(--accent);
+}
+
+.approval pre {
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--bg);
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+}
+
+.approval .actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.approval button.approve {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: transparent;
+}
+
+.approval.decided .dot {
+  display: inline-block;
+  margin-right: 0.25rem;
 }
 
 .empty {
@@ -220,7 +261,8 @@ button:disabled {
   display: flex;
 }
 
-#thinking .dot {
+#thinking .dot,
+.approval .dot {
   width: 0.45rem;
   height: 0.45rem;
   border-radius: 50%;
@@ -228,11 +270,13 @@ button:disabled {
   animation: blink 1.2s infinite ease-in-out;
 }
 
-#thinking .dot:nth-child(2) {
+#thinking .dot:nth-child(2),
+.approval .dot:nth-of-type(2) {
   animation-delay: 0.15s;
 }
 
-#thinking .dot:nth-child(3) {
+#thinking .dot:nth-child(3),
+.approval .dot:nth-of-type(3) {
   animation-delay: 0.3s;
 }
 
@@ -253,7 +297,8 @@ button:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  #thinking .dot {
+  #thinking .dot,
+  .approval .dot {
     animation: none;
   }
 }

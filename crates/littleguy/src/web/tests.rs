@@ -66,14 +66,24 @@ async fn rig_on(
     slack: Option<&str>,
     model: Arc<dyn autumn_harvest_agent::AgentModel>,
 ) -> Rig {
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("lg.db");
-    let plan = Plan::of(config);
-    let logins = Logins::new(base_url(plan.bind));
     let extras = daemon::Extras {
         slack: slack.is_some(),
         ..daemon::Extras::default()
     };
+    rig_extras(config, slack, model, extras).await
+}
+
+/// A rig whose daemon opens with `extras`.
+async fn rig_extras(
+    config: &Config,
+    slack: Option<&str>,
+    model: Arc<dyn autumn_harvest_agent::AgentModel>,
+    extras: daemon::Extras,
+) -> Rig {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lg.db");
+    let plan = Plan::of(config);
+    let logins = Logins::new(base_url(plan.bind));
     let daemon = Daemon::open_with(&db, config, model, UID, false, extras)
         .unwrap()
         .with_logins(logins.clone());
@@ -1088,6 +1098,127 @@ async fn new_conversation_starts_the_thread_over() {
     rig.client.log_out();
     rig.client
         .post("/new")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(401);
+}
+
+/// A sandbox backend that runs nothing and prints `hi`.
+#[cfg(feature = "sandbox")]
+#[derive(Debug)]
+struct Echo;
+
+#[cfg(feature = "sandbox")]
+impl autumn_harvest::sandbox::SandboxBackend for Echo {
+    fn isolation(&self) -> autumn_harvest::sandbox::IsolationLevel {
+        autumn_harvest::sandbox::IsolationLevel::Process
+    }
+
+    fn execute(
+        &self,
+        _job: autumn_harvest::sandbox::SandboxJob,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> autumn_harvest::sandbox::runtime::BoxFuture<
+        '_,
+        Result<autumn_harvest::sandbox::SandboxOutcome, autumn_harvest::sandbox::SandboxError>,
+    > {
+        use autumn_harvest::sandbox::{IsolationLevel, RunStatus, SandboxOutcome};
+        Box::pin(std::future::ready(Ok(SandboxOutcome {
+            status: RunStatus::Exited { code: 0 },
+            stdout: String::from("hi\n"),
+            stderr: String::new(),
+            stdout_bytes: 3,
+            stderr_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            outputs: Vec::new(),
+            skipped_outputs: Vec::new(),
+            duration_ms: 1,
+            isolation: IsolationLevel::Process,
+            image: None,
+        })))
+    }
+}
+
+#[cfg(feature = "sandbox")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_that_waits_is_decided_in_the_chat() {
+    let mut config = config(false);
+    config.tools.files = false;
+    config.sandbox = Some(littleguy_core::SandboxConfig {
+        backend: littleguy_core::SandboxBackend::Process,
+        network: false,
+        approve: littleguy_core::SandboxApprove::Always,
+    });
+    let runtime = crate::sandbox::runtime_on(
+        Arc::new(Echo) as Arc<dyn autumn_harvest::sandbox::SandboxBackend>,
+        config.sandbox.as_ref().unwrap(),
+    )
+    .unwrap();
+    let extras = daemon::Extras {
+        sandbox: Some(runtime),
+        ..daemon::Extras::default()
+    };
+    let rig = rig_extras(&config, None, Arc::new(Saver), extras).await;
+    let token = sign_in(&rig).await;
+
+    // No call waits: the chat shows no card.
+    let home = rig.client.get("/").send().await;
+    assert_eq!(home.selector_count("#pending .approval"), 0);
+
+    let events = chat(
+        &rig,
+        &token,
+        r#"use run_code {"runtime": "sh", "code": "echo hi"}"#,
+    )
+    .await;
+    assert!(
+        shown(&events).contains("Decide it below"),
+        "the answer points to the card"
+    );
+    let pending = rig.client.get("/chat/pending").send().await;
+    assert_eq!(pending.selector_count("#pending .approval"), 1);
+    pending.assert_body_contains("echo hi");
+    let approve = pending.selector_attr("button.approve", "hx-post");
+    let approve = approve.into_iter().flatten().next().unwrap();
+    // The page shows the card too, after a reload.
+    let home = rig.client.get("/").send().await;
+    assert_eq!(home.selector_count("#pending .approval"), 1);
+
+    let pressed = rig
+        .client
+        .post(&approve)
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    pressed.assert_status(200);
+    pressed.assert_body_contains("littleguy goes on");
+    let result = pressed.selector_attr(".approval.decided", "hx-get");
+    let result = result.into_iter().flatten().next().unwrap();
+    let mut answer = None;
+    for _ in 0..200 {
+        let polled = rig.client.get(&result).send().await;
+        if polled.status.as_u16() == 200 {
+            answer = Some(polled);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let answer = answer.unwrap();
+    // The answer joins the thread, and no card is left.
+    answer.assert_body_contains("beforeend:#thread");
+    answer.assert_body_contains("saved");
+    assert_eq!(answer.selector_count("#pending .approval"), 0);
+
+    rig.client.log_out();
+    rig.client
+        .get("/chat/pending")
+        .send()
+        .await
+        .assert_status(401);
+    rig.client
+        .post(&approve)
         .header("X-CSRF-Token", &token)
         .send()
         .await

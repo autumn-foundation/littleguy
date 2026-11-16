@@ -160,7 +160,8 @@ bind = "127.0.0.1:3004"
 # [sandbox]
 # backend = "process"
 # network = false                   ## the code gets no network
-# approve = "always"                ## or "untrusted": ask only after outside text (ADR 0033)
+# approve = "always"                ## or "untrusted": ask only after outside text (ADR 0033),
+                                    ## or "auto": a reviewer model decides first (ADR 0037)
 
 ## ------------------------------------------------------- outside services
 

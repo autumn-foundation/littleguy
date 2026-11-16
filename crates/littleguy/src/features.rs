@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 23] = [
+pub const ALL: [Feature; 24] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -51,6 +51,10 @@ pub const ALL: [Feature; 23] = [
     Feature {
         name: "sandbox",
         on: cfg!(feature = "sandbox"),
+    },
+    Feature {
+        name: "auto-approve",
+        on: cfg!(feature = "auto-approve"),
     },
     Feature {
         name: "refine",
@@ -143,6 +147,14 @@ pub fn check(config: &Config) -> Result<()> {
         (config.api.is_some(), "[api]", "api"),
         (!config.mcp.is_empty(), "[[mcp.server]]", "mcp"),
         (config.sandbox.is_some(), "[sandbox]", "sandbox"),
+        (
+            config
+                .sandbox
+                .as_ref()
+                .is_some_and(|sandbox| sandbox.approve == littleguy_core::SandboxApprove::Auto),
+            "approve = \"auto\"",
+            "auto-approve",
+        ),
         (config.refine.is_some(), "[refine]", "refine"),
         (config.heartbeat.is_some(), "[heartbeat]", "heartbeat"),
         (config.skills.dir.is_some(), "[skills]", "skills"),

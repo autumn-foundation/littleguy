@@ -796,3 +796,248 @@ async fn the_mark_of_outside_text_survives_a_restart() {
         "the engine keeps the transcript, so the new daemon knows"
     );
 }
+
+/// A reviewer that gives one answer, or fails, and keeps what it read.
+#[cfg(feature = "auto-approve")]
+#[derive(Debug, Default)]
+struct Reviewer {
+    answer: Option<&'static str>,
+    read: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(feature = "auto-approve")]
+impl Reviewer {
+    fn says(answer: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            answer: Some(answer),
+            read: std::sync::Mutex::default(),
+        })
+    }
+
+    fn read(&self) -> Vec<String> {
+        self.read.lock().unwrap().clone()
+    }
+}
+
+#[cfg(feature = "auto-approve")]
+impl AgentModel for Reviewer {
+    fn chat<'a>(
+        &'a self,
+        request: &'a autumn_harvest_agent::ChatRequest,
+    ) -> autumn_harvest_agent::BoxFuture<
+        'a,
+        Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+    > {
+        use autumn_harvest_agent::{ChatResponse, ContentPart, StopReason, TokenUsage};
+        let text: String = request
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|part| match part {
+                ContentPart::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.read.lock().unwrap().push(text);
+        let answer = self.answer;
+        Box::pin(async move {
+            let answer = answer.ok_or_else(|| {
+                autumn_harvest_agent::AgentError::new(
+                    autumn_harvest_agent::ErrorKind::Transport,
+                    "the reviewer is down",
+                )
+            })?;
+            Ok(ChatResponse {
+                content: vec![ContentPart::Text(answer.to_owned())],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::new(1, 1),
+            })
+        })
+    }
+}
+
+/// A daemon with `approve = "auto"`, the `page` tool and `reviewer`.
+#[cfg(feature = "auto-approve")]
+fn open_reviewed(db: &Path, backend: &Arc<CountingBackend>, reviewer: &Arc<Reviewer>) -> Daemon {
+    let mut config = sandbox_config(None, 3600);
+    if let Some(sandbox) = config.sandbox.as_mut() {
+        sandbox.approve = littleguy_core::SandboxApprove::Auto;
+    }
+    let runtime = crate::sandbox::runtime_on(
+        Arc::clone(backend) as Arc<dyn SandboxBackend>,
+        config.sandbox.as_ref().unwrap(),
+    )
+    .unwrap();
+    let page = Page {
+        labels: vec![String::from(
+            autumn_harvest_agent::flow::labels::UNTRUSTED_INPUT,
+        )],
+    };
+    let extras = Extras {
+        sandbox: Some(runtime),
+        mcp: vec![Arc::new(page)],
+        reviewer: Some(Arc::clone(reviewer) as Arc<dyn AgentModel>),
+        ..Extras::default()
+    };
+    Daemon::open_with(
+        db,
+        &config,
+        Arc::new(MemoryModel::default()),
+        UID,
+        false,
+        extras,
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "auto-approve")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_reviewer_approves_and_the_code_runs_with_no_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let reviewer = Reviewer::says(r#"{"decision": "approve", "reason": "the owner asked"}"#);
+    let mut daemon = open_reviewed(&dir.path().join("lg.db"), &backend, &reviewer);
+
+    // Before outside text, code runs and nobody reviews it.
+    let ran = daemon
+        .handle_request(UID, request("a-1", "run echo hi"))
+        .await;
+    assert_eq!(reply_text(&ran), "ran: hi");
+    assert_eq!(
+        reviewer.read(),
+        Vec::<String>::new(),
+        "a clean call needs no review"
+    );
+
+    daemon.handle_request(UID, request("a-2", "use page")).await;
+    let ran = daemon
+        .handle_request(UID, request("a-3", "run echo hi"))
+        .await;
+    assert_eq!(reply_text(&ran), "ran: hi", "the reviewer approved it");
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 2);
+
+    // The reviewer read the owner's words and the call, not the page.
+    let read = reviewer.read();
+    assert_eq!(read.len(), 1);
+    assert!(
+        read[0].contains("use page"),
+        "an earlier message of the owner"
+    );
+    assert!(read[0].contains("run echo hi"), "the message in flight");
+    assert!(read[0].contains("run_code"), "the call");
+    assert!(
+        !read[0].contains("a page"),
+        "the text of the page stays out"
+    );
+    let approvals = daemon.handle_request(UID, Request::Approvals).await;
+    assert_eq!(
+        approvals,
+        Response::Approvals {
+            entries: Vec::new()
+        }
+    );
+}
+
+#[cfg(feature = "auto-approve")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_reviewer_denies_and_the_code_never_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let reviewer = Reviewer::says(r#"{"decision": "deny", "reason": "it posts the database"}"#);
+    let mut daemon = open_reviewed(&dir.path().join("lg.db"), &backend, &reviewer);
+    daemon.handle_request(UID, request("d-1", "use page")).await;
+    let answer = daemon
+        .handle_request(UID, request("d-2", "run echo hi"))
+        .await;
+    assert!(
+        !matches!(answer, Response::Waiting { .. }),
+        "nobody waits for a denied call"
+    );
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 0);
+    let next = daemon.handle_request(UID, request("d-3", "hello")).await;
+    assert_eq!(reply_text(&next), "ok: hello", "the assistant goes on");
+}
+
+#[cfg(feature = "auto-approve")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsure_or_failing_reviewer_leaves_the_call_to_the_owner() {
+    for (reviewer, why) in [
+        (
+            Reviewer::says(r#"{"decision": "ask", "reason": "the owner did not mention code"}"#),
+            "the owner did not mention code",
+        ),
+        (
+            Arc::new(Reviewer::default()),
+            "the reviewer's model call failed",
+        ),
+        (Reviewer::says("sure thing"), "did not parse"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(CountingBackend::default());
+        let mut daemon = open_reviewed(&dir.path().join("lg.db"), &backend, &reviewer);
+        daemon.handle_request(UID, request("u-1", "use page")).await;
+        let waiting = daemon
+            .handle_request(UID, request("u-2", "run echo hi"))
+            .await;
+        let Response::Waiting { approval } = waiting else {
+            panic!("the owner decides");
+        };
+        let Response::Approvals { entries } = daemon.handle_request(UID, Request::Approvals).await
+        else {
+            panic!("no approvals");
+        };
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].text.starts_with("The reviewer is unsure: "));
+        assert!(entries[0].text.contains(why));
+        // A later settle reviews nothing again.
+        daemon.handle_request(UID, request("u-3", "hello")).await;
+        assert_eq!(reviewer.read().len(), 1, "one review per call");
+        daemon
+            .handle_request(UID, Request::Approve { id: approval })
+            .await;
+        assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(feature = "auto-approve")]
+#[tokio::test(flavor = "multi_thread")]
+async fn without_auto_the_reviewer_is_never_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let reviewer = Reviewer::says(r#"{"decision": "approve", "reason": "x"}"#);
+    let mut config = sandbox_config(None, 3600);
+    if let Some(sandbox) = config.sandbox.as_mut() {
+        sandbox.approve = littleguy_core::SandboxApprove::Untrusted;
+    }
+    let runtime = crate::sandbox::runtime_on(
+        Arc::clone(&backend) as Arc<dyn SandboxBackend>,
+        config.sandbox.as_ref().unwrap(),
+    )
+    .unwrap();
+    let extras = Extras {
+        sandbox: Some(runtime),
+        mcp: vec![Arc::new(Page {
+            labels: vec![String::from(
+                autumn_harvest_agent::flow::labels::UNTRUSTED_INPUT,
+            )],
+        })],
+        reviewer: Some(Arc::clone(&reviewer) as Arc<dyn AgentModel>),
+        ..Extras::default()
+    };
+    let mut daemon = Daemon::open_with(
+        &dir.path().join("lg.db"),
+        &config,
+        Arc::new(MemoryModel::default()),
+        UID,
+        false,
+        extras,
+    )
+    .unwrap();
+    daemon.handle_request(UID, request("n-1", "use page")).await;
+    let waiting = daemon
+        .handle_request(UID, request("n-2", "run echo hi"))
+        .await;
+    assert!(matches!(waiting, Response::Waiting { .. }));
+    assert_eq!(reviewer.read(), Vec::<String>::new(), "no review");
+}

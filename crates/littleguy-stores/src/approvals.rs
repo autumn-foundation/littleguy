@@ -245,6 +245,22 @@ impl SqliteStores {
         })
     }
 
+    /// Sets the reason of the open record `id`, such as when a reviewer
+    /// leaves the call to a person and says why.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot write.
+    pub fn note_approval(&self, id: i64, reason: &str) -> Result<(), AgentError> {
+        self.write(|tx| {
+            tx.execute(
+                "UPDATE approvals SET reason = ?1 WHERE id = ?2 AND closed = 0",
+                params![reason, id],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Records that the wait of `id` ended.
     ///
     /// # Errors

@@ -266,7 +266,7 @@ const SLACK_SECRET_VAR: &str = "SLACK_SIGNING_SECRET";
 #[cfg(feature = "claude")]
 const TURN_DIR: &str = "claude-turns";
 
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Clone, clap::Args)]
 struct ServeArgs {
     /// The config file. Defaults to `<config home>/littleguy/lg.toml`.
     #[arg(long, env = "LG_CONFIG")]
@@ -282,6 +282,12 @@ struct ServeArgs {
     /// such as `<vendor>/<model>`.
     #[arg(long, env = "LG_MODEL_NAME", alias = "claude-model")]
     model_name: Option<String>,
+    /// The model of the reviewer of `[sandbox] approve = "auto"`, on the
+    /// provider of `--model`. Defaults to the model of the assistant. A
+    /// small, fast model fits: it answers one short judgment per call.
+    #[cfg(feature = "auto-approve")]
+    #[arg(long, env = "LG_REVIEWER_MODEL_NAME")]
+    reviewer_model_name: Option<String>,
     /// The base URL of an OpenAI-compatible server, such as a local one.
     /// Defaults to the provider's own.
     #[arg(long, env = "LG_BASE_URL")]
@@ -411,6 +417,29 @@ fn build_model(
             Arc::new(model)
         }
     })
+}
+
+/// The model of the reviewer, when `args` names one: the provider of the
+/// assistant with another model name (ADR 0037).
+#[cfg(feature = "auto-approve")]
+fn build_reviewer(
+    args: &ServeArgs,
+    db: &Path,
+    key: impl Fn(&str) -> Option<String>,
+) -> Result<Option<Arc<dyn AgentModel>>> {
+    let Some(name) = &args.reviewer_model_name else {
+        return Ok(None);
+    };
+    let reviewer = ServeArgs {
+        model_name: Some(name.clone()),
+        // The reviewer answers one short judgment, so it thinks as its
+        // model does by default.
+        reasoning: None,
+        ..args.clone()
+    };
+    build_model(&reviewer, db, key)
+        .map(Some)
+        .context("--reviewer-model-name")
 }
 
 /// The Discord link, when `key` holds a bot token.
@@ -647,6 +676,8 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         tenant: tenant.as_ref().map(|tenant| tenant.path().to_path_buf()),
         #[cfg(not(feature = "fleet"))]
         tenant: None,
+        #[cfg(feature = "auto-approve")]
+        reviewer: build_reviewer(&args, &db, |var| std::env::var(var).ok())?,
     };
     #[cfg(feature = "discord")]
     let discord = links.discord.is_some();
@@ -829,6 +860,39 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("none.json"), "{error}");
+    }
+
+    #[cfg(all(feature = "auto-approve", feature = "openai"))]
+    #[test]
+    fn the_reviewer_runs_on_the_provider_of_the_assistant() {
+        let db = Path::new("/d/lg.db");
+        let key = |var: &str| (var == "OPENROUTER_API_KEY").then(|| String::from("k"));
+        let plain = serve_args(&[
+            "lg",
+            "serve",
+            "--model",
+            "openrouter",
+            "--model-name",
+            "a/b",
+        ]);
+        assert!(
+            build_reviewer(&plain, db, key).unwrap().is_none(),
+            "no flag, no own model"
+        );
+        let args = serve_args(&[
+            "lg",
+            "serve",
+            "--model",
+            "openrouter",
+            "--model-name",
+            "a/b",
+            "--reviewer-model-name",
+            "typesafe/jev-router",
+        ]);
+        let reviewer = build_reviewer(&args, db, key).unwrap().unwrap();
+        assert_eq!(reviewer.model_id(), Some("openrouter:typesafe/jev-router"));
+        let error = build_reviewer(&args, db, |_| None).err().unwrap();
+        assert!(format!("{error:#}").contains("--reviewer-model-name"));
     }
 
     fn serve_args(words: &[&str]) -> ServeArgs {

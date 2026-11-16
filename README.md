@@ -497,6 +497,32 @@ but it can still read and write the databases.
 [ADR 0036](docs/adr/0036-the-mark-of-outside-text-belongs-to-the-conversation.md)
 explain the design.
 
+To approve less still, let a reviewer model decide first:
+
+```toml
+[sandbox]
+backend = "process"
+approve = "auto"
+```
+
+With `"auto"`, code runs unasked as with `"untrusted"`. Each call that
+would wait for you goes to a reviewer first: any call that waits, also one
+that a flow rule holds. The reviewer reads your last six messages and the
+call, and nothing that the assistant read. So a page can steer the
+assistant, but it cannot talk to the reviewer. A call that plainly does
+what you asked runs. A call that works against you is denied, and the
+assistant reads why. When the reviewer cannot tell, or its model fails,
+the call waits for you as before, and the card says why. The log keeps
+each decision with its reason. The reviewer runs on the model of the
+assistant, or on another model of the same provider:
+
+```sh
+lg serve --model openrouter --model-name <vendor>/<model> --reviewer-model-name <vendor>/<small model>
+```
+
+`LG_REVIEWER_MODEL_NAME` sets it too.
+[ADR 0037](docs/adr/0037-a-reviewer-decides-first.md) explains the design.
+
 ## Run it in a container
 
 The `process` sandbox backend runs only on Linux. On a Mac, the container

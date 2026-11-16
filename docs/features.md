@@ -43,6 +43,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | Feature | Default | What it builds | Crates it adds |
 |---|---|---|---|
 | `api` | no | `[api]`: `api_get` and `api_send` on any San Mateo integration (ADR 0031). Needs `oauth`. | `axum`, `san-mateo`, `san-mateo-sqlite`, `url` |
+| `auto-approve` | yes | `[sandbox] approve = "auto"`: a reviewer model decides each call that waits, and asks the owner only when it is unsure (ADR 0037). | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `camel` | no | `[[camel.route]]`: Apache Camel routes that feed the assistant. | `autumn-harvest-plugin`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `harvest-camel` |
 | `claude` | yes | `--model claude`: Claude over the Messages API. | `reqwest`, `rustls`, `sha2` |
 | `council` | yes | `[council]`: model calls that decide clean proposals of goals and skills for the owner (ADR 0027). | none |

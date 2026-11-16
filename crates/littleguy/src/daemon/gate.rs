@@ -34,6 +34,19 @@ pub enum PressAnswer {
     Private(String),
 }
 
+/// The signal and the call id of the approval that a run waits on, if any.
+type Wait = Option<(String, String)>;
+
+/// The wait of `run`.
+fn wait_of(run: Option<&RunState>) -> Wait {
+    match run {
+        Some(RunState::WaitingSignal(signal)) => {
+            approval_call_id(signal).map(|call| (signal.clone(), call.to_owned()))
+        }
+        _ => None,
+    }
+}
+
 /// The sent-report key of the notice of `id`.
 fn notice_key(id: i64) -> String {
     format!("approval-notice:{id}")
@@ -124,12 +137,13 @@ impl Daemon {
     ///
     /// Each open record that the run no longer waits on closes, and its
     /// answer goes to its requester. A new wait claims its record for
-    /// `requester`, and the approver gets a notice once. Returns the
-    /// request that the run waits on.
+    /// `requester`. With `approve = "auto"`, the reviewer decides it first,
+    /// and the run goes on until a call waits for the owner. The approver
+    /// gets a notice once. Returns the request that the run waits on.
     ///
     /// # Errors
     ///
-    /// Returns an error when the store fails.
+    /// Returns an error when the store or the runtime fails.
     pub(super) async fn settle(
         &mut self,
         run: Option<&RunState>,
@@ -138,19 +152,88 @@ impl Daemon {
         let Some(stores) = self.approvals.clone() else {
             return Ok(None);
         };
-        let wait = match run {
-            Some(RunState::WaitingSignal(signal)) => {
-                approval_call_id(signal).map(|call| (signal.clone(), call.to_owned()))
+        let mut wait = wait_of(run);
+        loop {
+            let Some(record) = self.claim(&stores, wait.take(), requester).await? else {
+                // No op waits, so no op is in flight.
+                self.op_words = None;
+                return Ok(None);
+            };
+            let id = record.id;
+            if let Some(next) = self.reviewed(&record).await? {
+                wait = next;
+                continue;
             }
-            _ => None,
+            // The reviewer may have noted why the owner decides.
+            let record = stores.approval(id)?.unwrap_or(record);
+            let approver = self.approver.clone();
+            let chats = Arc::clone(&self.chats);
+            if !stores.was_sent(&notice_key(id))? && notify(approver, &chats, &record).await {
+                stores.mark_sent(&notice_key(id))?;
+            }
+            self.waiting = Some(id);
+            return Ok(Some(id));
+        }
+    }
+
+    /// With `approve = "auto"`, lets the reviewer decide `record`, and drives
+    /// the run on. Returns the wait after the drive, or `None` when the
+    /// owner decides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store or the runtime fails.
+    #[cfg(feature = "auto-approve")]
+    async fn reviewed(&mut self, record: &ApprovalRecord) -> Result<Option<Wait>> {
+        let Some(choice) = self.review(record).await? else {
+            return Ok(None);
         };
+        match self.decide(record.id, &choice)? {
+            Ok(_) => {
+                let run = sqlite::drive(&mut self.rt, self.routing.assistant()).await?;
+                Ok(Some(wait_of(run.as_ref())))
+            }
+            Err(text) => {
+                tracing::warn!(
+                    approval = record.id,
+                    text,
+                    "the reviewer's decision did not go through"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Without the reviewer, the owner decides each call.
+    #[cfg(not(feature = "auto-approve"))]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        clippy::unused_self,
+        reason = "it stands in for the reviewer of the auto-approve feature"
+    )]
+    fn reviewed(&mut self, _record: &ApprovalRecord) -> std::future::Ready<Result<Option<Wait>>> {
+        std::future::ready(Ok(None))
+    }
+
+    /// Closes each open record that `wait` does not name, and claims the
+    /// record of `wait` for `requester`. Returns the claimed record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store fails.
+    async fn claim(
+        &mut self,
+        stores: &Arc<SqliteStores>,
+        wait: Wait,
+        requester: Option<&Requester>,
+    ) -> Result<Option<ApprovalRecord>> {
         for record in stores.open_approvals()? {
             let ended = wait.as_ref().map(|(signal, _)| signal) != record.signal.as_ref();
             if ended {
                 let state = sqlite::state(&self.rt, self.routing.assistant());
                 let chats = Arc::clone(&self.chats);
                 // The state query is a large future, so it lives on the heap.
-                Box::pin(finish(&stores, &record, state, &chats)).await?;
+                Box::pin(finish(stores, &record, state, &chats)).await?;
             }
         }
         let Some((signal, call)) = wait else {
@@ -169,14 +252,7 @@ impl Daemon {
                     .claim_approval(&signal, &call, requester.as_deref())?
                     .context("the approval record did not save")?
             };
-        let id = claim.record.id;
-        let approver = self.approver.clone();
-        let chats = Arc::clone(&self.chats);
-        if !stores.was_sent(&notice_key(id))? && notify(approver, &chats, &claim.record).await {
-            stores.mark_sent(&notice_key(id))?;
-        }
-        self.waiting = Some(id);
-        Ok(Some(id))
+        Ok(Some(claim.record))
     }
 
     /// The open records, for `lg approvals`.
@@ -190,10 +266,18 @@ impl Daemon {
             .open_approvals()?
             .into_iter()
             .filter(|record| record.verdict.is_none())
-            .map(|record| ApprovalEntry {
-                id: record.id,
-                tool: record.tool.clone(),
-                text: approvals::describe(&record),
+            .map(|record| {
+                let text = approvals::describe(&record);
+                // A call that the reviewer left to the owner says why.
+                let text = match record.reason.split_once(approvals::REVIEW_UNSURE) {
+                    Some((_, why)) => format!("The reviewer is unsure: {why}\n{text}"),
+                    None => text,
+                };
+                ApprovalEntry {
+                    id: record.id,
+                    tool: record.tool,
+                    text,
+                }
             })
             .collect();
         Ok(Response::Approvals { entries })

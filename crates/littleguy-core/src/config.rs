@@ -1235,6 +1235,9 @@ pub enum SandboxApprove {
     /// A call waits once the conversation holds untrusted input, such as a
     /// web page. Before that, it runs at once.
     Untrusted,
+    /// As `Untrusted`, and a reviewer model decides each call that waits
+    /// first. It asks the owner only when it is unsure (ADR 0037).
+    Auto,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2260,6 +2263,10 @@ mod tests {
             trusting.sandbox.map(|s| s.approve),
             Some(SandboxApprove::Untrusted)
         );
+        let auto =
+            Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprove = \"auto\"")
+                .unwrap();
+        assert_eq!(auto.sandbox.map(|s| s.approve), Some(SandboxApprove::Auto));
         assert!(
             Config::parse(
                 "owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprove = \"never\""

@@ -24,6 +24,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::Web;
+use super::decisions::Poll;
 use crate::client::render;
 use crate::daemon::live::Piece;
 use crate::protocol::{
@@ -85,6 +86,7 @@ pub fn routes() -> Vec<autumn_web::Route> {
         approvals,
         approve,
         deny,
+        decided,
         pairs,
         pair,
         unpair,
@@ -1098,23 +1100,70 @@ async fn approvals(State(state): State<AppState>, session: Session) -> Response 
     show(&state, &session, Section::Approvals).await
 }
 
-/// Approves call `id`.
+/// Approves call `id`. The page does not wait for the run.
 #[post("/approvals/{id}/approve")]
 async fn approve(State(state): State<AppState>, session: Session, Path(id): Path<i64>) -> Response {
-    act(
-        &state,
-        &session,
-        Request::Approve { id },
-        Section::Approvals,
-    )
-    .await
+    decide(&state, &session, id, Request::Approve { id }, "Approved").await
 }
 
-/// Denies call `id`.
+/// Denies call `id`. The page does not wait for the run.
 #[post("/approvals/{id}/deny")]
 async fn deny(State(state): State<AppState>, session: Session, Path(id): Path<i64>) -> Response {
     let request = Request::Deny { id, reason: None };
-    act(&state, &session, request, Section::Approvals).await
+    decide(&state, &session, id, request, "Denied").await
+}
+
+/// How often a decided call asks for its result.
+const RESULT_EVERY: &str = "every 1s";
+
+/// Starts the decision `request` on call `id` and answers at once. The
+/// decision drives the run on, which takes a model turn, so it goes on
+/// while the section asks for its result.
+async fn decide(
+    state: &AppState,
+    session: &Session,
+    id: i64,
+    request: Request,
+    done: &str,
+) -> Response {
+    if !is_owner(session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(state) else {
+        return broken();
+    };
+    let asked = web.clone();
+    web.decisions
+        .start(id, async move { ask(&asked, request).await });
+    let result = format!("/approvals/{id}/result");
+    html! {
+        section #approvals hx-get=(result) hx-trigger=(RESULT_EVERY) hx-swap="outerHTML" {
+            h2 { "Approvals" }
+            p.note { (done) " request #" (id) ". It runs now, and its answer shows here." }
+        }
+    }
+    .into_response()
+}
+
+/// The result of the decision on call `id`. While the run goes on, it
+/// answers with no content, so the section keeps its notice and asks again.
+#[get("/approvals/{id}/result")]
+async fn decided(State(state): State<AppState>, session: Session, Path(id): Path<i64>) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    match web.decisions.take(id) {
+        Poll::Running => StatusCode::NO_CONTENT.into_response(),
+        Poll::Done(answer) => render_section(&web, Section::Approvals, Some(note(&answer)))
+            .await
+            .into_response(),
+        Poll::Unknown => render_section(&web, Section::Approvals, None)
+            .await
+            .into_response(),
+    }
 }
 
 /// The pairing section, with `notice` on top.

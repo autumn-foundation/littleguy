@@ -706,8 +706,9 @@ place at the end. Claude, OpenAI and OpenRouter stream. The workspace page
 lists the files that the assistant keeps with its file tools, and opens
 each one: Markdown renders, and other text shows as it is. The manage page shows the
 calls that wait for approval, who can talk to the assistant, the refine
-overlays and the OAuth connections. The binary holds every script and
-style. The pages serve on a loopback address only:
+overlays and the OAuth connections. An Approve or Deny button answers at
+once: the run goes on behind it, and its answer shows in the section when
+the next model turn ends. The binary holds every script and style. The pages serve on a loopback address only:
 
 ```toml
 [ui]

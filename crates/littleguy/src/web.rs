@@ -8,6 +8,7 @@
 //! The engine runtime stays in the job loop. `HarvestPlugin` cannot run the
 //! durable agent on SQLite yet, so the app does not mount it.
 
+pub mod decisions;
 pub mod hooks;
 pub mod logins;
 mod pages;
@@ -28,6 +29,7 @@ use littleguy_core::Config;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+pub use decisions::Decisions;
 pub use hooks::HookToken;
 pub use logins::Logins;
 #[cfg(feature = "slack")]
@@ -48,6 +50,8 @@ pub struct Web {
     pub logins: Logins,
     /// The chat answers that wait for their stream.
     pub streams: Streams,
+    /// The approvals that a page decided, until their run answers.
+    pub decisions: Decisions,
     /// The bearer token of the hooks, when the hooks serve.
     pub hooks: Option<HookToken>,
     /// The Slack hooks, when Slack runs over the Events API.

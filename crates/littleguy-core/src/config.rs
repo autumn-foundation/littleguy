@@ -2591,6 +2591,43 @@ mod tests {
         assert!(config.sandbox.is_some());
     }
 
+    /// `lg.toml.example` with every setting that is off turned on: each
+    /// line that starts with "# " loses it. Prose starts with "## ".
+    fn example_with_all_on(example: &str) -> String {
+        example
+            .lines()
+            .map(|line| line.strip_prefix("# ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_example_config_parses_as_shipped_and_with_every_section_on() {
+        let example = include_str!("../../../lg.toml.example");
+        let shipped = match Config::parse(example) {
+            Ok(config) => config,
+            Err(error) => panic!("lg.toml.example does not parse: {error}"),
+        };
+        let mut defaults = Config::for_owner(OwnerName::new("mark").unwrap());
+        defaults.system = String::from(DEFAULT_SYSTEM);
+        assert_eq!(shipped, defaults, "each setting that is on is the default");
+        let all = match Config::parse(&example_with_all_on(example)) {
+            Ok(config) => config,
+            Err(error) => panic!("lg.toml.example with every section on does not parse: {error}"),
+        };
+        assert!(all.approvals.approver.is_some());
+        assert!(!all.discord.allowed.is_empty() && !all.slack.allowed.is_empty());
+        assert!(all.brief.is_some() && all.heartbeat.is_some());
+        assert!(all.skills.dir.is_some() && all.refine.is_some() && all.council.is_some());
+        assert!(all.sandbox.is_some() && !all.mcp.is_empty());
+        assert!(
+            all.san_mateo
+                .is_some_and(|s| s.integrations.len() == 2 && s.catalog.is_some())
+        );
+        assert!(all.google.is_some() && all.api.is_some());
+        assert!(!all.camel.is_empty() && all.hooks.is_some());
+    }
+
     #[test]
     fn each_readme_config_block_parses() {
         let readme = include_str!("../../../README.md");

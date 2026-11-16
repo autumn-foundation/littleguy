@@ -17,7 +17,9 @@ cargo run --bin lg -- chat "hello"
 ```
 
 The default model is an offline echo, so it needs no key and no network.
-The owner is `$USER` unless a config file names one.
+The owner is `$USER` unless a config file names one. To set one up, copy
+[`lg.toml.example`](lg.toml.example) to `~/.config/littleguy/lg.toml`
+(see [Config](#config)).
 
 To talk to Claude, set the key and pick the model:
 
@@ -507,11 +509,16 @@ docker compose exec lg lg chat "hi"
 
   ```sh
   docker compose build && docker compose create
+  # Your own config, or the example to start from: lg.toml.example
   docker compose cp ~/.config/littleguy/lg.toml lg:/data/config/littleguy/lg.toml
   # macOS tar adds Apple attributes that the volume refuses, so leave them out.
   tar --no-xattrs --no-mac-metadata --no-acls -C ~/.local/share/littleguy \
     --exclude lg.db.lock --exclude lg.sock -cf - . \
     | docker cp - "$(docker compose ps -aq lg)":/data/share/littleguy
+  # The skills live next to the config, so they come over too.
+  tar --no-xattrs --no-mac-metadata --no-acls --exclude .DS_Store \
+    -C ~/.config/littleguy -cf - skills \
+    | docker cp - "$(docker compose ps -aq lg)":/data/config/littleguy
   # The data and the skills belong to lg. The config stays root's, so code
   # in the sandbox cannot rewrite it (ADR 0032).
   docker compose run --rm --no-deps --user root --entrypoint sh lg -c \
@@ -824,7 +831,18 @@ versions live in `overlays.db` next to the database.
 
 ## Config
 
-`lg serve` reads `<config home>/littleguy/lg.toml` when it exists:
+`lg serve` reads `<config home>/littleguy/lg.toml` when it exists. Start
+from [`lg.toml.example`](lg.toml.example): it has every section, with
+each one explained, the defaults on and the rest commented out. Delete the
+`# ` in front of a setting to turn it on.
+
+```sh
+mkdir -p ~/.config/littleguy
+cp lg.toml.example ~/.config/littleguy/lg.toml
+```
+
+A test parses the example as it ships and with every setting turned on,
+so it always matches what `lg serve` reads. The essentials:
 
 ```toml
 owner = "mark"

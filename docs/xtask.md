@@ -9,4 +9,5 @@
 | `cargo xtask feature-docs [--write]` | Renders the tables of [`features.md`](features.md) from the manifests, and fails when the file differs. `--write` updates the file. |
 | `cargo xtask ci` | `fmt`, then `feature-docs`, then `clippy`, then `test`. Run it before each push. |
 | `cargo xtask coverage [--fail-under N]` | `cargo llvm-cov` with all features over every crate except `xtask`. Fails under N% lines, 85 by default. |
+| `cargo xtask container` | Builds the image of `compose.yaml` and runs the namespace step of a `run_code` call in the `lg` service, as its own compose project. Fails when the container cannot run code. Needs docker; CI does not run it. |
 | `cargo xtask verus` | Downloads the pinned Verus release, checks its SHA-256, and verifies `formal/verus`. Set `VERUS` to use a local binary. |

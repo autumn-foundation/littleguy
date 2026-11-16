@@ -481,11 +481,20 @@ docker compose exec lg lg chat "hi"
 - **Data.** The config, `lg.db`, `memory.db`, the skills and the workspace
   live in the `lg-data` volume, under `/data`. SQLite does not lock well
   across the file sharing of Docker Desktop, so the data stays in the volume
-  and not in a folder of the Mac. To move a littleguy in, stop `lg serve` on
-  the Mac first, then copy `~/.local/share/littleguy` to
-  `/data/share/littleguy` and `~/.config/littleguy` to
-  `/data/config/littleguy` with `docker compose cp`. Only one daemon may run
-  on one database.
+  and not in a folder of the Mac. Only one daemon may run on one database.
+  To move a littleguy in, stop `lg serve` on the Mac first, and copy before
+  the container first starts, so it never opens an empty database:
+
+  ```sh
+  docker compose build && docker compose create
+  docker compose cp ~/.config/littleguy/lg.toml lg:/data/config/littleguy/lg.toml
+  # macOS tar adds Apple attributes that the volume refuses, so leave them out.
+  tar --no-xattrs --no-mac-metadata --no-acls -C ~/.local/share/littleguy \
+    --exclude lg.db.lock --exclude lg.sock -cf - . \
+    | docker cp - "$(docker compose ps -aq lg)":/data/share/littleguy
+  docker compose run --rm --no-deps --user root --entrypoint chown lg -R lg:lg /data
+  docker compose up -d
+  ```
 - **Pages.** They serve on the loopback address of the container. A small
   `pages` service shares its network and forwards to them, and compose
   publishes it on `127.0.0.1:3004` of the Mac only. So the pages stay on
@@ -495,8 +504,15 @@ docker compose exec lg lg chat "hi"
 - **The CLI.** A Unix socket does not cross the file sharing of Docker
   Desktop, so `lg chat`, `lg approve` and the rest run inside the container
   with `docker compose exec lg lg ...`.
-- **Code.** Add `[sandbox]` with `backend = "process"`. Each call still
-  waits for your approval.
+- **Code.** Add `[sandbox]` with `backend = "process"` and restart the
+  container: the sandbox starts only at start, so `lg reload` does not add
+  it. Each call still waits for your approval. The sandbox runs each call
+  in a new user namespace, and the default seccomp profile of Docker blocks
+  that, so `compose.yaml` turns seccomp off for the `lg` service and sets
+  `no-new-privileges`. The code still runs as the `lg` user with no
+  capabilities, and with no network unless `network = true`. The container
+  is the boundary of the code. `cargo xtask container` checks that the
+  image can run code.
 
 On a host that sleeps, such as a Sprite, timers do not fire while it
 sleeps, so the heartbeat, the brief and booked wakes need a cron outside

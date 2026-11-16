@@ -22,6 +22,15 @@ services:
       - SLACK_APP_TOKEN
     volumes:
       - lg-data:/data
+    # The process sandbox runs each run_code call in a new user namespace,
+    # and in a network namespace when the code gets no network. The default
+    # seccomp profile of Docker blocks that, so every call would fail. The
+    # code still runs as lg with no capabilities, and no-new-privileges
+    # stops a setuid program from making it root. `cargo xtask container`
+    # checks this.
+    security_opt:
+      - seccomp=unconfined
+      - no-new-privileges:true
     # The pages serve on the loopback address of the container only. The
     # forwarder below shares its network, and this port reaches the
     # forwarder from the loopback address of this machine only. A port other

@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use smop::prelude::*;
 
+mod container;
 mod features;
 mod verus;
 
@@ -39,6 +40,9 @@ enum Command {
     Features,
     /// Check that `docs/features.md` matches the manifests.
     FeatureDocs(FeatureDocsArgs),
+    /// Build the image of `compose.yaml` and check that its container can
+    /// run code. Needs docker. CI does not run it.
+    Container,
     /// Run fmt, the feature docs check, clippy and test, in that order.
     /// The pre-push gate.
     Ci,
@@ -130,6 +134,7 @@ fn run(command: &Command) -> Result<()> {
         Command::Verus => verus::check(&repo_root()),
         Command::Features => features::check(&repo_root()),
         Command::FeatureDocs(args) => features::docs(&repo_root(), args.write),
+        Command::Container => container::check(&repo_root()),
         Command::Ci => {
             fmt()?;
             features::docs(&repo_root(), false)?;
@@ -178,6 +183,7 @@ mod tests {
             "coverage",
             "features",
             "feature-docs",
+            "container",
         ] {
             assert!(Cli::try_parse_from(["xtask", name]).is_ok(), "{name}");
         }

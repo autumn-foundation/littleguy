@@ -1,0 +1,207 @@
+## littleguy config: copy this to ~/.config/littleguy/lg.toml and edit it.
+##
+##   mkdir -p ~/.config/littleguy
+##   cp lg.toml.example ~/.config/littleguy/lg.toml
+##
+## In the container (see "Run it in a container" in the README):
+##
+##   docker compose cp lg.toml.example lg:/data/config/littleguy/lg.toml
+##
+## Lines that start with "## " explain. Lines that start with "# " are
+## settings that are off: delete the "# " to turn one on. Everything that
+## is on below is the default, written out so you can see it.
+##
+## No key or token ever goes in this file. Each one comes from an
+## environment variable, and the file names only the variable.
+##
+## The model is not in this file either. Pick it when you start the daemon:
+##
+##   lg serve                                    # offline echo, no key
+##   ANTHROPIC_API_KEY=... lg serve --model claude
+##   OPENROUTER_API_KEY=... lg serve --model openrouter --model-name <vendor>/<model>
+##
+## A change to this file applies while the daemon runs (`lg reload`, or
+## wait a moment). A few sections need a restart, and the log says which.
+
+## Who the assistant works for. The default is $USER.
+owner = "mark"
+
+## The system prompt.
+system = "You are littleguy, a small and helpful personal assistant."
+
+## How many messages of the conversation each model call sees. Fewer is
+## faster and cheaper.
+window = 40
+
+## The most tool rounds of one message before the assistant stops.
+max_steps = 8
+
+## ---------------------------------------------------------------- memory
+
+[memory]
+enabled = true
+## When the nightly pass turns episodes into facts (cron, in `timezone`).
+consolidate = "0 3 * * *"
+timezone = "UTC"
+## After a pass, the assistant reflects on what it learned.
+reflect = true
+## The sizes of the memory blocks, in characters.
+memory_chars = 16000
+user_chars = 4000
+## How many episodes one pass reads. Lower it when a pass stops with
+## invalid_reply in `recent_wakes`.
+pass_episodes = 8
+
+## ----------------------------------------------------------------- tools
+
+[tools]
+web_fetch = true
+## web_search also needs LG_BRAVE_API_KEY in the environment.
+web_search = true
+## The workspace files and the note store.
+files = true
+## The run log tools, so the assistant can debug itself.
+runs = true
+## Goals, ideas, wakes and skill proposals.
+plans = true
+fetch_max_chars = 20000
+
+## ------------------------------------------------------------ flow rules
+
+[flow]
+## The Rule of Two: a call waits for you when the conversation would hold
+## untrusted input, private data and a write or an outside effect at once.
+rule_of_two = true
+## "each_call", or "until_approved" to release the rule for the rest of an
+## op after one approval.
+recheck = "each_call"
+
+## ------------------------------------------------------------- web pages
+
+[ui]
+## Loopback only. Run `lg ui` for a sign-in link.
+bind = "127.0.0.1:3004"
+
+## ------------------------------------------------------------- approvals
+
+## Who decides a call that waits, besides the web pages and `lg approve`.
+# [approvals]
+# approver = "123456789012345678"   ## a Discord user id, or "slack:U012AB3CD"
+# timeout_secs = 3600               ## no decision by then denies the call
+
+## ---------------------------------------------------------- chat services
+
+## Discord direct messages. The bot token comes from DISCORD_BOT_TOKEN.
+## With pairing, a stranger gets a code that you accept with `lg pair`.
+# [discord]
+# pairing = true
+# allowed = ["123456789012345678"]
+
+## Slack direct messages. The tokens come from SLACK_BOT_TOKEN and
+## SLACK_APP_TOKEN (Socket Mode), or SLACK_SIGNING_SECRET with [hooks].
+# [slack]
+# pairing = true
+# allowed = ["U012AB3CD"]
+
+## -------------------------------------------------------- the assistant's own time
+
+## A morning brief, delivered to a chat user.
+# [brief]
+# schedule = "30 7 * * 1-5"
+# timezone = "UTC"
+# to = "123456789012345678"
+
+## The heartbeat: the assistant wakes on its own, looks at due goals and
+## open ideas, and stays quiet when there is nothing to do. A tick is
+## read-only.
+# [heartbeat]
+# every_minutes = 60
+# quiet = "22:00-08:00"
+# timezone = "UTC"
+# research = true
+# deliver = "web"
+
+## Where SKILL.md files live. The default is a skills folder next to this
+## file.
+# [skills]
+# dir = "/home/mark/.config/littleguy/skills"
+
+## Profile overlays that the model proposes and you activate with
+## `lg refine`.
+# [refine]
+# messages = 40
+# dimension = "inv"                 ## "inv" (how it works) or "dom" (what it knows)
+
+## A council of model calls that decides clean proposals for you
+## (ADR 0027). A proposal from a run that read outside text still waits.
+# [council]
+# accept = ["goals", "skills"]
+# members = 3
+# charter = "A personal assistant for mark."
+
+## ---------------------------------------------------------- running code
+
+## The run_code tool: python3, node, bash and sh. "process" runs code in a
+## namespace on this machine, for the container or development. The
+## firecracker backend needs a [sandbox.firecracker] section, see the README.
+# [sandbox]
+# backend = "process"
+# network = false                   ## the code gets no network
+# approve = "always"                ## or "untrusted": ask only after outside text (ADR 0033)
+
+## ------------------------------------------------------- outside services
+
+## MCP servers. A child gets only PATH, HOME and the variables that `env`
+## names. Label a server that brings outside text with untrusted_input.
+# [[mcp.server]]
+# id = "github"
+# command = "github-mcp-server"
+# args = ["stdio"]
+# env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+# labels = ["untrusted_input", "private_data"]
+# effect = "external"
+
+## OAuth and API-key connections, kept sealed by San Mateo. The sealing key
+## comes from LG_SAN_MATEO_KEY (32 random bytes in base64). Connect an
+## account with `lg connect <key>`.
+# [san_mateo]
+# bind = "127.0.0.1:3003"
+# catalog = "/home/mark/.config/littleguy/providers.yaml"  ## optional, your own providers
+
+# [[san_mateo.integration]]
+# key = "google"
+# provider = "google"
+# client_id = "1234.apps.googleusercontent.com"
+# client_secret_env = "LG_GOOGLE_CLIENT_SECRET"
+# scopes = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/calendar.events"]
+
+# [[san_mateo.integration]]
+# key = "github"
+# provider = "github"
+# client_id = "Iv1.0123456789abcdef"
+# client_secret_env = "LG_GITHUB_CLIENT_SECRET"
+
+## Gmail and Google Calendar on the google integration. Each send and each
+## invite waits for you.
+# [google]
+# integration = "google"
+# mail = true
+# calendar = true
+
+## api_get and api_send on your integrations (ADR 0031). Each api_send waits
+## for you.
+# [api]
+# integrations = ["github"]
+# max_chars = 20000
+
+## Apache Camel routes that feed the assistant.
+# [[camel.route]]
+# id = "inbox"
+# from = "file:/home/mark/lg-inbox?delete=true"
+# prompt = "A file arrived. Summarize it."
+
+## Public hooks, such as a tick from an outside cron on a host that sleeps.
+## The bearer token comes from the variable that token_env names.
+# [hooks]
+# bind = "0.0.0.0:8080"
+# token_env = "LG_HOOK_TOKEN"

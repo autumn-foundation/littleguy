@@ -753,7 +753,10 @@ design.
 conversation so far, with each answer rendered as Markdown by
 [markstream](https://crates.io/crates/autumn-plugin-markstream). Enter
 sends a message, and Shift+Enter adds a line. New conversation starts the
-thread over, as `lg new` does. An answer streams in as the
+thread over, as `lg new` does. A call that waits for approval shows as a
+card under the thread, with the call and its Approve and Deny buttons.
+After a decision, the answer of the run joins the thread, and a call that
+waits next shows as a new card. An answer streams in as the
 model writes it, over Server-Sent Events, and the whole answer takes its
 place at the end. Claude, OpenAI and OpenRouter stream. The workspace page
 lists the files that the assistant keeps with its file tools, and opens

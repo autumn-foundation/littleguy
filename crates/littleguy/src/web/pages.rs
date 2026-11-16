@@ -84,6 +84,9 @@ pub fn routes() -> Vec<autumn_web::Route> {
         chat,
         chat_stream,
         new_conversation,
+        chat_pending,
+        chat_decide,
+        chat_decided,
         approvals,
         approve,
         deny,
@@ -234,6 +237,7 @@ async fn index(State(state): State<AppState>, session: Session, csrf: CsrfToken)
         return broken();
     };
     let history = ask(&web, Request::History).await;
+    let pending = pending(&web).await;
     let body = html! {
         (bar(csrf.token(), "/"))
         main.chat {
@@ -245,6 +249,7 @@ async fn index(State(state): State<AppState>, session: Session, csrf: CsrfToken)
                         other => (note(other)),
                     }
                 }
+                (pending)
                 div #thinking aria-hidden="true" {
                     span.dot {} span.dot {} span.dot {}
                     span.label { "littleguy is thinking…" }
@@ -1073,7 +1078,7 @@ fn answer_events(
                 Some(Piece::Restart) => (StreamEvent::replace(""), Feed::Open(pieces)),
                 Some(Piece::Text(text)) => (StreamEvent::chunk(text), Feed::Open(pieces)),
                 Some(Piece::Answer(answer)) => {
-                    let (text, ok) = render(&answer);
+                    let (text, ok) = chat_text(&answer);
                     let last = if ok {
                         StreamEvent::Done
                     } else {
@@ -1086,6 +1091,141 @@ fn answer_events(
         };
         Some((Ok(Event::from(event)), next))
     })
+}
+
+/// The text of an answer in the chat. A call that waits shows its card
+/// under the thread, so the text points there and not to `lg approve`.
+fn chat_text(answer: &Answer) -> (String, bool) {
+    match answer {
+        Answer::Waiting { approval } => (
+            format!("I need your approval before I go on (request #{approval}). Decide it below."),
+            true,
+        ),
+        Answer::Busy { approval } => (
+            format!("I wait for your decision on request #{approval} first. Decide it below."),
+            false,
+        ),
+        other => render(other),
+    }
+}
+
+/// The calls that wait, as cards under the thread of the chat. The chat
+/// script asks for them again after each answer.
+async fn pending(web: &Web) -> Markup {
+    let answer = ask(web, Request::Approvals).await;
+    html! {
+        div #pending aria-live="polite" {
+            @match &answer {
+                Answer::Approvals { entries } => @for entry in entries { (card(entry)) },
+                // A daemon with no approvals has nothing to show here.
+                Answer::Off { .. } => {},
+                other => (note(other)),
+            }
+        }
+    }
+}
+
+/// One call that waits, with its buttons, in the chat.
+fn card(entry: &ApprovalEntry) -> Markup {
+    let base = format!("/chat/approvals/{}", entry.id);
+    html! {
+        div.msg.lg.approval {
+            div.body {
+                p { "littleguy asks to use " strong { (entry.tool) } " (request #" (entry.id) ")" }
+                pre { (entry.text) }
+                div.actions {
+                    button.approve hx-post={ (base) "/approve" } hx-target="closest .approval"
+                        hx-swap="outerHTML" { "Approve" }
+                    button hx-post={ (base) "/deny" } hx-target="closest .approval"
+                        hx-swap="outerHTML" { "Deny" }
+                }
+            }
+        }
+    }
+}
+
+/// The calls that wait, for the chat.
+#[get("/chat/pending")]
+async fn chat_pending(State(state): State<AppState>, session: Session) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    pending(&web).await.into_response()
+}
+
+/// Approves or denies call `id` from its card in the chat. The card then
+/// asks for the answer of the run until it comes.
+#[post("/chat/approvals/{id}/{choice}")]
+async fn chat_decide(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, choice)): Path<(i64, String)>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let (request, done) = match choice.as_str() {
+        "approve" => (Request::Approve { id }, "Approved"),
+        "deny" => (Request::Deny { id, reason: None }, "Denied"),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let asked = web.clone();
+    web.decisions
+        .start(id, async move { ask(&asked, request).await });
+    let result = format!("/chat/approvals/{id}/result");
+    html! {
+        div.msg.lg.approval.decided hx-get=(result) hx-trigger=(RESULT_EVERY)
+            hx-target="#pending" hx-swap="outerHTML" {
+            div.body {
+                p { (done) " request #" (id) ". littleguy goes on." }
+                span.dot {} span.dot {} span.dot {}
+            }
+        }
+    }
+    .into_response()
+}
+
+/// The answer of the run after a decision in the chat. It joins the thread,
+/// and the cards show again: the run may wait on its next call. While the
+/// run goes on, it answers with no content, and the card asks again.
+#[get("/chat/approvals/{id}/result")]
+async fn chat_decided(
+    State(state): State<AppState>,
+    session: Session,
+    Path(id): Path<i64>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let answer = match web.decisions.take(id) {
+        Poll::Running => return StatusCode::NO_CONTENT.into_response(),
+        Poll::Done(answer) => Some(answer),
+        Poll::Unknown => None,
+    };
+    let turn = answer.as_ref().and_then(|answer| match answer {
+        // A call that waits again shows as its card, not as text.
+        Answer::Waiting { .. } => None,
+        other => {
+            let (text, ok) = chat_text(other);
+            Some(answer_turn(&text, ok))
+        }
+    });
+    html! {
+        @if let Some(turn) = turn {
+            div hx-swap-oob="beforeend:#thread" { (turn) }
+        }
+        (pending(&web).await)
+    }
+    .into_response()
 }
 
 /// The approvals section, with `notice` on top.

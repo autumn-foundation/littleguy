@@ -83,9 +83,18 @@
   form.addEventListener("htmx:responseError", () => setBusy(false));
   form.addEventListener("htmx:sendError", () => setBusy(false));
 
+  // The calls that wait show as cards under the thread. An answer may
+  // leave one, so the cards load again after each answer.
+  const cards = () => {
+    if (document.getElementById("pending")) {
+      htmx.ajax("GET", "/chat/pending", { target: "#pending", swap: "outerHTML" });
+    }
+  };
+
   // The answer settles with its whole text, or fails.
   const settle = () => {
     setBusy(false);
+    cards();
     keepUp();
     box.focus();
   };
@@ -101,7 +110,7 @@
       thinking.classList.toggle("on", busy && live.textContent.trim() === "");
     }
     keepUp();
-  }).observe(thread, { childList: true, subtree: true, characterData: true });
+  }).observe(scroller, { childList: true, subtree: true, characterData: true });
 
   toBottom();
   box.focus();

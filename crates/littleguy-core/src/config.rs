@@ -341,6 +341,37 @@ impl Default for UiConfig {
     }
 }
 
+/// How many days an ended run stays in the database when the config names
+/// no number.
+pub const DEFAULT_KEEP_DAYS: u32 = 30;
+
+/// How long the database keeps the runs that ended (ADR 0035).
+///
+/// Each message of the assistant ends its run, and the next message starts
+/// a new run. A run that ended stays for `keep_days`, so the run log tools
+/// can still read it. Then a daily purge deletes it with its history and
+/// its ledger rows. A run that has not ended never goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunsConfig {
+    /// The days that an ended run stays. Zero deletes each ended run at the
+    /// next purge.
+    pub keep_days: u32,
+}
+
+impl Default for RunsConfig {
+    fn default() -> Self {
+        Self {
+            keep_days: DEFAULT_KEEP_DAYS,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRuns {
+    keep_days: Option<u32>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawUi {
@@ -1584,6 +1615,8 @@ struct Raw {
     refine: Option<RawRefine>,
     council: Option<RawCouncil>,
     #[serde(default)]
+    runs: RawRuns,
+    #[serde(default)]
     ui: RawUi,
     hooks: Option<RawHooks>,
     fleet: Option<RawFleet>,
@@ -1886,6 +1919,8 @@ pub struct Config {
     /// The council that decides for the owner, when the config has the
     /// section.
     pub council: Option<CouncilConfig>,
+    /// How long the runs that ended stay.
+    pub runs: RunsConfig,
     /// The web pages.
     pub ui: UiConfig,
     /// The inbound hooks, when the config has the section.
@@ -1920,6 +1955,7 @@ impl Config {
             mcp: Vec::new(),
             refine: None,
             council: None,
+            runs: RunsConfig::default(),
             ui: UiConfig::default(),
             hooks: None,
             fleet: None,
@@ -2008,6 +2044,9 @@ impl Config {
             mcp: mcp_servers(raw.mcp.server)?,
             refine: raw.refine.map(refine).transpose()?,
             council: raw.council.map(council).transpose()?,
+            runs: RunsConfig {
+                keep_days: raw.runs.keep_days.unwrap_or(DEFAULT_KEEP_DAYS),
+            },
             ui: ui(raw.ui)?,
             hooks: raw.hooks.map(hooks).transpose()?,
             fleet: raw.fleet.map(fleet).transpose()?,
@@ -2724,6 +2763,18 @@ mod tests {
         let alone = Config::parse("owner = \"m\"\n[api]\n");
         assert!(matches!(alone, Err(ConfigError::Api(why)) if why.contains("[san_mateo]")));
         assert_eq!(Config::parse("owner = \"m\"").unwrap().api, None);
+    }
+
+    #[test]
+    fn an_ended_run_stays_thirty_days_unless_the_owner_says_otherwise() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.runs.keep_days, 30);
+        let short = Config::parse("owner = \"mark\"\n[runs]\nkeep_days = 7").unwrap();
+        assert_eq!(short.runs.keep_days, 7);
+        // Zero works: each ended run goes at the next purge.
+        let none = Config::parse("owner = \"mark\"\n[runs]\nkeep_days = 0").unwrap();
+        assert_eq!(none.runs.keep_days, 0);
+        assert!(Config::parse("owner = \"mark\"\n[runs]\nkeep = 7").is_err());
     }
 
     #[test]

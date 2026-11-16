@@ -496,8 +496,8 @@ pub enum Response {
         applied: Vec<String>,
         /// The sections that changed and apply at the next start.
         restart: Vec<String>,
-        /// The sections that changed and shape the agent profile. The
-        /// running assistant keeps its profile (autumn-harvest #2658).
+        /// The sections that changed and shape the agent profile. They
+        /// apply from the next message, which starts a new run (ADR 0035).
         #[serde(default)]
         profile: Vec<String>,
     },

@@ -97,10 +97,10 @@ async fn a_reload_stores_the_system_prompt_and_names_the_restart_sections() {
     );
     assert!(daemon.config().system.contains("the new prompt"));
     assert_eq!(daemon.config().ui, config.ui);
-    // The running assistant keeps the profile of its run until
-    // autumn-harvest reads it again (autumn-harvest #2658).
+    // The run that read the old prompt ends, so the next message has the
+    // new one (ADR 0035).
     daemon.handle_request(UID, chat("m2")).await;
-    assert!(model.last_system().contains("the old prompt"));
+    assert!(model.last_system().contains("the new prompt"));
 
     // The same file again changes nothing that runs.
     let again = daemon.handle_request(UID, Request::Reload).await;

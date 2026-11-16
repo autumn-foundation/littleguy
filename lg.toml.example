@@ -37,6 +37,15 @@ window = 40
 ## no bound, a message runs until the model answers.
 # max_steps = 50
 
+## ------------------------------------------------------------------ runs
+
+[runs]
+## Each message ends a run of the assistant. An ended run stays this many
+## days, so the run log tools can read it. Then a daily purge deletes it.
+## A run that has not ended never goes. 0 deletes each ended run at the
+## next purge.
+keep_days = 30
+
 ## ---------------------------------------------------------------- memory
 
 [memory]

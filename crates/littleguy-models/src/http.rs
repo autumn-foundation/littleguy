@@ -4,18 +4,19 @@ use std::time::Duration;
 
 use autumn_harvest_agent::{AgentError, ErrorKind};
 
-/// How long one request may take, thinking included.
-pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a connection may take to open. A request has no time bound
+/// of its own: the engine bounds each model call, and a model that thinks
+/// long must not lose its work to a shorter bound here (ADR 0034).
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The most bytes of one response body that a model reads.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-/// A client with the request and connect timeouts.
+/// A client with the connect timeout.
 pub fn client() -> reqwest::Client {
     // Reqwest panics without a provider. An `Err` means that one is installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(CONNECT_TIMEOUT)
         .build()
         .unwrap_or_default()
 }

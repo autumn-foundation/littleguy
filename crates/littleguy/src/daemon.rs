@@ -191,9 +191,13 @@ pub fn harness(
     let profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
         .window(config.window)
-        // A tick with no cap of its own takes this one too.
-        .max_steps(config.max_steps);
-    let (mut harness, mut profile) = tools.apply(AgentHarness::new(model), profile);
+        // A tick with no cap of its own takes this one too. With no bound
+        // in the config, an op runs until the model answers (ADR 0034).
+        .max_steps(config.max_steps.unwrap_or(u32::MAX));
+    // Each tool cuts its own result, by a setting of the owner such as
+    // `fetch_max_chars`. The engine cuts no result again (ADR 0034).
+    let harness = AgentHarness::new(model).tool_output_limit(usize::MAX);
+    let (mut harness, mut profile) = tools.apply(harness, profile);
     if let Some(guard) = guard {
         (harness, profile) = guard.apply(harness, profile);
     } else {
@@ -3793,7 +3797,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let busy = Arc::new(BusyModel::default());
         let mut config = config();
-        config.max_steps = 3;
+        config.max_steps = Some(3);
         let model: Arc<dyn AgentModel> = Arc::clone(&busy) as Arc<dyn AgentModel>;
         let mut daemon =
             Daemon::open(&dir.path().join("lg.db"), &config, model, UID, false).unwrap();
@@ -4074,13 +4078,11 @@ mod tests {
 
     /// A model whose consolidation replies do not parse, and that answers
     /// the assistant as [`MemoryModel`] does.
-    #[cfg(all(feature = "reflection", feature = "self-debug"))]
     #[derive(Debug, Default)]
     struct BadPassModel {
         inner: MemoryModel,
     }
 
-    #[cfg(all(feature = "reflection", feature = "self-debug"))]
     impl AgentModel for BadPassModel {
         fn chat<'a>(
             &'a self,
@@ -4147,6 +4149,63 @@ mod tests {
             row.outcome,
             "skipped: the consolidation pass wrote no facts (invalid_reply); no model call"
         );
+    }
+
+    /// A model that reasons: a pass reply under a cap of
+    /// [`autumn_harvest_agent::consolidate::PASS_OUTPUT_TOKENS`] is cut
+    /// off, as the reasoning fills it. With more room it answers as
+    /// [`MemoryModel`] does.
+    #[derive(Debug, Default)]
+    struct ReasoningModel {
+        inner: MemoryModel,
+        cut: BadPassModel,
+    }
+
+    impl AgentModel for ReasoningModel {
+        fn chat<'a>(
+            &'a self,
+            request: &'a autumn_harvest_agent::ChatRequest,
+        ) -> autumn_harvest_agent::BoxFuture<
+            'a,
+            Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+        > {
+            let cramped = request
+                .max_tokens
+                .is_some_and(|cap| cap <= autumn_harvest_agent::consolidate::PASS_OUTPUT_TOKENS);
+            if cramped {
+                self.cut.chat(request)
+            } else {
+                self.inner.chat(request)
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_gets_room_for_a_model_that_reasons() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon = Daemon::open(
+            &db,
+            &config(),
+            Arc::new(ReasoningModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        let facts = notes(&db);
+        assert_eq!(facts.len(), 1, "the pass wrote its fact: {facts:?}");
     }
 
     #[cfg(all(feature = "reflection", any(feature = "discord", feature = "sandbox")))]
@@ -4896,6 +4955,23 @@ mod tests {
             .handle_request(UID, request("w-2", "show notes/tea.md"))
             .await;
         assert_eq!(reply_text(&shown), "green tea");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_long_tool_result_reaches_the_model_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        // Longer than the engine's own cut of a tool result.
+        let long = "tea.".repeat(autumn_harvest_agent::harness::DEFAULT_TOOL_OUTPUT_LIMIT);
+        daemon
+            .handle_request(UID, request("l-1", &format!("save notes/long.md {long}")))
+            .await;
+        let shown = daemon
+            .handle_request(UID, request("l-2", "show notes/long.md"))
+            .await;
+        assert_eq!(reply_text(&shown).len(), long.len(), "the read is whole");
     }
 
     #[tokio::test(flavor = "multi_thread")]

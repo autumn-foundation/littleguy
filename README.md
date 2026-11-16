@@ -221,9 +221,12 @@ After each pass that learned something, littleguy reflects once: the
 reflection hears the facts that the pass added, and files
 [ideas](#goals-and-ideas) for anything worth planning or researching. A
 pass that added no fact wakes no reflection, and `recent_wakes` says why.
-`pass_episodes = 8` under `[memory]` sets how many episodes one pass reads;
-a smaller batch fits the engine's output cap of a pass
-([ADR 0030](docs/adr/0030-a-reflection-hears-what-the-pass-did.md)). The reflection is read-only, and it stays silent unless
+`pass_episodes = 8` under `[memory]` sets how many episodes one pass reads
+([ADR 0030](docs/adr/0030-a-reflection-hears-what-the-pass-did.md)), and
+`pass_tokens` can cap the output of its model call. By default a pass has
+no cap of its own, so the limit of the provider applies. The engine fixes
+the cap at 2048, which a model that reasons fills before it writes the
+reply ([ADR 0034](docs/adr/0034-no-arbitrary-caps-on-model-work.md)). The reflection is read-only, and it stays silent unless
 you should know something. [ADR 0022](docs/adr/0022-ideas-from-consolidation.md)
 explains the design. The reflection comes with the `reflection` feature,
 which is on by default and needs `plans`.
@@ -860,7 +863,7 @@ so it always matches what `lg serve` reads. The essentials:
 owner = "mark"
 system = "You are littleguy, a small and helpful personal assistant."
 window = 40
-max_steps = 8                         # tool rounds per message or tick; a reload applies it
+# max_steps = 50                      # tool rounds per message or tick; no bound by default
 
 [discord]
 pairing = true                        # strangers get a code; false drops them
@@ -871,9 +874,11 @@ id = "inbox"
 from = "file:/home/mark/lg-inbox?delete=true"
 ```
 
-A message or a tick that needs more than `max_steps` tool rounds stops and
-says so. Raise it when littleguy researches in long chains; each round is a
-model call.
+By default a message or a tick runs until the model answers, however many
+tool rounds it takes. Set `max_steps` to bound it: an op that needs more
+rounds stops and says so. Each round is a model call. A tool result is cut
+only by the tool's own setting, such as `fetch_max_chars`, not by the
+engine ([ADR 0034](docs/adr/0034-no-arbitrary-caps-on-model-work.md)).
 
 | Flag | Variable | Default |
 |---|---|---|

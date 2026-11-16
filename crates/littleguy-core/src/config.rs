@@ -4,7 +4,6 @@
 //! owner = "mark"
 //! system = "You are littleguy, a helpful assistant."
 //! window = 40
-//! max_steps = 8
 //!
 //! [discord]
 //! pairing = true
@@ -185,9 +184,6 @@ pub const DEFAULT_SYSTEM: &str = "You are littleguy, a small and helpful persona
 /// The transcript bound when the config names none, in messages.
 pub const DEFAULT_WINDOW: u32 = 40;
 
-/// The tool rounds of one op when the config names none: the engine default.
-pub const DEFAULT_MAX_STEPS: u32 = 8;
-
 /// Why a config did not load.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -241,6 +237,9 @@ pub enum ConfigError {
     /// A consolidation pass reads no episode.
     #[error("memory.pass_episodes must be at least 1")]
     PassEpisodes,
+    /// A consolidation pass may write no token.
+    #[error("memory.pass_tokens must be at least 1")]
+    PassTokens,
     /// The heartbeat interval is zero.
     #[error("heartbeat.every_minutes must be at least 1")]
     HeartbeatEvery,
@@ -693,6 +692,11 @@ pub struct MemoryConfig {
     /// fixed output cap in the engine, so a smaller batch fits a reply that
     /// a large one would cut off (ADR 0030).
     pub pass_episodes: u32,
+    /// The output cap of the model call of a consolidation pass. `None`
+    /// sends no cap, so the limit of the provider applies. It replaces the
+    /// fixed cap of the engine, which a model that reasons fills before it
+    /// writes the reply (ADR 0034).
+    pub pass_tokens: Option<u32>,
 }
 
 /// The default size of the `memory` block. The engine default is 2 200,
@@ -716,6 +720,7 @@ impl Default for MemoryConfig {
             memory_chars: DEFAULT_MEMORY_CHARS,
             user_chars: DEFAULT_USER_CHARS,
             pass_episodes: DEFAULT_PASS_EPISODES,
+            pass_tokens: None,
         }
     }
 }
@@ -730,6 +735,7 @@ struct RawMemory {
     memory_chars: Option<usize>,
     user_chars: Option<usize>,
     pass_episodes: Option<u32>,
+    pass_tokens: Option<u32>,
 }
 
 /// Checks the memory section. The engine checks each cron field and the
@@ -756,6 +762,11 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
         pass_episodes: match raw.pass_episodes.unwrap_or(defaults.pass_episodes) {
             0 => return Err(ConfigError::PassEpisodes),
             n => n,
+        },
+        // Only zero cannot work: the model could write no reply.
+        pass_tokens: match raw.pass_tokens {
+            Some(0) => return Err(ConfigError::PassTokens),
+            cap => cap,
         },
     })
 }
@@ -1837,8 +1848,9 @@ pub struct Config {
     /// The transcript bound of the assistant, in messages.
     pub window: u32,
     /// The most tool rounds of one op, a message or a tick. An op that
-    /// needs more stops and says so.
-    pub max_steps: u32,
+    /// needs more stops and says so. `None` sets no bound: the op runs
+    /// until the model answers (ADR 0034).
+    pub max_steps: Option<u32>,
     /// The Discord settings.
     pub discord: DiscordConfig,
     /// The Slack settings.
@@ -1890,7 +1902,7 @@ impl Config {
             owner,
             system: String::from(DEFAULT_SYSTEM),
             window: DEFAULT_WINDOW,
-            max_steps: DEFAULT_MAX_STEPS,
+            max_steps: None,
             discord: DiscordConfig::default(),
             slack: SlackConfig::default(),
             camel: Vec::new(),
@@ -1927,10 +1939,10 @@ impl Config {
         if window == 0 {
             return Err(ConfigError::Window);
         }
-        // Only zero cannot work. A high cap costs model calls, which is the
-        // owner's call.
-        let max_steps = raw.max_steps.unwrap_or(DEFAULT_MAX_STEPS);
-        if max_steps == 0 {
+        // Only zero cannot work. A bound is the owner's call, and none
+        // is the default.
+        let max_steps = raw.max_steps;
+        if max_steps == Some(0) {
             return Err(ConfigError::MaxSteps);
         }
         let allowed = raw
@@ -2407,6 +2419,7 @@ mod tests {
                 memory_chars: DEFAULT_MEMORY_CHARS,
                 user_chars: DEFAULT_USER_CHARS,
                 pass_episodes: DEFAULT_PASS_EPISODES,
+                pass_tokens: None,
             }
         );
         let batch = Config::parse("owner = \"mark\"\n[memory]\npass_episodes = 50").unwrap();
@@ -2415,6 +2428,9 @@ mod tests {
             "a big batch is the owner's call"
         );
         assert!(Config::parse("owner = \"mark\"\n[memory]\npass_episodes = 0").is_err());
+        let roomy = Config::parse("owner = \"mark\"\n[memory]\npass_tokens = 64000").unwrap();
+        assert_eq!(roomy.memory.pass_tokens, Some(64_000));
+        assert!(Config::parse("owner = \"mark\"\n[memory]\npass_tokens = 0").is_err());
         assert!(Config::parse("owner = \"mark\"").unwrap().memory.reflect);
         let sized =
             Config::parse("owner = \"mark\"\n[memory]\nmemory_chars = 50000\nuser_chars = 8000")
@@ -2715,9 +2731,9 @@ mod tests {
         let config = Config::parse("owner = \"mark\"\nsystem = \"Be brief.\"\nwindow = 8").unwrap();
         assert_eq!(config.system, "Be brief.");
         assert_eq!(config.window, 8);
-        assert_eq!(config.max_steps, DEFAULT_MAX_STEPS);
+        assert_eq!(config.max_steps, None, "no bound by default");
         let deep = Config::parse("owner = \"mark\"\nmax_steps = 400").unwrap();
-        assert_eq!(deep.max_steps, 400, "a high cap is the owner's call");
+        assert_eq!(deep.max_steps, Some(400), "a bound is the owner's call");
         assert!(matches!(
             Config::parse("owner = \"m\"\nmax_steps = 0"),
             Err(ConfigError::MaxSteps)

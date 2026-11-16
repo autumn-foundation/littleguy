@@ -33,8 +33,9 @@ system = "You are littleguy, a small and helpful personal assistant."
 ## faster and cheaper.
 window = 40
 
-## The most tool rounds of one message before the assistant stops.
-max_steps = 8
+## The most tool rounds of one message before the assistant stops. With
+## no bound, a message runs until the model answers.
+# max_steps = 50
 
 ## ---------------------------------------------------------------- memory
 
@@ -50,10 +51,10 @@ memory_chars = 16000
 user_chars = 4000
 ## How many episodes one pass reads.
 pass_episodes = 8
-## The output cap of the model call of a pass. A model that reasons spends
-## part of it before the reply. Raise it when a pass stops with
-## invalid_reply in `recent_wakes`.
-pass_tokens = 16000
+## The output cap of the model call of a pass. With no cap, the limit of
+## the provider applies. A model that reasons spends part of the cap
+## before the reply, so a pass with a small cap stops with invalid_reply.
+# pass_tokens = 32000
 
 ## ----------------------------------------------------------------- tools
 

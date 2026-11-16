@@ -132,7 +132,8 @@ pub fn schedule(rt: &mut SqliteRuntime, config: &MemoryConfig) -> Result<()> {
 }
 
 /// The model of the harness, with the output cap of a consolidation pass
-/// raised to `[memory] pass_tokens` (ADR 0034).
+/// set by `[memory] pass_tokens` (ADR 0034). With no setting, a pass goes
+/// with no cap, and the limit of the provider applies.
 ///
 /// The engine sends each pass with a fixed cap of
 /// [`consolidate::PASS_OUTPUT_TOKENS`]. A model that reasons spends that
@@ -143,20 +144,20 @@ pub fn schedule(rt: &mut SqliteRuntime, config: &MemoryConfig) -> Result<()> {
 #[derive(Debug)]
 pub struct PassTokens {
     inner: Arc<dyn AgentModel>,
-    tokens: u32,
+    tokens: Option<u32>,
 }
 
 impl PassTokens {
-    /// `inner`, with a pass cap of `tokens`.
+    /// `inner`, with a pass cap of `tokens`, or none.
     #[must_use]
-    pub fn wrap(inner: Arc<dyn AgentModel>, tokens: u32) -> Arc<dyn AgentModel> {
+    pub fn wrap(inner: Arc<dyn AgentModel>, tokens: Option<u32>) -> Arc<dyn AgentModel> {
         Arc::new(Self { inner, tokens })
     }
 
     /// The request to send: a pass gets the cap of the config.
     fn fitted(&self, request: &ChatRequest) -> Option<ChatRequest> {
         is_pass(request).then(|| ChatRequest {
-            max_tokens: Some(self.tokens),
+            max_tokens: self.tokens,
             ..request.clone()
         })
     }
@@ -232,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn a_pass_gets_the_cap_of_the_config_and_nothing_else_changes() {
         let caps = Arc::new(Caps::default());
-        let model = PassTokens::wrap(Arc::clone(&caps) as Arc<dyn AgentModel>, 16_000);
+        let model = PassTokens::wrap(Arc::clone(&caps) as Arc<dyn AgentModel>, Some(64_000));
         let pass = consolidate::pass_request(&[]);
         assert_eq!(pass.max_tokens, Some(consolidate::PASS_OUTPUT_TOKENS));
         model.chat(&pass).await.unwrap();
@@ -250,12 +251,16 @@ mod tests {
         assert_eq!(
             *caps.0.lock().unwrap(),
             [
-                Some(16_000),
-                Some(16_000),
+                Some(64_000),
+                Some(64_000),
                 Some(consolidate::PASS_OUTPUT_TOKENS),
                 None
             ]
         );
+        // With no setting, a pass goes with no cap.
+        let open = PassTokens::wrap(Arc::clone(&caps) as Arc<dyn AgentModel>, None);
+        open.chat(&consolidate::pass_request(&[])).await.unwrap();
+        assert_eq!(caps.0.lock().unwrap().last(), Some(&None));
     }
 
     /// A tenant file in WAL mode that another connection keeps open, as

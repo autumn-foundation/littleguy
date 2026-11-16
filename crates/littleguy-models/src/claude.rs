@@ -47,7 +47,7 @@ pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
 pub const DEFAULT_MAX_TOKENS: u32 = 16_000;
 /// The effort of the default model.
 pub const EFFORT: &str = "high";
-pub use crate::http::{MAX_BODY_BYTES, REQUEST_TIMEOUT, SseFrames, error_kind};
+pub use crate::http::{MAX_BODY_BYTES, SseFrames, error_kind};
 
 /// A Claude model over the Messages API.
 #[derive(Clone)]

@@ -8,6 +8,11 @@
 //! with the settings of the `lg` service: the user, the `security_opt` and
 //! the runtimes that `run_code` uses.
 //!
+//! It also checks that code in the sandbox cannot reach the daemon (ADR
+//! 0032): a daemon in the container answers `lg` but refuses the same call
+//! from inside the namespaces of a run, and the config is read-only to the
+//! `lg` user while the skills stay writable.
+//!
 //! It runs as its own compose project, so it never touches a running
 //! littleguy, and it removes its container and volume at the end.
 
@@ -18,9 +23,21 @@ use smop::prelude::*;
 /// The compose project of the check. A running littleguy uses another.
 pub const PROJECT: &str = "littleguy-check";
 
-/// The probes, each in the namespaces of one `run_code` call: no network,
-/// then the runtimes of the image.
-const PROBES: [&[&str]; 2] = [
+/// A daemon on an empty volume, then `lg` outside and inside the namespaces
+/// of a run. The refusal names the sandbox.
+const DAEMON_PROBE: &str = "lg serve >/tmp/lg.log 2>&1 & \
+     for i in $(seq 100); do [ -S /data/share/littleguy/lg.sock ] && break; sleep 0.1; done; \
+     lg pairs >/dev/null \
+     && unshare -Urn lg pairs 2>&1 | grep -q 'no request from code in a sandbox'";
+
+/// The config folder is not writable by `lg`, and the skills folder is.
+const FILES_PROBE: &str =
+    "! test -w /data/config/littleguy && test -w /data/config/littleguy/skills";
+
+/// The probes. The first two run in the namespaces of one `run_code` call:
+/// no network, then the runtimes of the image. The last two check what code
+/// in a run can reach.
+const PROBES: [&[&str]; 4] = [
     &["unshare", "-Urn", "true"],
     &[
         "unshare",
@@ -29,6 +46,8 @@ const PROBES: [&[&str]; 2] = [
         "-c",
         "python3 -c pass && node -e 0 && bash -c true",
     ],
+    &["sh", "-c", DAEMON_PROBE],
+    &["sh", "-c", FILES_PROBE],
 ];
 
 /// The arguments of `docker compose` for the check project.
@@ -76,7 +95,7 @@ mod tests {
 
     #[test]
     fn each_probe_runs_in_the_check_project_as_the_lg_service() {
-        for probe in PROBES {
+        for probe in &PROBES[..2] {
             let args = probe_args(probe);
             assert_eq!(&args[..3], ["compose", "-p", PROJECT]);
             assert!(

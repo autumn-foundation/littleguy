@@ -484,15 +484,18 @@ approve = "untrusted"   # the default is "always"
 
 Then a call runs at once while the conversation holds only your words.
 Once the assistant reads outside text, such as a web page, a mail, an API
-answer or a note, each later call waits again, until the conversation
-starts over. An MCP server counts only with `labels = ["untrusted_input"]`,
-and a workspace file read with `read_file` does not count. Without flow rules (`rule_of_two = false`),
-nothing says that the conversation is clean, so each call waits. Code in
+answer or a note, each later call waits again. The wait lasts while that
+read is in the conversation: until it leaves the `window`, or until you
+start a new conversation with `lg new` or the New conversation button of
+the chat page. Memory, notes and the workspace stay. An MCP server counts
+only with `labels = ["untrusted_input"]`, and a workspace file read with
+`read_file` does not count. Code in
 a run cannot use the socket of `lg` or change the config
 ([ADR 0032](docs/adr/0032-code-in-the-sandbox-cannot-act-as-the-owner.md)),
 but it can still read and write the databases.
-[ADR 0033](docs/adr/0033-code-runs-unasked-until-outside-text.md) explains
-the design.
+[ADR 0033](docs/adr/0033-code-runs-unasked-until-outside-text.md) and
+[ADR 0036](docs/adr/0036-the-mark-of-outside-text-belongs-to-the-conversation.md)
+explain the design.
 
 ## Run it in a container
 
@@ -749,7 +752,8 @@ design.
 `lg serve` is an autumn-web app. The home page is the chat: the
 conversation so far, with each answer rendered as Markdown by
 [markstream](https://crates.io/crates/autumn-plugin-markstream). Enter
-sends a message, and Shift+Enter adds a line. An answer streams in as the
+sends a message, and Shift+Enter adds a line. New conversation starts the
+thread over, as `lg new` does. An answer streams in as the
 model writes it, over Server-Sent Events, and the whole answer takes its
 place at the end. Claude, OpenAI and OpenRouter stream. The workspace page
 lists the files that the assistant keeps with its file tools, and opens

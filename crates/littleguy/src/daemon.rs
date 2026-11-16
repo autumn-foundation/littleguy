@@ -27,7 +27,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use autumn_harvest_agent::{AgentHarness, AgentId, AgentModel, AgentOp, AgentProfile, sqlite};
+use autumn_harvest_agent::{
+    AgentHarness, AgentId, AgentModel, AgentOp, AgentProfile, Control, sqlite,
+};
 use autumn_harvest_sqlite::SqliteRuntime;
 use chrono::{DateTime, Utc};
 use littleguy_channels::{DmMessage, Service};
@@ -785,6 +787,7 @@ impl Daemon {
                 },
             )),
             Request::History => self.history().await,
+            Request::NewConversation => self.new_conversation().await,
             Request::Workspace => self.workspace_files().await,
             Request::WorkspaceFile { path } => self.workspace_file(path).await,
             #[cfg(feature = "plans")]
@@ -893,11 +896,11 @@ impl Daemon {
         sqlite::drive(&mut self.rt, &id).await?;
         let before = sqlite::state(&self.rt, &id).await?;
         let failures_before = before.as_ref().map_or(0, |state| state.failures);
-        // The engine keeps the labels of the run. They say at the start of
-        // each op whether the conversation holds untrusted input.
+        // The transcript says at the start of each op whether the
+        // conversation holds untrusted input.
         self.kit
             .untrusted
-            .reset(before.as_ref().map(|state| &state.flow_labels));
+            .reset(before.as_ref().map_or(&[], |state| &state.transcript));
         // With no run yet, nothing can run before this op: the first run
         // that writes is its run.
         match &before {
@@ -1102,6 +1105,35 @@ impl Daemon {
             let turns = state.map_or_else(Vec::new, |state| turns(&state.transcript));
             Ok(Response::History { turns })
         }
+    }
+
+    /// Starts a new conversation: the assistant forgets its transcript. The
+    /// engine clears the flow labels of the transcript too. Memory, notes
+    /// and the workspace stay.
+    ///
+    /// A call that waits for a decision holds the op of the run, so the
+    /// owner decides it first. The key names the segment that the clear
+    /// follows, so a retry of one clear clears once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime cannot read the state, send the op
+    /// or drive the run.
+    async fn new_conversation(&mut self) -> Result<Response> {
+        if let Some(approval) = self.waiting {
+            return Ok(Response::Busy { approval });
+        }
+        let id = self.assistant().clone();
+        // With no run, there is no transcript to clear.
+        if let Some(state) = sqlite::state(&self.rt, &id).await? {
+            let key = format!("new-conversation:{}", state.segments);
+            let op = AgentOp::Control(Control::ClearTranscript);
+            sqlite::send(&mut self.rt, &id, &op, Some(&key))?;
+            sqlite::drive(&mut self.rt, &id).await?;
+        }
+        self.kit.untrusted.reset(&[]);
+        tracing::info!("the owner started a new conversation");
+        Ok(Response::Cleared)
     }
 
     /// The workspace of the assistant at its head: the snapshot that the

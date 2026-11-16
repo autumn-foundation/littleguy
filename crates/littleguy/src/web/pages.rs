@@ -83,6 +83,7 @@ pub fn routes() -> Vec<autumn_web::Route> {
         logout,
         chat,
         chat_stream,
+        new_conversation,
         approvals,
         approve,
         deny,
@@ -257,7 +258,13 @@ async fn index(State(state): State<AppState>, session: Session, csrf: CsrfToken)
                         placeholder="Message littleguy" {}
                     button type="submit" { "Send" }
                 }
-                p.hint { "Enter sends · Shift+Enter adds a line" }
+                div.hint {
+                    "Enter sends · Shift+Enter adds a line · "
+                    // The thread starts over in place. Memory, notes and the
+                    // workspace stay.
+                    button.quiet type="button" hx-post="/new" hx-target="#thread"
+                        hx-swap="innerHTML" { "New conversation" }
+                }
             }
         }
     };
@@ -991,6 +998,21 @@ struct Message {
 
 /// Sends one message to the assistant, and shows its answer as the model
 /// writes it. The answer streams from [`chat_stream`].
+/// Starts a new conversation. The answer replaces the thread.
+#[post("/new")]
+async fn new_conversation(State(state): State<AppState>, session: Session) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    match ask(&web, Request::NewConversation).await {
+        Answer::Cleared => html! { p.empty { "Say hi to littleguy." } }.into_response(),
+        other => note(&other).into_response(),
+    }
+}
+
 #[post("/chat")]
 async fn chat(
     State(state): State<AppState>,

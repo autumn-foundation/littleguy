@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, 2026-11-15.
+Accepted, 2026-11-15. ADR 0036 amends the mark of outside text.
 
 ## Context
 

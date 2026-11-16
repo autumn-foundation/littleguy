@@ -304,6 +304,20 @@ button:disabled {
   text-align: center;
 }
 
+/* A button that reads as a link, such as New conversation. */
+button.quiet {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-size: inherit;
+  text-decoration: underline;
+}
+
+button.quiet:hover {
+  color: var(--text);
+}
+
 /* The manage page: approvals, pairing, refine and connections. */
 
 .manage {

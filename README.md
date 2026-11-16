@@ -880,6 +880,18 @@ rounds stops and says so. Each round is a model call. A tool result is cut
 only by the tool's own setting, such as `fetch_max_chars`, not by the
 engine ([ADR 0034](docs/adr/0034-no-arbitrary-caps-on-model-work.md)).
 
+Each message ends the run of the assistant, and the next message starts a
+new one, so a change to the config reaches the next message. A run that
+ended stays in the database for 30 days, so the run log tools can still
+read it. Then a daily purge deletes it, with its history and its ledger
+rows. A run that has not ended never goes
+([ADR 0035](docs/adr/0035-a-run-per-message-and-retention.md)):
+
+```toml
+[runs]
+keep_days = 30                        # 0 deletes each ended run at the next purge
+```
+
 | Flag | Variable | Default |
 |---|---|---|
 | `--socket` | `LG_SOCKET` | `<data home>/littleguy/lg.sock` |
@@ -908,13 +920,14 @@ lg reload
 
 A new camel route starts, and a removed one stops. The chat allow lists,
 the memory and brief schedules, the approvals, the flow rules and the
-refine policy apply at once. `owner`, `san_mateo`, `google`, `sandbox`,
+refine policy and the run retention apply at once. `owner`, `san_mateo`, `google`, `sandbox`,
 `mcp`, `ui`, `hooks` and `fleet` wait for the next start. A file that does
 not parse, or a route that does not build, changes nothing.
 
-`system`, `window` and `tools` are stored, but the running assistant keeps
-the profile it started with. autumn-harvest reads the profile once per run
-(autumn-harvest #2658). Use `lg refine` to change the prompt live.
+`system`, `window`, `max_steps` and `tools` apply from the next message.
+autumn-harvest reads them once per run (autumn-harvest #2658), so the
+assistant ends its run after each message, and after a reload or a start
+(ADR 0035).
 [ADR 0018](docs/adr/0018-reload-the-config.md) explains the design.
 
 ## Who can talk to it

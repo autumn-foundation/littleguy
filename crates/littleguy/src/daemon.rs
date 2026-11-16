@@ -193,7 +193,10 @@ pub fn harness(
         .window(config.window)
         // A tick with no cap of its own takes this one too. With no bound
         // in the config, an op runs until the model answers (ADR 0034).
-        .max_steps(config.max_steps.unwrap_or(u32::MAX));
+        .max_steps(config.max_steps.unwrap_or(u32::MAX))
+        // Each op ends its run, so the next op reads the profile again
+        // (ADR 0035).
+        .max_ops_per_run(runs::OPS_PER_RUN);
     // Each tool cuts its own result, by a setting of the owner such as
     // `fetch_max_chars`. The engine cuts no result again (ADR 0034).
     let harness = AgentHarness::new(model).tool_output_limit(usize::MAX);
@@ -513,6 +516,13 @@ pub struct Daemon {
     kit: Box<reload::Kit>,
     /// The readers of the answers that the model writes now.
     live: Arc<live::Live>,
+    /// Whether the run of the assistant must end before the next op, so
+    /// that op reads a new profile (ADR 0035).
+    roll_due: bool,
+    /// The ends that this daemon asked for, for their idempotency keys.
+    rolls: u64,
+    /// When the last purge of the ended runs finished.
+    purged_at: Option<DateTime<Utc>>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
@@ -647,6 +657,10 @@ impl Daemon {
             refine: built.refine,
             kit: Box::new(kit),
             live,
+            // A run from before this start holds an old profile.
+            roll_due: true,
+            rolls: 0,
+            purged_at: None,
         })
     }
 
@@ -888,6 +902,8 @@ impl Daemon {
         );
         #[cfg(feature = "council")]
         let started = (self.clock)();
+        // A new profile reaches the run before this message.
+        self.roll().await?;
         // A tick that is due already runs first, so the op of this message
         // is the next segment, and its run id is known before it starts.
         sqlite::drive(&mut self.rt, &id).await?;
@@ -1481,6 +1497,8 @@ impl Daemon {
     pub async fn tick(&mut self) -> Result<()> {
         #[cfg(feature = "council")]
         let started = (self.clock)();
+        // A new profile reaches the run before a tick.
+        self.roll().await?;
         // A poll fires each due schedule, such as the nightly consolidation,
         // and drives every run once.
         self.rt.poll_once().await?;
@@ -1509,6 +1527,10 @@ impl Daemon {
             let state = sqlite::state(&self.rt, self.routing.assistant()).await?;
             self.mark_proposals(started, state.as_ref())?;
             self.council_turn().await?;
+        }
+        // A failed purge leaves the runs for the next tick. The tick goes on.
+        if let Err(error) = self.purge((self.clock)()) {
+            tracing::warn!(error = %format!("{error:#}"), "the purge of the ended runs failed");
         }
         Ok(())
     }
@@ -2258,6 +2280,7 @@ mod plans;
 #[cfg(feature = "refine")]
 mod refine;
 mod reload;
+mod runs;
 #[cfg(feature = "skills")]
 mod skills;
 mod usage;
@@ -3809,6 +3832,86 @@ mod tests {
         // The config caps the rounds: three ran, and the fourth call found
         // the cap.
         assert_eq!(busy.calls.load(Ordering::SeqCst), 4);
+    }
+
+    /// Opens a daemon on `db` with `max_steps` and a [`BusyModel`], sends
+    /// one message, and returns the model calls of that message.
+    async fn busy_calls(daemon: &mut Daemon, busy: &BusyModel, key: &str) -> u64 {
+        use std::sync::atomic::Ordering;
+        let before = busy.calls.load(Ordering::SeqCst);
+        let response = daemon.handle_request(UID, request(key, "dig")).await;
+        assert!(matches!(response, Response::NoAnswer { .. }));
+        busy.calls.load(Ordering::SeqCst) - before
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reload_reaches_the_next_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let busy = Arc::new(BusyModel::default());
+        let mut config = config();
+        config.max_steps = Some(3);
+        let model: Arc<dyn AgentModel> = Arc::clone(&busy) as Arc<dyn AgentModel>;
+        let mut daemon =
+            Daemon::open(&dir.path().join("lg.db"), &config, model, UID, false).unwrap();
+        assert_eq!(busy_calls(&mut daemon, &busy, "r-1").await, 4);
+        config.max_steps = Some(5);
+        daemon.reload(config).unwrap();
+        // The run that read three rounds ended, so this message has five.
+        assert_eq!(busy_calls(&mut daemon, &busy, "r-2").await, 6);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restart_reaches_the_next_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let busy = Arc::new(BusyModel::default());
+        let model: Arc<dyn AgentModel> = Arc::clone(&busy) as Arc<dyn AgentModel>;
+        let mut config = config();
+        config.max_steps = Some(3);
+        let mut daemon = Daemon::open(&db, &config, Arc::clone(&model), UID, false).unwrap();
+        assert_eq!(busy_calls(&mut daemon, &busy, "s-1").await, 4);
+        drop(daemon);
+        config.max_steps = Some(5);
+        let mut daemon = Daemon::open(&db, &config, model, UID, false).unwrap();
+        assert_eq!(busy_calls(&mut daemon, &busy, "s-2").await, 6);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ended_run_goes_after_keep_days_and_the_running_one_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(OfflineModel::new()),
+            UID,
+            false,
+        )
+        .unwrap();
+        for key in ["k-1", "k-2"] {
+            let response = daemon.handle_request(UID, request(key, "hello")).await;
+            assert!(matches!(response, Response::Reply { .. }));
+        }
+        let now = Utc::now();
+        // Each message ended its run. Within thirty days, every run stays.
+        let early = daemon.purge(now + chrono::TimeDelta::days(29)).unwrap();
+        assert_eq!(early.map(|report| report.removed), Some(0));
+        // The purge waits a day before it looks again.
+        let soon = daemon.purge(now + chrono::TimeDelta::days(29) + chrono::TimeDelta::hours(1));
+        assert!(soon.unwrap().is_none());
+        let late = daemon
+            .purge(now + chrono::TimeDelta::days(31))
+            .unwrap()
+            .unwrap();
+        assert!(late.removed >= 2, "the ended runs of both messages go");
+        assert!(late.complete);
+        // The run that waits for the next message stays, and it answers.
+        assert!(
+            sqlite::current_run(&daemon.rt, daemon.assistant())
+                .unwrap()
+                .is_some()
+        );
+        let response = daemon.handle_request(UID, request("k-3", "hello")).await;
+        assert!(matches!(response, Response::Reply { .. }));
     }
 
     fn reply_text(response: &Response) -> &str {

@@ -22,9 +22,9 @@ pub struct Merge {
     /// The sections that changed and wait for a restart, in file order.
     pub restart: Vec<&'static str>,
     /// The sections that changed and shape the agent profile, in file
-    /// order. The daemon takes them, but the running assistant keeps the
-    /// profile of its run. autumn-harvest reads the profile once per run,
-    /// and a run on SQLite never ends (autumn-harvest #2658).
+    /// order. autumn-harvest reads the profile once per run (autumn-harvest
+    /// #2658), so they apply from the next message, which starts a new run
+    /// (ADR 0035).
     pub profile: Vec<&'static str>,
 }
 
@@ -82,7 +82,7 @@ pub fn merge(current: &Config, mut next: Config) -> Merge {
     keep!(sandbox);
     live!(approvals, flow);
     keep!(mcp);
-    live!(refine, council);
+    live!(refine, council, runs);
     keep!(ui, hooks, fleet);
     Merge {
         config: next,
@@ -107,6 +107,13 @@ mod tests {
         assert!(merge.is_empty());
         assert_eq!(merge.restart, [] as [&str; 0]);
         assert_eq!(merge.config, config);
+    }
+
+    #[test]
+    fn the_retention_of_runs_applies_at_once() {
+        let merge = merge(&parse(""), parse("[runs]\nkeep_days = 7"));
+        assert_eq!(merge.applied, ["runs"]);
+        assert_eq!(merge.config.runs.keep_days, 7);
     }
 
     #[test]

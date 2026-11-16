@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, 2026-11-11.
+Accepted, 2026-11-11. ADR 0035 makes a profile change reach the next message.
 
 ## Context
 

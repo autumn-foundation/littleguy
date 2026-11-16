@@ -261,10 +261,7 @@ fn render_reload(applied: &[String], restart: &[String], profile: &[String]) -> 
         format!("applied: {}", applied.join(", "))
     }];
     if !profile.is_empty() {
-        lines.push(format!(
-            "stored, but the assistant keeps its profile until autumn-harvest reads it again (#2658): {}",
-            profile.join(", ")
-        ));
+        lines.push(format!("from the next message: {}", profile.join(", ")));
     }
     if !restart.is_empty() {
         lines.push(format!(

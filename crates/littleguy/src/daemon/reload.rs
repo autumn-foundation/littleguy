@@ -383,6 +383,9 @@ impl Daemon {
             self.refine = built.refine;
         }
         self.kit.config = config;
+        // The run ends before the next op, so that op reads the new
+        // profile (ADR 0035).
+        self.roll_due = true;
         // The refine loop or the skills folder may have changed.
         #[cfg(feature = "skills")]
         {

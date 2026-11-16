@@ -145,6 +145,8 @@ enum Command {
     Ui,
     /// Read the config file again. Most sections apply at once.
     Reload,
+    /// Start a new conversation. Memory, notes and the workspace stay.
+    New,
     /// Propose, list and activate profile overlays of the assistant.
     #[command(subcommand)]
     Refine(RefineCommand),
@@ -755,6 +757,7 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Refine(command) => ask(&socket, &command.request()?).await,
         Command::Ui => ask(&socket, &Request::UiLink).await,
         Command::Reload => ask(&socket, &Request::Reload).await,
+        Command::New => ask(&socket, &Request::NewConversation).await,
     }
 }
 

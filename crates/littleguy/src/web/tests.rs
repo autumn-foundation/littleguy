@@ -1063,3 +1063,33 @@ async fn the_owner_accepts_and_retires_a_skill_on_the_skills_tab() {
         .await
         .assert_status(401);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_conversation_starts_the_thread_over() {
+    let rig = rig(&config(false)).await;
+    let token = sign_in(&rig).await;
+    chat(&rig, &token, "hi").await;
+    let home = rig.client.get("/").send().await;
+    home.assert_body_contains("you said");
+    assert_eq!(home.selector_count("button[hx-post='/new']"), 1);
+
+    let cleared = rig
+        .client
+        .post("/new")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    cleared.assert_status(200);
+    cleared.assert_body_contains("Say hi to littleguy.");
+    let home = rig.client.get("/").send().await;
+    home.assert_body_contains("Say hi to littleguy.");
+    assert!(!home.text().contains("you said"), "the old turns are gone");
+
+    rig.client.log_out();
+    rig.client
+        .post("/new")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(401);
+}

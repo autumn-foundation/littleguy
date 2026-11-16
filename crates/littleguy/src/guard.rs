@@ -2,8 +2,8 @@
 //! rule holds.
 //!
 //! Two things make a call wait. The `run_code` tool asks for each call, or
-//! with `approve = "untrusted"` once the conversation holds untrusted input
-//! ([`Untrusted`], ADR 0033). A flow
+//! with `approve = "untrusted"` while the conversation holds untrusted input
+//! ([`Untrusted`], ADR 0033 and ADR 0036). A flow
 //! rule asks when a call would complete a dangerous label set, such as the
 //! Rule of Two. The engine decides both, and names the wait. It does not
 //! show the call. So [`ApprovalGate`] records each call that may wait,
@@ -16,13 +16,14 @@
 //! store drops it later.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use autumn_harvest_agent::flow::{FlowRules, effect_label, labels};
 use autumn_harvest_agent::{
-    AgentHarness, AgentProfile, BoxFuture, Rule, RunInfo, Tool, ToolCall, ToolDecision, ToolPolicy,
+    AgentHarness, AgentProfile, BoxFuture, ChatMessage, ContentPart, Rule, RunInfo, Tool, ToolCall,
+    ToolDecision, ToolPolicy,
 };
 use littleguy_stores::SqliteStores;
 
@@ -35,13 +36,24 @@ pub const UNTRUSTED_CODE_REASON: &str =
 /// Whether the conversation holds untrusted input, for `approve =
 /// "untrusted"` (ADR 0033).
 ///
-/// The gate cannot see the labels of the run. So it marks this when it lets
-/// a call with [`labels::UNTRUSTED_INPUT`] run, and the daemon sets it from
-/// the labels that the engine keeps at the start of each op. A run that
-/// read outside text keeps the mark until its transcript resets.
+/// The gate cannot see the transcript. So it marks this when it lets a call
+/// with [`labels::UNTRUSTED_INPUT`] run. At the start of each op the daemon
+/// sets it from the transcript: the mark holds while the transcript holds a
+/// call of such a tool. A new conversation clears the transcript, and a
+/// call that leaves the window leaves the mark with it.
+///
+/// The mark belongs to the conversation, not to the run (ADR 0036). The
+/// labels of the engine outlive the window, so a page that the model no
+/// longer sees still holds them. A clear of the transcript keeps the labels
+/// of the workspace and of the memory notes, so one file that the assistant
+/// wrote after a page would hold them forever.
 #[derive(Debug, Default)]
 pub struct Untrusted {
     seen: AtomicBool,
+    /// The tools that bring outside text. A reload adds to the set and
+    /// never removes from it, so a call of a tool that a reload turned off
+    /// still counts.
+    tools: Mutex<BTreeSet<String>>,
 }
 
 impl Untrusted {
@@ -56,11 +68,33 @@ impl Untrusted {
         self.seen.store(true, Ordering::SeqCst);
     }
 
-    /// Sets the mark from the labels of the run, at the start of an op.
-    pub fn reset(&self, labels: Option<&BTreeSet<String>>) {
-        let seen = labels.is_some_and(|labels| labels.contains(labels::UNTRUSTED_INPUT));
+    /// Learns which of `tools` bring outside text.
+    pub fn learn(&self, tools: &[Arc<dyn Tool>]) {
+        let mut names = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
+        names.extend(
+            tools
+                .iter()
+                .filter(|tool| brings_outside_text(tool.as_ref()))
+                .map(|tool| tool.name().to_owned()),
+        );
+    }
+
+    /// Sets the mark from `transcript`, at the start of an op.
+    pub fn reset(&self, transcript: &[ChatMessage]) {
+        let names = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
+        let seen = transcript
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|part| matches!(part, ContentPart::ToolCall { name, .. } if names.contains(name)));
         self.seen.store(seen, Ordering::SeqCst);
     }
+}
+
+/// Whether `tool` brings outside text.
+fn brings_outside_text(tool: &dyn Tool) -> bool {
+    tool.labels()
+        .iter()
+        .any(|label| label == labels::UNTRUSTED_INPUT)
 }
 
 /// When a `run_code` call waits.
@@ -70,15 +104,9 @@ pub enum Code {
     Off,
     /// Each call waits.
     Always,
-    /// A call waits once the conversation holds untrusted input. Without
-    /// flow rules the engine keeps no labels, so nothing says that the
-    /// conversation is clean, and each call waits.
-    Untrusted {
-        /// The mark that the gate and the daemon share.
-        seen: Arc<Untrusted>,
-        /// Whether the run keeps labels at all.
-        tracked: bool,
-    },
+    /// A call waits once the conversation holds untrusted input. The gate
+    /// and the daemon share the mark.
+    Untrusted(Arc<Untrusted>),
 }
 
 /// The reason of a call that a flow rule may hold, for the approver.
@@ -158,10 +186,7 @@ impl Guard {
         let code = match (self.sandbox.is_some(), self.untrusted) {
             (false, _) => Code::Off,
             (true, None) => Code::Always,
-            (true, Some(seen)) => Code::Untrusted {
-                seen,
-                tracked: !self.flow.is_empty(),
-            },
+            (true, Some(seen)) => Code::Untrusted(seen),
         };
         harness = crate::sandbox::give(harness, self.sandbox);
         let gate = ApprovalGate::new(self.stores, code, self.always, &self.flow);
@@ -216,8 +241,8 @@ impl ApprovalGate {
             match &self.code {
                 Code::Off => {}
                 Code::Always => return Some(ASK_REASON),
-                Code::Untrusted { seen, tracked } => {
-                    if !tracked || seen.seen() {
+                Code::Untrusted(seen) => {
+                    if seen.seen() {
                         return Some(UNTRUSTED_CODE_REASON);
                     }
                 }
@@ -272,12 +297,8 @@ impl ApprovalGate {
         };
         // A call that brings outside text marks the conversation, before it
         // runs, so a later run_code call in the same op waits.
-        if let Code::Untrusted { seen, .. } = &self.code
-            && tool.is_some_and(|tool| {
-                tool.labels()
-                    .iter()
-                    .any(|label| label == labels::UNTRUSTED_INPUT)
-            })
+        if let Code::Untrusted(seen) = &self.code
+            && tool.is_some_and(brings_outside_text)
         {
             seen.see();
         }
@@ -350,6 +371,46 @@ mod tests {
             tool = tool.label(*label);
         }
         Arc::new(tool)
+    }
+
+    fn call(name: &str) -> ChatMessage {
+        ChatMessage {
+            role: autumn_harvest_agent::ChatRole::Assistant,
+            content: vec![ContentPart::ToolCall {
+                id: String::from("c-1"),
+                name: String::from(name),
+                arguments: json!({}),
+            }],
+        }
+    }
+
+    #[test]
+    fn the_mark_holds_while_the_transcript_holds_a_call_that_brings_outside_text() {
+        let mark = Untrusted::default();
+        mark.learn(&[
+            tool("web", ToolEffect::ReadOnly, &[UNTRUSTED_INPUT]),
+            tool("note", ToolEffect::Write, &[]),
+        ]);
+        let said = ChatMessage::text(autumn_harvest_agent::ChatRole::User, "use web");
+        mark.reset(&[said.clone(), call("note")]);
+        assert!(!mark.seen(), "a clean tool leaves no mark");
+        mark.reset(&[said.clone(), call("web")]);
+        assert!(mark.seen(), "the web call marks the conversation");
+        mark.reset(&[said]);
+        assert!(!mark.seen(), "the call left the transcript");
+        mark.see();
+        assert!(mark.seen(), "a call in the op marks it at once");
+        mark.reset(&[]);
+        assert!(!mark.seen(), "a new conversation starts clean");
+    }
+
+    #[test]
+    fn a_reload_never_forgets_a_tool_that_brings_outside_text() {
+        let mark = Untrusted::default();
+        mark.learn(&[tool("web", ToolEffect::ReadOnly, &[UNTRUSTED_INPUT])]);
+        mark.learn(&[tool("note", ToolEffect::Write, &[])]);
+        mark.reset(&[call("web")]);
+        assert!(mark.seen(), "a call of a tool that is off now still counts");
     }
 
     #[test]

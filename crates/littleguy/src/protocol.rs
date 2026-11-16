@@ -109,6 +109,9 @@ pub enum Request {
     /// The text turns of the conversation, oldest first. Only the owner
     /// may.
     History,
+    /// Start a new conversation: the assistant forgets the transcript.
+    /// Memory, notes and the workspace stay. Only the owner may.
+    NewConversation,
     /// The files of the assistant workspace. Only the owner may.
     Workspace,
     /// One file of the assistant workspace. Only the owner may.
@@ -450,6 +453,8 @@ pub enum Response {
         /// Each call, oldest first.
         entries: Vec<ApprovalEntry>,
     },
+    /// The conversation starts over.
+    Cleared,
     /// A decision went to the assistant. Its answer went to the requester.
     Decided {
         /// The request number.
@@ -644,6 +649,7 @@ mod tests {
             Request::Connections,
             Request::Reload,
             Request::History,
+            Request::NewConversation,
             Request::Skills,
             Request::AcceptSkill { draft: 2 },
             Request::DeclineSkill { draft: 3 },

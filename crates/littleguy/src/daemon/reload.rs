@@ -181,6 +181,7 @@ impl Kit {
         .with(outside);
         tools = self.own_tools(config, tools)?;
         tracing::info!(tools = ?tools.names(), "the assistant tools");
+        self.untrusted.learn(tools.all());
         let flow = config.flow.rules();
         let asks = crate::guard::Guard::asks(&flow, tools.all(), runtime.is_some() || always.any());
         // The brief keeps its sent reports in the memory store, and the

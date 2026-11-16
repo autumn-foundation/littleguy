@@ -103,6 +103,10 @@ pub fn render(response: &Response) -> (String, bool) {
             false,
         ),
         Response::Approvals { entries } => (render_approvals(entries), true),
+        Response::Cleared => (
+            String::from("a new conversation starts. Memory, notes and the workspace stay"),
+            true,
+        ),
         Response::Decided { approval } => (
             format!("decided request #{approval}. The answer went to the requester"),
             true,

@@ -593,6 +593,11 @@ fn open_trusting(db: &Path, backend: &Arc<CountingBackend>, rule_of_two: bool) -
     if let Some(sandbox) = config.sandbox.as_mut() {
         sandbox.approve = littleguy_core::SandboxApprove::Untrusted;
     }
+    open_trusting_with(db, backend, &config)
+}
+
+/// A daemon with `config` and the `page` tool.
+fn open_trusting_with(db: &Path, backend: &Arc<CountingBackend>, config: &Config) -> Daemon {
     let runtime = crate::sandbox::runtime_on(
         Arc::clone(backend) as Arc<dyn SandboxBackend>,
         config.sandbox.as_ref().unwrap(),
@@ -610,7 +615,7 @@ fn open_trusting(db: &Path, backend: &Arc<CountingBackend>, rule_of_two: bool) -
     };
     Daemon::open_with(
         db,
-        &config,
+        config,
         Arc::new(MemoryModel::default()),
         UID,
         false,
@@ -664,18 +669,113 @@ async fn with_approve_untrusted_code_runs_at_once_until_outside_text_arrives() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn with_no_flow_rules_nothing_says_the_conversation_is_clean() {
+async fn with_no_flow_rules_the_transcript_still_says_when_outside_text_arrived() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(CountingBackend::default());
     let mut daemon = open_trusting(&dir.path().join("lg.db"), &backend, false);
-    let waiting = daemon
+    let ran = daemon
         .handle_request(UID, request("n-1", "run echo hi"))
+        .await;
+    assert_eq!(reply_text(&ran), "ran: hi");
+    daemon.handle_request(UID, request("n-2", "use page")).await;
+    let waiting = daemon
+        .handle_request(UID, request("n-3", "run echo hi"))
         .await;
     assert!(
         matches!(waiting, Response::Waiting { .. }),
-        "without labels each call waits"
+        "the page call in the transcript marks it"
     );
-    assert_eq!(backend.runs.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_conversation_lets_code_run_unasked_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let mut config = sandbox_config(None, 3600);
+    config.tools.files = true;
+    if let Some(sandbox) = config.sandbox.as_mut() {
+        sandbox.approve = littleguy_core::SandboxApprove::Untrusted;
+    }
+    let mut daemon = open_trusting_with(&dir.path().join("lg.db"), &backend, &config);
+    daemon.handle_request(UID, request("c-1", "use page")).await;
+    // A file write after outside text: the engine labels the workspace, and
+    // a cleared transcript keeps that label.
+    let saved = daemon
+        .handle_request(UID, request("c-2", "save tea.md mark likes tea"))
+        .await;
+    assert!(matches!(saved, Response::Reply { .. }), "the file is kept");
+
+    let cleared = daemon.handle_request(UID, Request::NewConversation).await;
+    assert_eq!(cleared, Response::Cleared);
+    let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
+        panic!("no history");
+    };
+    assert!(turns.is_empty(), "the transcript starts over");
+
+    // The counting backend returns no workspace files, so the reply is a
+    // protocol error. The run count says that the code ran unasked.
+    let ran = daemon
+        .handle_request(UID, request("c-3", "run echo hi"))
+        .await;
+    assert!(
+        matches!(ran, Response::Reply { .. }),
+        "code runs with no approval"
+    );
+    assert_eq!(backend.runs.load(Ordering::SeqCst), 1);
+
+    // Outside text in the new conversation marks it again.
+    daemon.handle_request(UID, request("c-4", "use page")).await;
+    let waiting = daemon
+        .handle_request(UID, request("c-5", "run echo hi"))
+        .await;
+    assert!(
+        matches!(waiting, Response::Waiting { .. }),
+        "the mark is back"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_conversation_waits_for_the_call_that_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let mut daemon = open_trusting(&dir.path().join("lg.db"), &backend, true);
+    daemon.handle_request(UID, request("w-1", "use page")).await;
+    let Response::Waiting { approval } = daemon
+        .handle_request(UID, request("w-2", "run echo hi"))
+        .await
+    else {
+        panic!("code after outside text does not wait");
+    };
+    let busy = daemon.handle_request(UID, Request::NewConversation).await;
+    assert_eq!(busy, Response::Busy { approval });
+    let stranger = daemon
+        .handle_request(UID + 1, Request::NewConversation)
+        .await;
+    assert!(matches!(stranger, Response::Error { .. }), "only the owner");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_text_that_leaves_the_window_leaves_the_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(CountingBackend::default());
+    let mut config = sandbox_config(None, 3600);
+    config.window = 2;
+    if let Some(sandbox) = config.sandbox.as_mut() {
+        sandbox.approve = littleguy_core::SandboxApprove::Untrusted;
+    }
+    let mut daemon = open_trusting_with(&dir.path().join("lg.db"), &backend, &config);
+    daemon.handle_request(UID, request("x-1", "use page")).await;
+    // One exchange of the owner's words pushes the page call out.
+    daemon.handle_request(UID, request("x-2", "hello")).await;
+    let ran = daemon
+        .handle_request(UID, request("x-3", "run echo hi"))
+        .await;
+    assert_eq!(
+        reply_text(&ran),
+        "ran: hi",
+        "the model no longer sees the page"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -693,6 +793,6 @@ async fn the_mark_of_outside_text_survives_a_restart() {
         .await;
     assert!(
         matches!(waiting, Response::Waiting { .. }),
-        "the engine keeps the labels, so the new daemon knows"
+        "the engine keeps the transcript, so the new daemon knows"
     );
 }

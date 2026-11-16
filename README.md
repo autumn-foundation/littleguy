@@ -492,9 +492,16 @@ docker compose exec lg lg chat "hi"
   tar --no-xattrs --no-mac-metadata --no-acls -C ~/.local/share/littleguy \
     --exclude lg.db.lock --exclude lg.sock -cf - . \
     | docker cp - "$(docker compose ps -aq lg)":/data/share/littleguy
-  docker compose run --rm --no-deps --user root --entrypoint chown lg -R lg:lg /data
+  # The data and the skills belong to lg. The config stays root's, so code
+  # in the sandbox cannot rewrite it (ADR 0032).
+  docker compose run --rm --no-deps --user root --entrypoint sh lg -c \
+    'chown -R lg:lg /data/share /data/config/littleguy/skills; chown root:root /data/config/littleguy /data/config/littleguy/lg.toml'
   docker compose up -d
   ```
+
+  A volume made before ADR 0032 has a config folder that `lg` owns. The same
+  `docker compose run` line fixes it. Later config changes go in with
+  `docker compose cp`, which writes as root.
 - **Pages.** They serve on the loopback address of the container. A small
   `pages` service shares its network and forwards to them, and compose
   publishes it on `127.0.0.1:3004` of the Mac only. So the pages stay on

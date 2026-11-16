@@ -2142,16 +2142,51 @@ fn wire_piece(piece: live::Piece) -> Option<crate::protocol::Piece> {
     }
 }
 
+/// Why the socket refuses a caller with the uid of the daemon.
+pub const SANDBOXED_PEER: &str = "this socket takes no request from code in a sandbox";
+
+/// Whether the process `pid` is in the user namespace of this daemon.
+///
+/// The process sandbox runs each call in a new user namespace with the uid
+/// of the daemon. So a peer with that uid in another namespace is code
+/// that the assistant runs, and it must not act as the owner (ADR 0032).
+/// A peer that cannot be checked counts as one in another namespace.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn in_our_user_namespace(pid: Option<i32>) -> bool {
+    let Some(pid) = pid else {
+        return false;
+    };
+    let ours = std::fs::read_link("/proc/self/ns/user");
+    let theirs = std::fs::read_link(format!("/proc/{pid}/ns/user"));
+    matches!((ours, theirs), (Ok(ours), Ok(theirs)) if ours == theirs)
+}
+
+/// Whether the process `pid` is in the user namespace of this daemon. This
+/// system has no user namespaces, and no process sandbox, so it is.
+#[cfg(not(target_os = "linux"))]
+#[must_use]
+pub const fn in_our_user_namespace(_pid: Option<i32>) -> bool {
+    true
+}
+
 async fn serve_connection(
     stream: UnixStream,
     tx: mpsc::Sender<Job>,
     taps: &live::Live,
 ) -> Result<()> {
-    let uid = stream
-        .peer_cred()
-        .context("reading the peer credentials")?
-        .uid();
+    let peer = stream.peer_cred().context("reading the peer credentials")?;
+    let uid = peer.uid();
     let (read, mut write) = stream.into_split();
+    // A caller with another uid is no owner, and the uid rules hold for it.
+    // A caller with our uid must also be in our user namespace.
+    if uid == rustix::process::getuid().as_raw() && !in_our_user_namespace(peer.pid()) {
+        tracing::warn!(pid = ?peer.pid(), "refused a socket caller from a sandbox");
+        let refused = Response::Error {
+            message: String::from(SANDBOXED_PEER),
+        };
+        return write_line(&mut write, &refused).await;
+    }
     let limit = u64::try_from(MAX_REQUEST_BYTES).unwrap_or(u64::MAX);
     let mut reader = BufReader::new(read.take(limit + 1));
     let mut line = String::new();
@@ -2185,6 +2220,21 @@ async fn serve_connection(
         }
     };
     write_line(&mut write, &response).await
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod namespace_tests {
+    #[test]
+    fn this_process_is_in_its_own_namespace_and_no_pid_is_not() {
+        assert!(super::in_our_user_namespace(Some(
+            std::process::id().cast_signed()
+        )));
+        assert!(!super::in_our_user_namespace(None));
+        assert!(
+            !super::in_our_user_namespace(Some(i32::MAX)),
+            "a process that cannot be read counts as a stranger"
+        );
+    }
 }
 
 #[cfg(feature = "council")]

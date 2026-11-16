@@ -25,9 +25,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
     ca-certificates python3 nodejs bash socat tini \
     && rm -rf /var/lib/apt/lists/*
+# The config folder belongs to root, so code in the sandbox, which runs as
+# lg, cannot rewrite lg.toml (ADR 0032). The daemon writes only the skills
+# folder there.
 RUN useradd --create-home --uid 1000 lg \
-    && mkdir -p /data/config/littleguy /data/share/littleguy \
-    && chown -R lg:lg /data
+    && mkdir -p /data/config/littleguy/skills /data/share/littleguy \
+    && chown -R lg:lg /data/share /data/config/littleguy/skills
 COPY --from=build /usr/local/bin/lg /usr/local/bin/lg
 USER lg
 # The config, the databases, the socket and the workspace all live in /data.

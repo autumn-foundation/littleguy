@@ -48,6 +48,17 @@ cargo run --bin lg -- serve --model openrouter --model-name <vendor>/<model>
 `--base-url` (or `LG_BASE_URL`) points `--model openai` at any other server
 that speaks the same API, such as a local one.
 
+A reasoning model writes hidden reasoning before each answer, and that
+output takes time: on a slow turn it can be half of what the model writes.
+`--reasoning` (or `LG_REASONING`) sets how much, for `--model openai` and
+`--model openrouter`: `none`, `minimal`, `low`, `medium` or `high`. Without
+it, the model's own default holds. OpenAI gets `reasoning_effort`, and
+OpenRouter gets its `reasoning` object, where `none` turns reasoning off:
+
+```sh
+cargo run --bin lg -- serve --model openrouter --model-name <vendor>/<model> --reasoning low
+```
+
 ## Build features
 
 Each integration is a cargo feature, so a build carries only the crates it
@@ -497,7 +508,8 @@ docker compose exec lg lg chat "hi"
 
 - **Keys.** Compose passes `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, `LG_BRAVE_API_KEY` and the Discord and Slack tokens from
-  your shell by name, and `LG_MODEL` and `LG_MODEL_NAME` pick the model:
+  your shell by name, and `LG_MODEL` and `LG_MODEL_NAME` pick the model
+  (`LG_REASONING` sets the reasoning effort):
   `LG_MODEL=openrouter LG_MODEL_NAME=deepseek/deepseek-v4.1-flash-1017
   docker compose up -d`. No file holds a key.
 - **Data.** The config, `lg.db`, `memory.db`, the skills and the workspace

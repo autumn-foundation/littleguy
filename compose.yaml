@@ -13,6 +13,7 @@ services:
     command: ["serve", "--model", "${LG_MODEL:-offline}"]
     environment:
       - LG_MODEL_NAME
+      - LG_REASONING
       - OPENROUTER_API_KEY
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY

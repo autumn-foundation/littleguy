@@ -599,6 +599,21 @@ catalog = "/etc/littleguy/providers.yaml"
 
 The catalog decides where a token can go, so only you write it.
 
+A provider that takes an API key, such as `openai` or `airtable-pat`,
+needs no client id or secret in the config:
+
+```toml
+[[san_mateo.integration]]
+key = "airtable"
+provider = "airtable-pat"
+```
+
+For such a provider, `lg connect airtable` prints a link to the connect
+page of San Mateo. Type the key there, in a browser on this machine. The
+key goes from the page to San Mateo, which seals it like a token, so it
+is never in the config, the environment or a shell history. A plain OAuth
+provider skips the page and goes straight to its sign-in.
+
 ## Mail and calendar
 
 Feature `google`, off by default. It turns `oauth` on.
@@ -660,8 +675,7 @@ max_chars = 20000           # the most characters of one answer
 
 The model names a path, never a host. San Mateo sends the call to the base
 URL of the provider in its catalog and adds the token, so no tool sees a
-token and no call can carry one elsewhere. `lg connect` works for OAuth
-providers today.
+token and no call can carry one elsewhere.
 [ADR 0031](docs/adr/0031-api-calls-through-san-mateo.md) explains the
 design.
 

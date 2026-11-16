@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use littleguy_core::{Integration, SanMateoConfig};
 use san_mateo::store::ConnectionFilter;
 use san_mateo::{
-    Background, BackgroundSettings, Catalog, ConnectSessionInput, ConnectionKey, EndUser,
+    AuthMode, Background, BackgroundSettings, Catalog, ConnectSessionInput, ConnectionKey, EndUser,
     EnvironmentConfig, HttpTransport, IntegrationPatch, KeyRing, NewIntegration, SanMateo, Secret,
 };
 use san_mateo_sqlite::SqliteStore;
@@ -180,16 +180,20 @@ impl Connections {
     }
 
     /// A link that connects one account of `integration` for the owner.
-    /// The browser goes from it straight to the provider.
+    /// For a plain OAuth provider, the browser goes from it straight to the
+    /// provider. For any other, such as one that takes an API key, it opens
+    /// the connect page of San Mateo, and the owner types what the provider
+    /// needs there.
     ///
     /// # Errors
     ///
     /// Returns an error when the config has no such integration, or the
     /// session does not save.
     pub async fn connect(&self, integration: &str) -> Result<String> {
-        if !self.integrations.iter().any(|(key, _)| key == integration) {
+        let Some((_, provider)) = self.integrations.iter().find(|(key, _)| key == integration)
+        else {
             bail!("the config has no integration `{integration}`. Add a [[san_mateo.integration]]");
-        }
+        };
         let input = ConnectSessionInput {
             end_user: Some(EndUser {
                 id: self.owner.clone(),
@@ -203,11 +207,27 @@ impl Connections {
             .create_connect_session(ENVIRONMENT, input)
             .await
             .context("making a connect session")?;
+        let page = if self.straight_to_provider(provider) {
+            format!("oauth/connect/{integration}")
+        } else {
+            String::from("connect")
+        };
         Ok(format!(
-            "{}/oauth/connect/{integration}?connect_session_token={}",
+            "{}/{page}?connect_session_token={}",
             self.server_url,
             session.token.expose()
         ))
+    }
+
+    /// Whether a connect of `provider` needs nothing from the owner but a
+    /// sign-in at the provider: OAuth, with no field to fill in first.
+    fn straight_to_provider(&self, provider: &str) -> bool {
+        self.san.catalog().get(provider).is_some_and(|p| {
+            p.auth_mode == AuthMode::OAuth2
+                && p.connection_config
+                    .values()
+                    .all(|field| field.automated.unwrap_or(false))
+        })
     }
 
     /// Every connection, with no credentials.
@@ -385,6 +405,13 @@ google:
     token_url: https://oauth2.googleapis.com/token
     proxy:
         base_url: https://www.googleapis.com
+keyed:
+    display_name: Keyed
+    auth_mode: API_KEY
+    proxy:
+        base_url: https://api.keyed.example.com
+        headers:
+            x-api-key: ${apiKey}
 ";
 
     /// The base URL of the fake Google API.
@@ -698,6 +725,69 @@ widgets:
         assert_eq!(again.list().await.unwrap(), Vec::new());
         again.stop().await;
         assert!(path_for(&db).exists());
+    }
+
+    /// A provider that takes an API key gets the connect page of San
+    /// Mateo, where the owner types the key. The key is sealed, and calls
+    /// carry it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_owner_connects_an_api_key_on_the_connect_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = MemoryTransport::new();
+        let mut config = section("keyed", None);
+        config.integrations[0].key = String::from("k");
+        config.integrations[0].client_id = None;
+        let connections = start(&dir.path().join("lg.db"), &config, &fake)
+            .await
+            .unwrap();
+        let link = connections.connect("k").await.unwrap();
+        let page_url = reqwest::Url::parse(&link).unwrap();
+        assert_eq!(page_url.path(), "/connect", "an API key needs the form");
+        let token = query(&page_url, "connect_session_token").unwrap();
+        let browser = reqwest::Client::builder().no_proxy().build().unwrap();
+        let page = browser.get(&link).send().await.unwrap();
+        assert!(page.status().is_success(), "{}", page.status());
+        let html = page.text().await.unwrap();
+        assert!(
+            html.contains("api-auth/api-key/k"),
+            "the page has a key form"
+        );
+        let posted = browser
+            .post(format!(
+                "{}/api-auth/api-key/k?connect_session_token={token}",
+                connections.server_url()
+            ))
+            .header("content-type", "application/json")
+            .body(r#"{"apiKey": "sk-test-1"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert!(posted.status().is_success(), "{}", posted.status());
+        let entries = connections.list().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].provider, "keyed");
+        let stored = std::fs::read(path_for(&dir.path().join("lg.db"))).unwrap();
+        assert!(
+            !stored.windows(9).any(|w| w == b"sk-test-1"),
+            "the key is sealed in san-mateo.db"
+        );
+        #[cfg(feature = "api")]
+        {
+            use littleguy_tools::api::{ApiCall, ProviderApi};
+            let (api, _) = connections.api(&[String::from("k")]);
+            let call = ApiCall {
+                integration: String::from("k"),
+                method: String::from("GET"),
+                path: String::from("/v1/things"),
+                params: Vec::new(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            };
+            api.send(call).await.unwrap();
+            let sent = fake.requests_to("https://api.keyed.example.com/v1/things");
+            assert_eq!(sent[0].header_value("x-api-key"), Some("sk-test-1"));
+        }
+        connections.stop().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

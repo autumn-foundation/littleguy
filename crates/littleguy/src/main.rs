@@ -646,6 +646,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         handle,
         logins,
         streams: web::Streams::default(),
+        decisions: web::Decisions::default(),
         hooks,
         #[cfg(feature = "slack")]
         slack,

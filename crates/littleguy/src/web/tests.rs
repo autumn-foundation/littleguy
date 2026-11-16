@@ -103,6 +103,7 @@ async fn rig_on(
         handle: handle.clone(),
         logins: logins.clone(),
         streams: crate::web::Streams::default(),
+        decisions: crate::web::Decisions::default(),
         hooks,
         #[cfg(feature = "slack")]
         slack,
@@ -417,23 +418,50 @@ async fn pairing_and_approvals_answer_in_their_sections() {
     unpaired.assert_body_contains("no paired sender has that id");
     let approvals = rig.client.get("/approvals").send().await;
     approvals.assert_body_contains("no call waits for approval in this daemon");
-    let approved = rig
-        .client
-        .post("/approvals/7/approve")
-        .header("X-CSRF-Token", &token)
+    for (button, done) in [("approve", "Approved"), ("deny", "Denied")] {
+        let pressed = rig
+            .client
+            .post(&format!("/approvals/7/{button}"))
+            .header("X-CSRF-Token", &token)
+            .send()
+            .await;
+        // The press answers at once. The section asks for the result.
+        pressed.assert_status(200);
+        pressed.assert_body_contains(&format!("{done} request #7. It runs now"));
+        pressed.assert_body_contains("hx-get=\"/approvals/7/result\"");
+        let result = result_of(&rig, 7).await;
+        // The failed decision is red. The list is off, so it is muted.
+        assert_eq!(result.selector_count("section#approvals p.error"), 1);
+        assert_eq!(result.selector_count("section#approvals p.off"), 1);
+        let again = rig.client.get("/approvals/7/result").send().await;
+        assert_eq!(
+            again.selector_count("section#approvals p.error"),
+            0,
+            "a result is read once"
+        );
+    }
+    rig.client.log_out();
+    rig.client
+        .get("/approvals/7/result")
         .send()
-        .await;
-    // The failed approval is red. The list is off, so it is muted.
-    assert_eq!(approved.selector_count("section#approvals p.error"), 1);
-    assert_eq!(approved.selector_count("section#approvals p.off"), 1);
-    let denied = rig
-        .client
-        .post("/approvals/7/deny")
-        .header("X-CSRF-Token", &token)
-        .send()
-        .await;
-    assert_eq!(denied.selector_count("section#approvals p.error"), 1);
-    assert_eq!(denied.selector_count("section#approvals p.off"), 1);
+        .await
+        .assert_status(401);
+}
+
+/// The result of the decision on call `id`, once its run answered.
+async fn result_of(rig: &Rig, id: i64) -> autumn_web::test::TestResponse {
+    for _ in 0..200 {
+        let result = rig
+            .client
+            .get(&format!("/approvals/{id}/result"))
+            .send()
+            .await;
+        if result.status == 200 {
+            return result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the decision on #{id} never answered");
 }
 
 #[tokio::test(flavor = "multi_thread")]

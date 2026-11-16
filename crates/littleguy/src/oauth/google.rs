@@ -3,7 +3,6 @@
 
 use autumn_harvest_agent::{AgentError, BoxFuture, ErrorKind};
 use littleguy_tools::google::{ApiRequest, ApiResponse, GoogleApi};
-use san_mateo::store::ConnectionFilter;
 use san_mateo::{ConnectionKey, ProxyRequest, SanMateo};
 
 use super::{Connections, ENVIRONMENT};
@@ -46,27 +45,9 @@ fn tool_error(message: impl Into<String>) -> AgentError {
 impl GoogleProxy {
     /// The newest connection of the integration for the owner.
     async fn connection(&self) -> Result<ConnectionKey, AgentError> {
-        let filter = ConnectionFilter {
-            provider_config_key: Some(self.integration.clone()),
-            end_user_id: Some(self.owner.clone()),
-            ..ConnectionFilter::default()
-        };
-        let summaries = self
-            .san
-            .list_connections(ENVIRONMENT, &filter)
+        super::newest(&self.san, &self.integration, &self.owner, "Google account")
             .await
-            .map_err(|e| tool_error(format!("the connections do not read: {e}")))?;
-        let newest = summaries
-            .into_iter()
-            .filter(|c| !c.refresh_exhausted)
-            .max_by_key(|c| c.created_at)
-            .ok_or_else(|| {
-                tool_error(format!(
-                    "no Google account is connected. The owner runs `lg connect {}`",
-                    self.integration
-                ))
-            })?;
-        Ok(ConnectionKey::new(&self.integration, &newest.connection_id))
+            .map_err(tool_error)
     }
 
     /// Sends `request` with the token of the owner.

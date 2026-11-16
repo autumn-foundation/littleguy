@@ -168,9 +168,9 @@ fn line(name: &str, value: &serde_json::Value) -> String {
     format!("{name}: {text}")
 }
 
-/// The header and the body of a mail send or an invite, or `None` for
-/// another tool.
-fn google_parts(record: &ApprovalRecord) -> Option<(String, String)> {
+/// The header and the body of a mail send, an invite or an `api_send`, or
+/// `None` for another tool.
+fn known_parts(record: &ApprovalRecord) -> Option<(String, String)> {
     let arguments = &record.arguments;
     let text = |key: &str| arguments[key].as_str().unwrap_or_default().to_owned();
     match record.tool.as_str() {
@@ -195,17 +195,43 @@ fn google_parts(record: &ApprovalRecord) -> Option<(String, String)> {
             .join("\n");
             Some((text("description"), header))
         }
+        "api_send" => {
+            let call = format!(
+                "{} {}",
+                arguments["method"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_ascii_uppercase(),
+                arguments["path"].as_str().unwrap_or_default()
+            );
+            let mut header = [
+                line("Call", &serde_json::Value::String(call)),
+                line("Integration", &arguments["integration"]),
+            ]
+            .join("\n");
+            for key in ["query", "headers"] {
+                if let Some(value) = arguments.get(key).filter(|v| !v.is_null()) {
+                    let _ = write!(header, "\n{key}: {value}");
+                }
+            }
+            let body = ["body", "form"]
+                .into_iter()
+                .find_map(|key| arguments.get(key).filter(|v| !v.is_null()))
+                .map(|value| serde_json::to_string_pretty(value).unwrap_or_default())
+                .unwrap_or_default();
+            Some((body, header))
+        }
         _ => None,
     }
 }
 
 /// What the call does, for a person: the runtime and the code of a
-/// `run_code` call, the mail of a send, the event of an invite, or the
-/// arguments of any other call.
+/// `run_code` call, the mail of a send, the event of an invite, the method
+/// and path of an `api_send`, or the arguments of any other call.
 #[must_use]
 pub fn describe(record: &ApprovalRecord) -> String {
     let arguments = &record.arguments;
-    let (body, header) = google_parts(record).unwrap_or_else(|| {
+    let (body, header) = known_parts(record).unwrap_or_else(|| {
         match (arguments["runtime"].as_str(), arguments["code"].as_str()) {
             (Some(runtime), Some(code)) => (code.to_owned(), format!("Runtime: {runtime}")),
             (Some(runtime), None) => (String::new(), format!("Runtime: {runtime}, no code")),
@@ -278,6 +304,28 @@ mod tests {
             verdict: None,
             closed: false,
         }
+    }
+
+    #[test]
+    fn an_api_send_shows_its_method_path_and_body_first() {
+        let record = ApprovalRecord {
+            tool: String::from("api_send"),
+            ..record(json!({
+                "integration": "github",
+                "method": "post",
+                "path": "/repos/m/lg/issues",
+                "query": {"x": "1"},
+                "body": {"title": "Hi"},
+            }))
+        };
+        let text = describe(&record);
+        assert!(
+            text.starts_with(
+                "Call: POST /repos/m/lg/issues\nIntegration: github\nquery: {\"x\":\"1\"}\n```"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("\"title\": \"Hi\""), "{text}");
     }
 
     #[test]

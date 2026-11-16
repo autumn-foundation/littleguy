@@ -135,6 +135,11 @@ pub fn summary(config: &Config) -> Value {
         })),
         "san_mateo": config.san_mateo.as_ref().map(|san_mateo| json!({
             "integrations": san_mateo.integrations.len(),
+            "own_catalog": san_mateo.catalog.is_some(),
+        })),
+        "api": config.api.as_ref().map(|api| json!({
+            "integrations": api.integrations,
+            "max_chars": api.max_chars,
         })),
         "hooks": config.hooks.as_ref().map(|hooks| json!({
             "public": !hooks.bind.ip().is_loopback(),

@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 use autumn_harvest::payload_codec::PayloadCodecs;
 use autumn_harvest_agent::{AgentHarness, AgentProfile, DirWorkspaceBlobs, Tool, WorkspaceStore};
+#[cfg(feature = "api")]
+use littleguy_core::ApiConfig;
 #[cfg(feature = "google")]
 use littleguy_core::GoogleConfig;
 use littleguy_core::{McpServer, ToolsConfig};
@@ -87,6 +89,36 @@ pub fn google_tools(
         }
         (Some(_), None) => {
             tracing::warn!("the Google tools are off: San Mateo did not start");
+            Vec::new()
+        }
+        (None, _) => Vec::new(),
+    }
+}
+
+/// The API of the providers and what the tools say about each
+/// integration. San Mateo gives it at start (ADR 0031).
+#[cfg(feature = "api")]
+pub type ApiLink = (
+    Arc<dyn littleguy_tools::api::ProviderApi>,
+    Vec<littleguy_tools::api::ApiIntegration>,
+);
+
+/// `api_get` and `api_send` of `config` on `link`, for the integrations
+/// that `config` names. A config with an `[api]` section but no link, which
+/// only a test builds, gets none.
+#[cfg(feature = "api")]
+pub fn api_tools(config: Option<&ApiConfig>, link: Option<&ApiLink>) -> Vec<Arc<dyn Tool>> {
+    match (config, link) {
+        (Some(config), Some((api, integrations))) => {
+            let named: Vec<_> = integrations
+                .iter()
+                .filter(|i| config.integrations.contains(&i.key))
+                .cloned()
+                .collect();
+            littleguy_tools::api::api_tools(api, &named, config.max_chars)
+        }
+        (Some(_), None) => {
+            tracing::warn!("the API tools are off: San Mateo did not start");
             Vec::new()
         }
         (None, _) => Vec::new(),

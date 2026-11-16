@@ -53,7 +53,7 @@ autumn-plugin-markstream = "0.3"
 [features]
 default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files", "notes"]
 # Every integration.
-full = ["default", "camel", "google", "fleet"]
+full = ["default", "camel", "google", "api", "fleet"]
 # Discord direct messages over the gateway.
 discord = ["littleguy-channels/discord"]
 # Slack direct messages over Socket Mode, or over the Events API as a hook.
@@ -115,6 +115,9 @@ camel = [
 oauth = ["dep:san-mateo", "dep:san-mateo-sqlite", "dep:axum"]
 # `[google]`: the Gmail and Google Calendar tools. Needs `oauth`.
 google = ["oauth", "littleguy-tools/google"]
+# `[api]`: `api_get` and `api_send` on any San Mateo integration (ADR 0031).
+# Needs `oauth`.
+api = ["oauth", "littleguy-tools/api"]
 # `[fleet]`: the memory, the episodes and the approvals in a tenant database,
 # replicated to a directory or an S3-compatible store by autumn-web. The
 # replication of autumn-web needs a database backend, so it takes `postgres`.

@@ -486,6 +486,19 @@ fn links(
     })
 }
 
+/// The API link on every San Mateo integration of `config`. The `[api]`
+/// section picks the ones that get tools at each reload.
+#[cfg(feature = "api")]
+fn api_link(config: &Config, connections: Option<&oauth::Connections>) -> Option<tools::ApiLink> {
+    let (started, section) = connections.zip(config.san_mateo.as_ref())?;
+    let keys: Vec<String> = section.integrations.iter().map(|i| i.key.clone()).collect();
+    let (proxy, integrations) = started.api(&keys);
+    Some((
+        Arc::new(proxy) as Arc<dyn littleguy_tools::api::ProviderApi>,
+        integrations,
+    ))
+}
+
 /// Starts San Mateo for the `[san_mateo]` section of `config`, if any.
 #[cfg(feature = "oauth")]
 async fn connections(config: &Config, db: &Path) -> Result<Option<oauth::Connections>> {
@@ -579,6 +592,8 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
                 Arc::new(started.google(&google.integration))
                     as Arc<dyn littleguy_tools::google::GoogleApi>
             }),
+        #[cfg(feature = "api")]
+        api: api_link(&config, connections.as_ref()),
         #[cfg(feature = "slack")]
         slack: links.slack.is_some(),
         #[cfg(not(feature = "slack"))]

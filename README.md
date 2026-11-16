@@ -50,8 +50,8 @@ that speaks the same API, such as a local one.
 
 Each integration is a cargo feature, so a build carries only the crates it
 uses. The default set is `discord`, `slack`, `claude`, `openai`, `web`,
-`mcp`, `sandbox` and `refine`. `camel`, `oauth` and `google` are opt-in,
-and `full` turns on every one:
+`mcp`, `sandbox` and `refine`. `camel`, `oauth`, `google` and `api` are
+opt-in, and `full` turns on every one:
 
 ```sh
 cargo install --path crates/littleguy --features full
@@ -587,6 +587,18 @@ Register `http://127.0.0.1:3003/oauth/callback` as the redirect URI of the
 OAuth app. [ADR 0004](docs/adr/0004-oauth-with-san-mateo.md) explains the
 design.
 
+San Mateo knows about 35 providers. To add one, write it in a
+`providers.yaml` in the [Nango format](https://github.com/NangoHQ/nango/blob/master/packages/providers/providers.yaml)
+and name the file. Its providers join the built-in ones, and one with the
+same name replaces the built-in one:
+
+```toml
+[san_mateo]
+catalog = "/etc/littleguy/providers.yaml"
+```
+
+The catalog decides where a token can go, so only you write it.
+
 ## Mail and calendar
 
 Feature `google`, off by default. It turns `oauth` on.
@@ -619,6 +631,39 @@ anything goes out. Mail and events count as untrusted input and private
 data, so after a read the Rule of Two also holds each draft. Tokens stay in
 San Mateo, and no tool sees one.
 [ADR 0010](docs/adr/0010-mail-and-calendar.md) explains the design.
+
+## Any API
+
+Feature `api`, off by default. It turns `oauth` on.
+
+With `[api]`, the assistant calls the API of any connected San Mateo
+integration. It learns the API itself, and it keeps what it learns in a
+skill:
+
+```toml
+[[san_mateo.integration]]
+key = "github"
+provider = "github"
+client_id = "Iv1.0123456789abcdef"
+client_secret_env = "LG_GITHUB_CLIENT_SECRET"
+
+[api]
+integrations = ["github"]   # leave it out for every integration
+max_chars = 20000           # the most characters of one answer
+```
+
+- `api_get` sends a `GET` and runs at once. Its answers count as
+  untrusted input and private data.
+- `api_send` sends a `POST`, `PUT`, `PATCH` or `DELETE`. Each call waits
+  for you, and you see the method, the path and the body first. A tick
+  never sends one.
+
+The model names a path, never a host. San Mateo sends the call to the base
+URL of the provider in its catalog and adds the token, so no tool sees a
+token and no call can carry one elsewhere. `lg connect` works for OAuth
+providers today.
+[ADR 0031](docs/adr/0031-api-calls-through-san-mateo.md) explains the
+design.
 
 ## Web pages
 

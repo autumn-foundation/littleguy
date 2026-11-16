@@ -41,8 +41,26 @@ pub struct Guard {
     pub flow: FlowRules,
     /// The runtime of the `run_code` tool, when the sandbox is on.
     pub sandbox: Option<Runtime>,
-    /// Whether the Google tools are on, so each send and invite waits.
+    /// The integration tools that are on, whose calls always wait.
+    pub always: Always,
+}
+
+/// The integration tools that are on. Each one has calls that always wait
+/// for a person.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Always {
+    /// The Google tools: each mail send and each invite waits.
     pub google: bool,
+    /// The API tools: each `api_send` waits (ADR 0031).
+    pub api: bool,
+}
+
+impl Always {
+    /// Whether any of these tools is on.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.google || self.api
+    }
 }
 
 impl Guard {
@@ -80,7 +98,7 @@ impl Guard {
     ) -> (AgentHarness, AgentProfile) {
         let run_code = self.sandbox.is_some();
         harness = crate::sandbox::give(harness, self.sandbox);
-        let gate = ApprovalGate::new(self.stores, run_code, self.google, &self.flow);
+        let gate = ApprovalGate::new(self.stores, run_code, self.always, &self.flow);
         if !self.flow.is_empty() {
             harness = harness.flow_rules(self.flow);
         }
@@ -91,8 +109,8 @@ impl Guard {
     }
 }
 
-/// Asks a person before each `run_code` call, each mail send and each
-/// invite, and records each call that may wait.
+/// Asks a person before each `run_code` call, each mail send, each invite
+/// and each `api_send`, and records each call that may wait.
 ///
 /// Every other tool runs without a question from the gate. A flow rule may
 /// still hold it. A call that cannot be recorded is denied, so no call
@@ -101,16 +119,22 @@ impl Guard {
 pub struct ApprovalGate {
     stores: Arc<SqliteStores>,
     run_code: bool,
-    google: bool,
+    always: Always,
     watched: BTreeSet<String>,
 }
 
 impl ApprovalGate {
     /// A gate that records in `stores`. With `run_code`, each `run_code`
-    /// call waits. With `google`, each mail send and each invite waits.
-    /// Each call with a label of a rule in `flow` is recorded.
+    /// call waits. With `always.google`, each mail send and each invite
+    /// waits, and with `always.api` each `api_send`. Each call with a label
+    /// of a rule in `flow` is recorded.
     #[must_use]
-    pub fn new(stores: Arc<SqliteStores>, run_code: bool, google: bool, flow: &FlowRules) -> Self {
+    pub fn new(
+        stores: Arc<SqliteStores>,
+        run_code: bool,
+        always: Always,
+        flow: &FlowRules,
+    ) -> Self {
         let watched = flow
             .rules()
             .iter()
@@ -120,7 +144,7 @@ impl ApprovalGate {
         Self {
             stores,
             run_code,
-            google,
+            always,
             watched,
         }
     }
@@ -130,7 +154,12 @@ impl ApprovalGate {
         if self.run_code && call.name == TOOL {
             return Some(ASK_REASON);
         }
-        if self.google {
+        if self.always.api
+            && let Some(reason) = api_reason(call)
+        {
+            return Some(reason);
+        }
+        if self.always.google {
             return google_reason(call);
         }
         None
@@ -211,6 +240,19 @@ const fn google_reason(_call: &ToolCall) -> Option<&'static str> {
     None
 }
 
+/// Why the API call `call` always waits, or `None`.
+#[cfg(feature = "api")]
+fn api_reason(call: &ToolCall) -> Option<&'static str> {
+    littleguy_tools::api::approval_reason(&call.name)
+}
+
+/// Why the API call `call` always waits. This build has no API tools, so
+/// no call waits for that.
+#[cfg(not(feature = "api"))]
+const fn api_reason(_call: &ToolCall) -> Option<&'static str> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use autumn_harvest_agent::flow::labels::{PRIVATE_DATA, UNTRUSTED_INPUT};
@@ -257,7 +299,12 @@ mod tests {
     fn the_gate_watches_the_labels_of_ask_rules() {
         let dir = tempfile::tempdir().unwrap();
         let stores = crate::memory::open(&dir.path().join("lg.db"), None).unwrap();
-        let gate = ApprovalGate::new(Arc::clone(&stores), false, false, &FlowRules::rule_of_two());
+        let gate = ApprovalGate::new(
+            Arc::clone(&stores),
+            false,
+            Always::default(),
+            &FlowRules::rule_of_two(),
+        );
         let web = tool("web", ToolEffect::ReadOnly, &[UNTRUSTED_INPUT]);
         let note = tool("note", ToolEffect::Internal, &[]);
         assert!(gate.watches(Some(web.as_ref())));
@@ -287,7 +334,15 @@ mod tests {
             arguments: json!({"to": "a@x.org", "subject": "s", "body": "b"}),
         };
         assert_eq!(gate.decide_call(&send, None), ToolDecision::Allow);
-        let mailing = ApprovalGate::new(stores, false, true, &FlowRules::new());
+        let mailing = ApprovalGate::new(
+            stores,
+            false,
+            Always {
+                google: true,
+                api: false,
+            },
+            &FlowRules::new(),
+        );
         #[cfg(feature = "google")]
         assert_eq!(
             mailing.decide_call(&send, None),
@@ -297,5 +352,49 @@ mod tests {
         );
         #[cfg(not(feature = "google"))]
         assert_eq!(mailing.decide_call(&send, None), ToolDecision::Allow);
+    }
+
+    #[cfg(feature = "api")]
+    #[test]
+    fn each_api_send_waits_and_an_api_get_does_not() {
+        use littleguy_tools::api::{GET_TOOL, SEND_REASON, SEND_TOOL};
+        let dir = tempfile::tempdir().unwrap();
+        let stores = crate::memory::open(&dir.path().join("lg.db"), None).unwrap();
+        let call = |name: &str| ToolCall {
+            id: format!("c-{name}"),
+            name: name.to_owned(),
+            arguments: json!({"integration": "github", "method": "POST", "path": "/x"}),
+        };
+        let off = ApprovalGate::new(
+            Arc::clone(&stores),
+            false,
+            Always::default(),
+            &FlowRules::new(),
+        );
+        assert_eq!(off.decide_call(&call(SEND_TOOL), None), ToolDecision::Allow);
+        let on = ApprovalGate::new(
+            stores,
+            false,
+            Always {
+                google: true,
+                api: true,
+            },
+            &FlowRules::new(),
+        );
+        assert_eq!(
+            on.decide_call(&call(SEND_TOOL), None),
+            ToolDecision::RequireApproval {
+                reason: String::from(SEND_REASON),
+            }
+        );
+        assert_eq!(on.decide_call(&call(GET_TOOL), None), ToolDecision::Allow);
+        assert!(
+            Always {
+                google: false,
+                api: true
+            }
+            .any()
+        );
+        assert!(!Always::default().any());
     }
 }

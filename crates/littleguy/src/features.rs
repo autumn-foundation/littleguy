@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 22] = [
+pub const ALL: [Feature; 23] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -109,6 +109,10 @@ pub const ALL: [Feature; 22] = [
         on: cfg!(feature = "google"),
     },
     Feature {
+        name: "api",
+        on: cfg!(feature = "api"),
+    },
+    Feature {
         name: "fleet",
         on: cfg!(feature = "fleet"),
     },
@@ -136,6 +140,7 @@ pub fn check(config: &Config) -> Result<()> {
         (!config.camel.is_empty(), "[[camel.route]]", "camel"),
         (config.san_mateo.is_some(), "[san_mateo]", "oauth"),
         (config.google.is_some(), "[google]", "google"),
+        (config.api.is_some(), "[api]", "api"),
         (!config.mcp.is_empty(), "[[mcp.server]]", "mcp"),
         (config.sandbox.is_some(), "[sandbox]", "sandbox"),
         (config.refine.is_some(), "[refine]", "refine"),

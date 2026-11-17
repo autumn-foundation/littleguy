@@ -10,12 +10,77 @@
 //! leaves out every user id, the approver, the owner, the prompts, paths,
 //! the transport of an MCP server (a URL can hold a token), and the names
 //! of environment variables. Of a secret it says at most whether it is set.
+//!
+//! It also says which boot and which build it is. Durable replay hides a
+//! restart from the assistant: a run keeps its start time across one. So
+//! the summary dates the process with `boot` and the binary with
+//! `build.version`. A reload rebuilds this tool (ADR 0018), and a reload is
+//! not a restart. So the boot is captured once per process and passed in,
+//! never read from the clock here.
 
-use std::sync::Arc;
+use std::fmt::Write as _;
+use std::sync::{Arc, OnceLock};
+
+use chrono::{DateTime, SecondsFormat, Utc};
 
 use autumn_harvest_agent::{FnTool, Tool, ToolEffect};
 use littleguy_core::{Config, HeartbeatDelivery, McpTransport, Replica, SandboxBackend};
 use serde_json::{Value, json};
+
+/// The version of this binary, from its crate.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The id of one boot of the daemon process: 16 hex digits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootId(String);
+
+impl BootId {
+    /// The id as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// A fresh id from the operating system's randomness. Without
+    /// randomness the clock fills it, so two boots still differ.
+    fn fresh(at: DateTime<Utc>) -> Self {
+        let mut bytes = [0_u8; 8];
+        if getrandom::fill(&mut bytes).is_err() {
+            bytes = at.timestamp_nanos_opt().unwrap_or_default().to_le_bytes();
+        }
+        Self(bytes.iter().fold(String::new(), |mut hex, byte| {
+            // Writing to a String cannot fail.
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        }))
+    }
+}
+
+/// When this process started, and the id of that start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Boot {
+    /// The instant that the process captured at its start.
+    pub started_at: DateTime<Utc>,
+    /// The id of this boot.
+    pub id: BootId,
+}
+
+impl Boot {
+    /// The boot of this process. The first call captures it, and every
+    /// later call returns the same value. So a reload, which rebuilds the
+    /// tools, cannot stamp it again.
+    #[must_use]
+    pub fn this_process() -> &'static Self {
+        static BOOT: OnceLock<Boot> = OnceLock::new();
+        BOOT.get_or_init(|| {
+            let started_at = Utc::now();
+            Self {
+                started_at,
+                id: BootId::fresh(started_at),
+            }
+        })
+    }
+}
 
 /// A quiet window, as `22:00-08:00`.
 fn hhmm(minutes: u16) -> String {
@@ -27,13 +92,14 @@ fn is_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
-/// The summary of `config`. A section that is not in the config is `null`.
+/// The summary of `config` in the process of `boot`. A section that is not
+/// in the config is `null`.
 #[must_use]
 #[expect(
     clippy::too_many_lines,
     reason = "one allow list of fields reads best in one place"
 )]
-pub fn summary(config: &Config) -> Value {
+pub fn summary(config: &Config, boot: &Boot) -> Value {
     let features: Vec<&str> = crate::features::ALL
         .iter()
         .filter(|feature| feature.on)
@@ -47,8 +113,14 @@ pub fn summary(config: &Config) -> Value {
     let chat = |chat: &littleguy_core::ChatConfig| json!({"pairing": chat.pairing, "allowed_senders": chat.allowed.len()});
     json!({
         "note": "The config that this daemon loaded, not the file. null is a section that is \
-                 not in the config. A part in `left_out_of_build` cannot run, whatever the config says.",
-        "build": {"features": features, "left_out_of_build": left_out},
+                 not in the config. A part in `left_out_of_build` cannot run, whatever the config says. \
+                 `boot` is this process: a restart changes its id and start, a reload does not. \
+                 `build.version` is the version of this binary.",
+        "boot": {
+            "started_at": boot.started_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "id": boot.id.as_str(),
+        },
+        "build": {"version": VERSION, "features": features, "left_out_of_build": left_out},
         "agent": {"window": config.window, "max_steps": config.max_steps},
         "tools": {
             "web_fetch": config.tools.web_fetch,
@@ -156,12 +228,17 @@ pub fn summary(config: &Config) -> Value {
     })
 }
 
-/// `tools` and `config_summary` of `config`, when `[tools] runs` is on, as
-/// for the other tools that let the assistant debug itself.
+/// `tools` and `config_summary` of `config` in the process of `boot`, when
+/// `[tools] runs` is on, as for the other tools that let the assistant
+/// debug itself.
 #[must_use]
-pub fn with_summary(tools: crate::tools::Tools, config: &Config) -> crate::tools::Tools {
+pub fn with_summary(
+    tools: crate::tools::Tools,
+    config: &Config,
+    boot: &Boot,
+) -> crate::tools::Tools {
     if config.tools.runs {
-        tools.with([config_tool(summary(config))])
+        tools.with([config_tool(summary(config, boot))])
     } else {
         tools
     }
@@ -176,8 +253,11 @@ pub fn config_tool(summary: Value) -> Arc<dyn Tool> {
         "config_summary",
         "Show the setup that you run with: which parts are on, off, or not in this build, and \
          their settings, such as the heartbeat interval, the memory sizes and which tools are \
-         on. Use it before you guess whether something is off or broken. It shows no secret: \
-         of a key it says only whether it is set.",
+         on. Use it before you guess whether something is off or broken. It also says when this \
+         process started, its boot id and the version of this build, so you can tell whether \
+         something happened before or after a restart or an upgrade. A run of yours survives a \
+         restart, so only this tells you of one. It shows no secret: of a key it says only \
+         whether it is set.",
         json!({"type": "object", "properties": {}}),
         move |_input| {
             let summary = Arc::clone(&summary);
@@ -191,6 +271,15 @@ pub fn config_tool(summary: Value) -> Arc<dyn Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn boot() -> Boot {
+        Boot {
+            started_at: DateTime::parse_from_rfc3339("2026-11-17T03:00:00.250Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            id: BootId(String::from("00112233aabbccdd")),
+        }
+    }
 
     const SECRET_URL: &str = "https://mcp.example/sse?token=sekret123";
 
@@ -209,7 +298,7 @@ mod tests {
 
     #[test]
     fn the_summary_says_what_is_on_and_leaks_no_id_path_url_or_prompt() {
-        let text = summary(&full()).to_string();
+        let text = summary(&full(), &boot()).to_string();
         for private in [
             "123456789012345678",
             "876543210987654321",
@@ -222,7 +311,7 @@ mod tests {
         ] {
             assert!(!text.contains(private), "the summary holds {private}");
         }
-        let value = summary(&full());
+        let value = summary(&full(), &boot());
         assert_eq!(value["heartbeat"]["every_minutes"], 45);
         assert_eq!(value["heartbeat"]["quiet"], "22:00-08:00");
         assert_eq!(value["discord"]["chat"]["allowed_senders"], 1);
@@ -236,12 +325,36 @@ mod tests {
     #[test]
     fn an_absent_section_is_null_and_differs_from_off() {
         let plain = Config::parse("owner = \"mark\"").unwrap();
-        let value = summary(&plain);
+        let value = summary(&plain, &boot());
         assert_eq!(value["heartbeat"], Value::Null, "no [heartbeat] section");
         assert_eq!(value["refine"], Value::Null);
         assert_eq!(value["skills"]["off_without_refine"], true);
         let off = Config::parse("owner = \"mark\"\n[tools]\nfiles = false").unwrap();
-        assert_eq!(summary(&off)["tools"]["files"], false);
+        assert_eq!(summary(&off, &boot())["tools"]["files"], false);
         assert!(value["build"]["features"].as_array().is_some());
+    }
+
+    #[test]
+    fn the_summary_says_which_boot_and_which_build_it_is() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        let value = summary(&plain, &boot());
+        assert_eq!(value["boot"]["started_at"], "2026-11-17T03:00:00.250Z");
+        assert_eq!(value["boot"]["id"], "00112233aabbccdd");
+        assert_eq!(value["build"]["version"], VERSION);
+    }
+
+    #[test]
+    fn the_boot_of_a_process_is_captured_once() {
+        let first = Boot::this_process().clone();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(Boot::this_process(), &first, "a second read stamps nothing");
+        assert_eq!(first.id.as_str().len(), 16);
+        assert!(first.id.as_str().chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn two_fresh_boot_ids_differ() {
+        let now = Utc::now();
+        assert_ne!(BootId::fresh(now), BootId::fresh(now));
     }
 }

@@ -20,6 +20,10 @@
 ##   ANTHROPIC_API_KEY=... lg serve --model claude
 ##   OPENROUTER_API_KEY=... lg serve --model openrouter --model-name <vendor>/<model>
 ##
+## Or seal each key once, so the environment holds only LG_SAN_MATEO_KEY:
+##
+##   lg keys import        # see "House keys" in the README
+##
 ## A change to this file applies while the daemon runs (`lg reload`, or
 ## wait a moment). A few sections need a restart, and the log says which.
 
@@ -69,7 +73,8 @@ pass_episodes = 8
 
 [tools]
 web_fetch = true
-## web_search also needs LG_BRAVE_API_KEY in the environment.
+## web_search also needs LG_BRAVE_API_KEY: seal it with `lg keys set`, or
+## set it in the environment.
 web_search = true
 ## The workspace files and the note store.
 files = true

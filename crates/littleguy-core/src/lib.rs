@@ -5,6 +5,7 @@
 
 pub mod addr;
 pub mod config;
+pub mod house_keys;
 pub mod ids;
 pub mod pairing;
 pub mod reload;

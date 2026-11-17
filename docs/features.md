@@ -62,6 +62,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `reflection` | yes | The reflection after a memory consolidation pass: the assistant files ideas and drafts skills from what the pass learned. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
+| `sealed-keys` | yes | `lg keys`: the house keys sealed with the key ring of LG_SAN_MATEO_KEY in house-keys.json, so the environment holds one secret (ADR 0038). | `san-mateo` |
 | `search-notes` | yes | `search_notes`: the assistant finds a note of its workspace by its words. | none |
 | `self-debug` | yes | `recent_runs`, `failed_attempts`, `model_usage` and `recent_wakes`: the assistant reads its own run log and tick log to debug itself. | none |
 | `skills` | yes | `[skills]`: SKILL.md files that reach the assistant through its profile overlay, `propose_skill`, and the Skills tab. | none |

@@ -53,6 +53,8 @@ pub(super) struct Kit {
     pub(super) api: Option<crate::tools::ApiLink>,
     /// The tenant database of a fleet, which holds the stores.
     pub(super) tenant: Option<PathBuf>,
+    /// The secrets by variable name, opened at start (ADR 0038).
+    pub(super) keys: Arc<crate::house_keys::HouseKeys>,
     /// The chat services that take messages.
     pub(super) services: Vec<Service>,
     /// The memory store, once a part needs it. It opens once.
@@ -178,7 +180,7 @@ impl Kit {
         let mut tools = crate::tools::Tools::new(
             &config.tools,
             &db,
-            crate::tools::search_key_from_env().as_deref(),
+            crate::tools::search_key(&self.keys).as_deref(),
         )
         .with(self.mcp.clone())
         .with(outside);

@@ -3,6 +3,8 @@
 //! San Mateo seals each token with AES-256-GCM and refreshes it before it
 //! expires. Its data lives in `san-mateo.db` next to `lg.db`. The sealing
 //! key comes from `LG_SAN_MATEO_KEY` only, so the file alone opens nothing.
+//! The same ring seals the house keys ([`crate::house_keys`], ADR 0038), and
+//! its retired keys open the tokens that they sealed.
 //!
 //! The connect pages and the OAuth callback listen on a loopback address.
 //! The owner runs `lg connect <integration>` and opens the link in a
@@ -31,11 +33,7 @@ mod api;
 #[cfg(feature = "google")]
 mod google;
 
-/// The variable that holds the base64 sealing key, 32 bytes.
-pub const KEY_VAR: &str = "LG_SAN_MATEO_KEY";
-
-/// The id of the sealing key.
-const KEY_ID: &str = "k1";
+pub use crate::house_keys::KEY_VAR;
 
 /// The San Mateo environment of the daemon.
 pub const ENVIRONMENT: &str = "lg";
@@ -97,23 +95,22 @@ impl Connections {
     /// Opens the store next to `db`, puts each integration of `config`,
     /// and serves the connect pages on `config.bind`.
     ///
-    /// `key` is the base64 sealing key. `secret` reads one environment
-    /// variable, for the client secrets.
+    /// `keys` is the ring of `LG_SAN_MATEO_KEY` ([`crate::house_keys::ring`]).
+    /// `secret` reads one secret by its variable name, for the client
+    /// secrets.
     ///
     /// # Errors
     ///
-    /// Returns an error when the key is not 32 base64 bytes, the store does
-    /// not open, an integration is not valid, or the address does not bind.
+    /// Returns an error when the store does not open, an integration is not
+    /// valid, or the address does not bind.
     pub async fn start(
         config: &SanMateoConfig,
         owner: &str,
         db: &Path,
-        key: &str,
+        keys: KeyRing,
         secret: impl Fn(&str) -> Option<String> + Sync,
         hooks: Hooks,
     ) -> Result<Self> {
-        let keys = KeyRing::from_base64(KEY_ID, key.trim())
-            .with_context(|| format!("{KEY_VAR} must be 32 random bytes in base64"))?;
         let path = path_for(db);
         let store =
             SqliteStore::open(&path).with_context(|| format!("opening {}", path.display()))?;
@@ -653,8 +650,17 @@ widgets:
         config: &SanMateoConfig,
         fake: &MemoryTransport,
     ) -> Result<Connections> {
+        start_with(db, config, fake, KeyRing::from_base64("k1", KEY).unwrap()).await
+    }
+
+    async fn start_with(
+        db: &Path,
+        config: &SanMateoConfig,
+        fake: &MemoryTransport,
+        keys: KeyRing,
+    ) -> Result<Connections> {
         let secret = |var: &str| (var == "LG_ACME_SECRET").then(|| String::from("shh"));
-        Connections::start(config, "mark", db, KEY, secret, hooks(fake)).await
+        Connections::start(config, "mark", db, keys, secret, hooks(fake)).await
     }
 
     fn query(url: &reqwest::Url, name: &str) -> Option<String> {
@@ -783,10 +789,27 @@ widgets:
                 headers: Vec::new(),
                 body: Vec::new(),
             };
-            api.send(call).await.unwrap();
+            api.send(call.clone()).await.unwrap();
             let sent = fake.requests_to("https://api.keyed.example.com/v1/things");
             assert_eq!(sent[0].header_value("x-api-key"), Some("sk-test-1"));
+            connections.stop().await;
+
+            // A rotation keeps the old key as retired, so the connection
+            // that it sealed still opens (ADR 0038).
+            let rotated = KeyRing::new("k2", [2; 32])
+                .unwrap()
+                .with_base64_key("k1", KEY)
+                .unwrap();
+            let again = start_with(&dir.path().join("lg.db"), &config, &fake, rotated)
+                .await
+                .unwrap();
+            let (api, _) = again.api(&[String::from("k")]);
+            api.send(call).await.unwrap();
+            let sent = fake.requests_to("https://api.keyed.example.com/v1/things");
+            assert_eq!(sent[1].header_value("x-api-key"), Some("sk-test-1"));
+            again.stop().await;
         }
+        #[cfg(not(feature = "api"))]
         connections.stop().await;
     }
 
@@ -797,16 +820,6 @@ widgets:
         let fake = MemoryTransport::new();
         let missing = start(&db, &section("acme", Some("LG_OTHER")), &fake).await;
         assert!(format!("{:#}", missing.unwrap_err()).contains("LG_OTHER"));
-        let bad_key = Connections::start(
-            &section("acme", None),
-            "mark",
-            &db,
-            "not base64",
-            |_| None,
-            hooks(&fake),
-        )
-        .await;
-        assert!(format!("{:#}", bad_key.unwrap_err()).contains(KEY_VAR));
         let unknown = start(&db, &section("nope", None), &fake).await;
         assert!(unknown.is_err());
 

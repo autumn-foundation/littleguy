@@ -15,8 +15,12 @@
 //! the config feeds the assistant too.
 //!
 //! `lg serve --model claude`, `openai` or `openrouter` talks to a hosted
-//! model. Each reads its key from the environment only, so the key never
-//! shows in a process list.
+//! model. Each reads its key as a house key: sealed with `lg keys`, or from
+//! the environment (ADR 0038). The key never shows in a process list.
+//!
+//! - `lg keys set`, `import`, `list`, `remove` and `reseal` keep the house
+//!   keys sealed with the ring of `LG_SAN_MATEO_KEY`, so the environment
+//!   holds one secret.
 //!
 //! Each integration is a cargo feature ([`features`]). A config that needs
 //! a feature that this build leaves out fails at start.
@@ -37,6 +41,7 @@ mod features;
 #[cfg(feature = "fleet")]
 mod fleet;
 mod guard;
+mod house_keys;
 mod memory;
 #[cfg(feature = "notes")]
 mod notes;
@@ -150,6 +155,48 @@ enum Command {
     /// Propose, list and activate profile overlays of the assistant.
     #[command(subcommand)]
     Refine(RefineCommand),
+    /// Seal the house keys, such as the model keys, with the key ring of
+    /// `LG_SAN_MATEO_KEY`. A change applies at the next start.
+    #[cfg(feature = "sealed-keys")]
+    Keys(KeysArgs),
+}
+
+/// The arguments of `lg keys`.
+#[cfg(feature = "sealed-keys")]
+#[derive(Debug, clap::Args)]
+struct KeysArgs {
+    /// The database. The sealed file lives beside it.
+    #[arg(long, env = "LG_DB")]
+    db: Option<PathBuf>,
+    /// The config file, which names more variables for `import`.
+    #[arg(long, env = "LG_CONFIG")]
+    config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: house_keys::cli::KeysCommand,
+}
+
+/// Runs one `lg keys` command on standard input, and prints its text.
+#[cfg(feature = "sealed-keys")]
+fn keys(args: KeysArgs, env: &Env) -> Result<bool> {
+    let db = match args.db {
+        Some(db) => db,
+        None => env.db()?,
+    };
+    let config = match &args.command {
+        house_keys::cli::KeysCommand::Import { names } if names.is_empty() => {
+            Some(load_config(args.config.as_deref(), env)?)
+        }
+        _ => None,
+    };
+    let store = house_keys::Store::beside(&db);
+    let text = args.command.run(
+        &store,
+        config.as_ref(),
+        &house_keys::process_env(),
+        std::io::stdin().lock(),
+    )?;
+    println!("{text}");
+    Ok(true)
 }
 
 /// The `lg refine` commands. Each one needs a `[refine]` section.
@@ -574,12 +621,18 @@ fn api_link(config: &Config, connections: Option<&oauth::Connections>) -> Option
 }
 
 /// Starts San Mateo for the `[san_mateo]` section of `config`, if any.
+/// Its ring comes from the environment, and each client secret from
+/// `keys`.
 #[cfg(feature = "oauth")]
-async fn connections(config: &Config, db: &Path) -> Result<Option<oauth::Connections>> {
+async fn connections(
+    config: &Config,
+    db: &Path,
+    keys: &house_keys::HouseKeys,
+) -> Result<Option<oauth::Connections>> {
     let Some(section) = &config.san_mateo else {
         return Ok(None);
     };
-    let key = std::env::var(oauth::KEY_VAR).with_context(|| {
+    let ring = house_keys::ring(house_keys::process_env().as_ref())?.with_context(|| {
         format!(
             "set {}, 32 random bytes in base64, to keep OAuth connections",
             oauth::KEY_VAR
@@ -589,8 +642,8 @@ async fn connections(config: &Config, db: &Path) -> Result<Option<oauth::Connect
         section,
         config.owner.as_str(),
         db,
-        &key,
-        |var| std::env::var(var).ok(),
+        ring,
+        |var| keys.get(var),
         oauth::Hooks::default(),
     )
     .await?;
@@ -606,12 +659,12 @@ async fn camel(config: &Config, mapper: camel::Mapper, db: &Path) -> Result<Opti
     Ok(Some(camel::Camel::start(mapper, db).await?))
 }
 
-/// The bearer token of the hooks, from the variable that the config names.
-fn hook_token(config: &Config) -> Result<Option<web::HookToken>> {
+/// The bearer token of the hooks, from the house key that the config names.
+fn hook_token(config: &Config, keys: &house_keys::HouseKeys) -> Result<Option<web::HookToken>> {
     config
         .hooks
         .as_ref()
-        .map(|hooks| web::HookToken::new(&hooks.token_env, std::env::var(&hooks.token_env).ok()))
+        .map(|hooks| web::HookToken::new(&hooks.token_env, keys.get(&hooks.token_env)))
         .transpose()
         .map_err(Into::into)
 }
@@ -633,6 +686,22 @@ fn with_config_file(daemon: daemon::Daemon, file: Option<PathBuf>) -> daemon::Da
     daemon
 }
 
+/// The Slack hook of the Events API, when `links` holds that mode.
+#[cfg(feature = "slack")]
+fn slack_hook(
+    links: &daemon::Links,
+    daemon: &daemon::Daemon,
+    handle: &daemon::Handle,
+) -> Option<web::SlackHook> {
+    match &links.slack {
+        Some(daemon::SlackLink::Events { api, secret }) => Some(web::SlackHook::new(
+            secret,
+            daemon.slack_inbox(api.clone(), handle),
+        )),
+        _ => None,
+    }
+}
+
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let config = load_config(args.config.as_deref(), env)?;
     features::check(&config)?;
@@ -640,12 +709,15 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         Some(db) => db,
         None => env.db()?,
     };
-    let model = build_model(&args, &db, |var| std::env::var(var).ok())?;
-    let links = links(&args, |var| std::env::var(var).ok(), config.hooks.is_some())?;
+    // The house keys open first: each secret below reads through them.
+    let keys = Arc::new(house_keys::HouseKeys::load(&db, house_keys::process_env())?);
+    let secret = |var: &str| keys.get(var);
+    let model = build_model(&args, &db, secret)?;
+    let links = links(&args, secret, config.hooks.is_some())?;
     let uid = rustix::process::getuid().as_raw();
     // San Mateo starts first, because the Google tools send through it.
     #[cfg(feature = "oauth")]
-    let connections = connections(&config, &db).await?;
+    let connections = connections(&config, &db, &keys).await?;
     let sandbox = config.sandbox.as_ref().map(sandbox::runtime).transpose()?;
     // The tenant database opens before the daemon, which keeps its stores
     // there.
@@ -654,7 +726,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         Some(fleet) => Some(fleet::Tenant::open(fleet, &db, &config.owner).await?),
         None => None,
     };
-    let mcp = tools::mcp_tools(&config.mcp).await;
+    let mcp = tools::mcp_tools(&config.mcp, keys.lookup()).await;
     let extras = daemon::Extras {
         sandbox,
         mcp,
@@ -677,7 +749,8 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         #[cfg(not(feature = "fleet"))]
         tenant: None,
         #[cfg(feature = "auto-approve")]
-        reviewer: build_reviewer(&args, &db, |var| std::env::var(var).ok())?,
+        reviewer: build_reviewer(&args, &db, secret)?,
+        keys: Arc::clone(&keys),
     };
     #[cfg(feature = "discord")]
     let discord = links.discord.is_some();
@@ -686,7 +759,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     // The hook token is read first, so a missing one fails before the
     // daemon opens its database.
     let plan = web::Plan::of(&config);
-    let hooks = hook_token(&config)?;
+    let hooks = hook_token(&config, &keys)?;
     let daemon = daemon::Daemon::open_with(&db, &config, model, uid, discord, extras)?;
     // The daemon watches its config file, and `lg reload` reads it too.
     let daemon = with_config_file(daemon, config_file(args.config.as_deref(), env));
@@ -710,13 +783,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         daemon
     };
     #[cfg(feature = "slack")]
-    let slack = match &links.slack {
-        Some(daemon::SlackLink::Events { api, secret }) => Some(web::SlackHook::new(
-            secret,
-            daemon.slack_inbox(api.clone(), &handle),
-        )),
-        _ => None,
-    };
+    let slack = slack_hook(&links, &daemon, &handle);
     let routes = web::Web {
         handle,
         logins,
@@ -789,6 +856,8 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Ui => ask(&socket, &Request::UiLink).await,
         Command::Reload => ask(&socket, &Request::Reload).await,
         Command::New => ask(&socket, &Request::NewConversation).await,
+        #[cfg(feature = "sealed-keys")]
+        Command::Keys(args) => keys(args, &env),
     }
 }
 

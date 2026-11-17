@@ -29,8 +29,9 @@ cargo run --bin lg -- serve --model claude
 ```
 
 The default is `claude-opus-5-5`. `--model-name` (or `LG_MODEL_NAME`)
-picks another one. The key comes from the environment only, so it never
-shows in a process list. Claude returns thinking blocks that the API wants
+picks another one. The key never comes from an argument, so it never
+shows in a process list. To keep it out of the environment too, seal it
+(see [House keys](#house-keys)). Claude returns thinking blocks that the API wants
 back unchanged. The daemon keeps them in `claude-turns/` next to the
 database, so a restart replays them.
 
@@ -278,7 +279,8 @@ fetch_max_chars = 20000         # one page of text; `offset` reads on
   aim it at your router or a local service. A proof in `formal/verus`
   covers the IPv4 check. It does not use an HTTP proxy.
 - `web_search` uses the [Brave Search API](https://brave.com/search/api/).
-  Put the key in `LG_BRAVE_API_KEY`; without it there is no search tool.
+  Seal the key as `LG_BRAVE_API_KEY` (see [House keys](#house-keys)), or
+  set it in the environment; without it there is no search tool.
 - The workspace keeps its files in `workspace/`, next to `lg.db`, and they
   survive a restart. A path stays inside the workspace. `search_notes`
   finds the files that hold some words, so littleguy can recall a note
@@ -543,7 +545,10 @@ docker compose exec lg lg chat "hi"
   your shell by name, and `LG_MODEL` and `LG_MODEL_NAME` pick the model
   (`LG_REASONING` sets the reasoning effort):
   `LG_MODEL=openrouter LG_MODEL_NAME=deepseek/deepseek-v4.1-flash-1017
-  docker compose up -d`. No file holds a key.
+  docker compose up -d`. No file holds a plain key. To pass only
+  `LG_SAN_MATEO_KEY`, seal the others in the volume
+  (`docker compose exec -T lg lg keys set ANTHROPIC_API_KEY < key.txt`,
+  see [House keys](#house-keys)).
 - **Data.** The config, `lg.db`, `memory.db`, the skills and the workspace
   live in the `lg-data` volume, under `/data`. SQLite does not lock well
   across the file sharing of Docker Desktop, so the data stays in the volume
@@ -933,12 +938,53 @@ keep_days = 30                        # 0 deletes each ended run at the next pur
 | none | `DISCORD_BOT_TOKEN` | unset: no Discord |
 | none | `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` | unset: no Slack |
 | none | `SLACK_SIGNING_SECRET` | unset: Slack over Socket Mode, if at all |
-| none | `LG_SAN_MATEO_KEY` | required with `[san_mateo]` |
+| none | `LG_SAN_MATEO_KEY` | required with `[san_mateo]` or a `house-keys.json` |
+| none | `LG_SAN_MATEO_KEY_ID`, `LG_SAN_MATEO_KEY_RETIRED` | `k1`, unset: only for a rotation |
 | none | `LG_HOOK_TOKEN` | required with `[hooks]` |
 | none | `LG_REPLICA_ACCESS_KEY_ID`, `LG_REPLICA_SECRET_ACCESS_KEY` | required with `[fleet.replica.s3]` |
 
 `<data home>` is `$XDG_DATA_HOME`, or `~/.local/share`. `<config home>` is
 `$XDG_CONFIG_HOME`, or `~/.config`.
+
+### House keys
+
+A house key is a secret that littleguy sends itself: a model key,
+`LG_BRAVE_API_KEY`, a Discord or Slack token, or a variable that the
+config names (`token_env`, `client_secret_env`, `bearer_env`, the `env` of
+an MCP server). Each one can live in the environment, as above. Or the key
+ring of `LG_SAN_MATEO_KEY` seals it into `house-keys.json` next to
+`lg.db`, so the environment holds one secret instead of many
+([ADR 0038](docs/adr/0038-house-keys-sealed-with-the-key-ring.md)):
+
+```sh
+export LG_SAN_MATEO_KEY="$(openssl rand -base64 32)"   # keep it: it opens every key
+lg keys import                     # seals each house key that the environment holds
+lg keys set LG_BRAVE_API_KEY < brave.txt               # or one key from standard input
+lg keys list                       # each name with the id of its key, never a value
+lg keys remove DISCORD_BOT_TOKEN
+```
+
+Then unset the sealed variables and restart `lg serve`. A sealed value
+wins over the environment, and the log names each variable that is set in
+both. A name that is not sealed still comes from the environment, so a
+setup with no file works as before. A value never comes from an argument.
+`lg serve` reads the file at start, so a change applies at the next start.
+A sealed key that does not open stops the start and names the key.
+
+To rotate the ring, keep the old key as retired under its id, set a new
+key with a new id, and seal each key again:
+
+```sh
+export LG_SAN_MATEO_KEY_RETIRED="k1=$OLD_KEY"
+export LG_SAN_MATEO_KEY="$(openssl rand -base64 32)" LG_SAN_MATEO_KEY_ID=k2
+lg keys reseal                     # each key moves to k2
+lg keys list                       # every line says k2
+```
+
+Each sealed value names the id of its key, so both keys open while the
+rotation runs. San Mateo uses the same ring. It has no reseal, so keep the
+retired key until each OAuth connection has refreshed or been connected
+again.
 
 ### Reload
 

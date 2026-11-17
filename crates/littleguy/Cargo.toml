@@ -51,7 +51,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.3"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files", "notes"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files", "notes", "sealed-keys"]
 # Every integration.
 full = ["default", "camel", "google", "api", "fleet"]
 # Discord direct messages over the gateway.
@@ -114,8 +114,11 @@ camel = [
     "dep:camel-core",
     "dep:harvest-camel",
 ]
+# `lg keys`: the house keys sealed with the key ring of LG_SAN_MATEO_KEY in
+# house-keys.json, so the environment holds one secret (ADR 0038).
+sealed-keys = ["dep:san-mateo"]
 # `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo.
-oauth = ["dep:san-mateo", "dep:san-mateo-sqlite", "dep:axum"]
+oauth = ["sealed-keys", "dep:san-mateo", "dep:san-mateo-sqlite", "dep:axum"]
 # `[google]`: the Gmail and Google Calendar tools. Needs `oauth`.
 google = ["oauth", "littleguy-tools/google"]
 # `[api]`: `api_get` and `api_send` on any San Mateo integration (ADR 0031).

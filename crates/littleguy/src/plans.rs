@@ -91,7 +91,7 @@ fn text<'a>(input: &'a Value, name: &str) -> Result<&'a str, AgentError> {
         .ok_or_else(|| refuse(format!("`{name}` must be text")))
 }
 
-#[cfg(any(feature = "plans", feature = "followups"))]
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn id(input: &Value, name: &str) -> Result<i64, AgentError> {
     input[name]
         .as_i64()
@@ -244,7 +244,7 @@ pub fn tools(
     #[cfg(feature = "self-debug")]
     let tools = tools.chain(std::iter::once(recent_wakes(stores)));
     #[cfg(feature = "skills")]
-    let tools = tools.chain(std::iter::once(propose_skill(stores, skills)));
+    let tools = tools.chain([read_skill_draft(stores), propose_skill(stores, skills)]);
     #[cfg(feature = "followups")]
     let tools = tools.chain(wake_tools(stores, wakes));
     // A build with none of the tool groups has no tools here.
@@ -340,6 +340,47 @@ fn list_plans(
     .shared()
 }
 
+/// `read_skill_draft`: the whole text of one waiting draft.
+///
+/// `list_plans` lists each draft without its body, since a body can be long
+/// and the listing is read every tick. A revision replaces the whole
+/// draft, so this tool lets the assistant read a draft before it revises it.
+/// `load_skill` reads the skills folder only, and a draft has no file there.
+#[cfg(feature = "skills")]
+fn read_skill_draft(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
+    let read = Arc::clone(stores);
+    FnTool::new(
+        "read_skill_draft",
+        "Read one waiting skill draft in full: its name, description and body. list_plans \
+         lists the drafts and their ids. Read a draft before you revise it, since a \
+         revision replaces its whole text.",
+        object(
+            &json!({"id": {"type": "integer", "description": "The id of the draft, from list_plans."}}),
+            &["id"],
+        ),
+        move |input| {
+            let stores = Arc::clone(&read);
+            async move {
+                let draft = id(&input, "id")?;
+                let found = stores.skill_draft(draft)?.ok_or_else(|| {
+                    refuse(format!(
+                        "no skill draft {draft} waits. list_plans lists the waiting drafts"
+                    ))
+                })?;
+                Ok(json!({
+                    "skill_draft": found.id,
+                    "name": found.name,
+                    "description": found.description,
+                    "body": found.body,
+                }))
+            }
+        },
+    )
+    .effect(ToolEffect::ReadOnly)
+    .label(labels::UNTRUSTED_INPUT)
+    .shared()
+}
+
 /// `propose_skill`: a draft that the owner accepts or declines.
 #[cfg(feature = "skills")]
 fn propose_skill(stores: &Arc<SqliteStores>, skills: &SkillsDir) -> Arc<dyn Tool> {
@@ -352,8 +393,9 @@ fn propose_skill(stores: &Arc<SqliteStores>, skills: &SkillsDir) -> Arc<dyn Tool
          need again, and after a task that took many tool rounds, so the next time is \
          shorter. It does nothing until the owner accepts it on the Skills tab; tell them \
          you drafted it. Check list_plans first: a draft with the name of a skill or of a \
-         waiting draft revises it. A name close to another one is refused, so revise that \
-         one, or name it in not_a_duplicate_of when yours is a different skill.",
+         waiting draft revises it, and replaces its whole text. Read a waiting draft with \
+         read_skill_draft before you revise it. A name close to another one is refused, so \
+         revise that one, or name it in not_a_duplicate_of when yours is a different skill.",
         object(
             &json!({
                 "name": {"type": "string", "description": "lowercase-with-dashes, for example triage-inbox."},
@@ -673,7 +715,7 @@ mod tests {
             &[]
         };
         let skills: &[&str] = if cfg!(feature = "skills") {
-            &["propose_skill"]
+            &["read_skill_draft", "propose_skill"]
         } else {
             &[]
         };
@@ -703,12 +745,12 @@ mod tests {
                 tool.name()
             );
         }
-        // `list_plans` shows text that a research read, and `recent_wakes`
-        // the answers of ticks, so both are untrusted.
-        for tool in tools
-            .iter()
-            .filter(|tool| ["list_plans", "recent_wakes"].contains(&tool.name()))
-        {
+        // `list_plans` shows text that a research read, `read_skill_draft` a
+        // draft that a tainted run wrote, and `recent_wakes` the answers of
+        // ticks, so all three are untrusted.
+        for tool in tools.iter().filter(|tool| {
+            ["list_plans", "read_skill_draft", "recent_wakes"].contains(&tool.name())
+        }) {
             assert!(
                 tool.labels()
                     .iter()

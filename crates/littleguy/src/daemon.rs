@@ -5954,6 +5954,87 @@ mod tests {
 
     #[cfg(feature = "skills")]
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_waiting_draft_reads_in_full_by_id_and_lists_without_its_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut with_refine = config();
+        with_refine.refine = Some(littleguy_core::RefineConfig::default());
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &with_refine,
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_skills_dir(dir.path().join("skills"));
+        let drafted = daemon
+            .handle_request(
+                UID,
+                request(
+                    "r-1",
+                    r#"use propose_skill {"name": "weekly-digest", "description": "Write the Friday digest.", "body": "1. Read the week.\n2. Sum it up."}"#,
+                ),
+            )
+            .await;
+        let drafted: serde_json::Value =
+            serde_json::from_str(reply_text(&drafted).strip_prefix("log: ").unwrap()).unwrap();
+        let id = drafted["skill_draft"].as_i64().unwrap();
+
+        // The listing renders, holds the draft, and leaves its body out.
+        let listed = daemon
+            .handle_request(UID, request("r-2", "use list_plans {}"))
+            .await;
+        let listed: serde_json::Value =
+            serde_json::from_str(reply_text(&listed).strip_prefix("log: ").unwrap()).unwrap();
+        let drafts = listed["skill_drafts"].as_array().unwrap();
+        assert_eq!(drafts.len(), 1, "the seeded draft is listed");
+        assert_eq!(drafts[0]["id"], id);
+        assert!(drafts[0].get("body").is_none(), "the listing has no body");
+
+        // read_skill_draft returns the whole draft.
+        let read = daemon
+            .handle_request(
+                UID,
+                request("r-3", &format!(r#"use read_skill_draft {{"id": {id}}}"#)),
+            )
+            .await;
+        let read: serde_json::Value =
+            serde_json::from_str(reply_text(&read).strip_prefix("log: ").unwrap()).unwrap();
+        assert_eq!(read["skill_draft"], id);
+        assert_eq!(read["name"], "weekly-digest");
+        assert_eq!(read["description"], "Write the Friday digest.");
+        assert_eq!(read["body"], "1. Read the week.\n2. Sum it up.");
+
+        // An id that does not wait is refused, and the reply says where to look.
+        let missing = daemon
+            .handle_request(
+                UID,
+                request(
+                    "r-4",
+                    &format!(r#"use read_skill_draft {{"id": {}}}"#, id + 1),
+                ),
+            )
+            .await;
+        assert!(reply_text(&missing).contains("list_plans lists the waiting drafts"));
+
+        // A declined draft no longer reads.
+        assert!(matches!(
+            daemon
+                .handle_request(UID, Request::DeclineSkill { draft: id })
+                .await,
+            Response::Skills { .. }
+        ));
+        let declined = daemon
+            .handle_request(
+                UID,
+                request("r-5", &format!(r#"use read_skill_draft {{"id": {id}}}"#)),
+            )
+            .await;
+        assert!(reply_text(&declined).contains(&format!("no skill draft {id} waits")));
+    }
+
+    #[cfg(feature = "skills")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn skills_from_the_folder_and_from_littleguy_reach_the_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let shelf = dir.path().join("skills");

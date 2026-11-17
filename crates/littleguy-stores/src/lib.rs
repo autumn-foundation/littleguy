@@ -38,6 +38,8 @@ use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub mod approvals;
+#[cfg(feature = "history")]
+pub mod conversations;
 #[cfg(feature = "council")]
 pub mod council;
 #[cfg(feature = "notes")]

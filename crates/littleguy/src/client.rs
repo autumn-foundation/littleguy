@@ -12,7 +12,12 @@ use crate::protocol::{
     ApprovalEntry, ConnectionEntry, GoalEntry, IdeaEntry, OverlayEntry, PairEntry, Request,
     Response, Speaker, Turn, WorkspaceEntry,
 };
+use crate::protocol::{ConversationEntry, PastTurn};
 use crate::protocol::{InvalidSkill, SkillDraftEntry, SkillEntry};
+
+/// The prefix of each message id of the web and the CLI. The history shows
+/// only the turns whose key starts with it.
+pub const MESSAGE_ID_PREFIX: &str = "cli-";
 
 /// A fresh message id: the clock in nanoseconds and the process id.
 #[must_use]
@@ -20,7 +25,7 @@ pub fn fresh_message_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_nanos());
-    format!("cli-{nanos}-{}", std::process::id())
+    format!("{MESSAGE_ID_PREFIX}{nanos}-{}", std::process::id())
 }
 
 /// Sends `request` to the daemon on `socket` and returns its answer.
@@ -151,6 +156,12 @@ pub fn render(response: &Response) -> (String, bool) {
             profile,
         } => (render_reload(applied, restart, profile), true),
         Response::History { turns } => (render_history(turns), true),
+        Response::Conversations {
+            entries,
+            keep_days,
+            partial,
+        } => (render_conversations(entries, *keep_days, *partial), true),
+        Response::Conversation { turns, .. } => (render_past(turns), true),
         Response::Workspace { files } => (render_workspace(files), true),
         Response::Plans { goals, ideas } => (render_plans(goals, ideas), true),
         Response::Notes { notes } => (
@@ -252,6 +263,70 @@ fn render_history(turns: &[Turn]) -> String {
                 Speaker::Unprompted => "littleguy (on its own)",
             };
             format!("{who}: {}", turn.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The past conversations, one line each, under the retention window.
+fn render_conversations(entries: &[ConversationEntry], keep_days: u32, partial: bool) -> String {
+    let mut lines = vec![keep_line(keep_days)];
+    if entries.is_empty() {
+        lines.push(String::from("no conversation yet"));
+    }
+    let oldest = entries.last().map(|entry| entry.id);
+    for entry in entries {
+        let title: String = entry
+            .first_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let title: String = title.chars().take(80).collect();
+        let mut line = format!("#{} {} turns: {title}", entry.id, entry.turns);
+        if entry.live {
+            line.push_str(" (now)");
+        }
+        if partial && Some(entry.id) == oldest {
+            line.push_str(" (began earlier; its first turns are gone)");
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+/// The sentence that says how long a past conversation stays.
+#[must_use]
+pub fn keep_line(keep_days: u32) -> String {
+    match keep_days {
+        0 => String::from(
+            "littleguy keeps no past conversations: [runs] keep_days is 0. Older ones are gone.",
+        ),
+        1 => String::from(
+            "littleguy keeps past conversations for 1 day ([runs] keep_days). Older ones are gone.",
+        ),
+        days => format!(
+            "littleguy keeps past conversations for {days} days ([runs] keep_days). Older ones are gone."
+        ),
+    }
+}
+
+/// The turns of a past conversation, with each tool call on its own line.
+fn render_past(turns: &[PastTurn]) -> String {
+    turns
+        .iter()
+        .map(|turn| {
+            let who = match turn.from {
+                Speaker::Person => "you",
+                Speaker::Assistant | Speaker::Unprompted => "littleguy",
+            };
+            let mut text = format!("{who}: {}", turn.text);
+            for call in &turn.calls {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut text,
+                    format_args!("\n  (called {})", call.tool),
+                );
+            }
+            text
         })
         .collect::<Vec<_>>()
         .join("\n\n")

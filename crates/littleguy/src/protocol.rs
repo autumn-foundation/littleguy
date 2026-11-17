@@ -109,6 +109,14 @@ pub enum Request {
     /// The text turns of the conversation, oldest first. Only the owner
     /// may.
     History,
+    /// The past conversations, newest first: their web and CLI turns
+    /// only. Only the owner may.
+    Conversations,
+    /// One past conversation, read only. Only the owner may.
+    Conversation {
+        /// The id from the listing.
+        id: i64,
+    },
     /// Start a new conversation: the assistant forgets the transcript.
     /// Memory, notes and the workspace stay. Only the owner may.
     NewConversation,
@@ -291,6 +299,49 @@ pub struct Turn {
     pub from: Speaker,
     /// The text.
     pub text: String,
+}
+
+/// One past conversation in a listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationEntry {
+    /// The id, for [`Request::Conversation`].
+    pub id: i64,
+    /// When its first turn arrived, in epoch milliseconds.
+    pub started_ms: i64,
+    /// When its last turn arrived, in epoch milliseconds.
+    pub last_ms: i64,
+    /// Its turns of the web and the CLI.
+    pub turns: i64,
+    /// The text of its first turn.
+    pub first_text: String,
+    /// Whether it goes on now: no new conversation followed it.
+    pub live: bool,
+}
+
+/// One turn of a past conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PastTurn {
+    /// Who wrote it.
+    pub from: Speaker,
+    /// The text. It can be empty when the turn only calls tools.
+    pub text: String,
+    /// The tool calls of the turn, with their results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<PastCall>,
+    /// Whether the op of the turn failed. The text then says why.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+}
+
+/// One tool call of a past turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PastCall {
+    /// The tool.
+    pub tool: String,
+    /// The arguments, as JSON.
+    pub arguments: String,
+    /// The result, when the history holds it.
+    pub result: Option<String>,
 }
 
 /// One overlay version of the assistant.
@@ -505,6 +556,23 @@ pub enum Response {
         /// apply from the next message, which starts a new run (ADR 0035).
         #[serde(default)]
         profile: Vec<String>,
+    },
+    /// The past conversations, newest first.
+    Conversations {
+        /// The conversations.
+        entries: Vec<ConversationEntry>,
+        /// How many days an ended run stays: `[runs] keep_days`.
+        keep_days: u32,
+        /// Whether the oldest one began before the runs that stay, so its
+        /// first turns are gone.
+        partial: bool,
+    },
+    /// One past conversation, oldest first.
+    Conversation {
+        /// Its id.
+        id: i64,
+        /// Its turns.
+        turns: Vec<PastTurn>,
     },
     /// The text turns of the conversation, oldest first.
     History {

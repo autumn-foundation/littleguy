@@ -128,6 +128,12 @@ enum Command {
     },
     /// List the calls that wait for an approval.
     Approvals,
+    /// List the past conversations of the web and the CLI, or show one by
+    /// its id. It reads only: it cannot continue an old one.
+    History {
+        /// The id of the conversation to show.
+        id: Option<i64>,
+    },
     /// Run the call that waits as request `id`.
     Approve {
         /// The request number, from `lg approvals`.
@@ -783,6 +789,10 @@ async fn run(cli: Cli) -> Result<bool> {
             ask(&socket, &request).await
         }
         Command::Approvals => ask(&socket, &Request::Approvals).await,
+        Command::History { id } => {
+            let request = id.map_or(Request::Conversations, |id| Request::Conversation { id });
+            ask(&socket, &request).await
+        }
         Command::Approve { id } => ask(&socket, &Request::Approve { id }).await,
         Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
         Command::Refine(command) => ask(&socket, &command.request()?).await,

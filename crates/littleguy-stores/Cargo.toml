@@ -19,6 +19,9 @@ skills = []
 self-debug = []
 # What the council of the owner decided (`council`, ADR 0027).
 council = ["plans", "skills"]
+# The past conversations of the assistant, read from the runtime database
+# (`conversations`, ADR 0039).
+history = []
 # The notes of the assistant (`notes`, ADR 0029).
 notes = []
 

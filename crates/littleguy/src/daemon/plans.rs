@@ -82,11 +82,6 @@ pub(super) fn listing_of(
 }
 
 impl Daemon {
-    /// The goals and the ideas.
-    pub(super) fn plans(&self) -> Result<Response> {
-        listing_of(&self.kit.config, self.kit.stores.as_deref())
-    }
-
     /// Applies the owner's `decision` on goal or idea `id`, and returns the
     /// listing after it.
     pub(super) fn decide_plan(&self, decision: PlanDecision, id: i64) -> Result<Response> {

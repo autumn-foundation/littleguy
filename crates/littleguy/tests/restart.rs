@@ -5,11 +5,13 @@
 //! the offline model calls across both lives. Two more tests sign in to the
 //! web pages, and stop the daemon with SIGTERM.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -25,10 +27,25 @@ struct Paths {
     port: u16,
 }
 
-/// A port that was free a moment ago. Tests run in parallel, so each
-/// daemon needs its own port for the pages.
+/// A port that was free a moment ago, and that no other test of this
+/// process got. Tests run in parallel, so each daemon needs its own port.
+///
+/// The probe frees its port at once, so the kernel can hand the same port
+/// to a second probe before the first daemon binds it. Then one daemon
+/// fails to bind, and its test talks to the daemon of another test. So
+/// each port goes out once per process.
 fn free_port() -> TestResult<u16> {
-    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+    static ISSUED: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
+    for _ in 0..100 {
+        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let mut issued = ISSUED
+            .lock()
+            .map_err(|_| "a test panicked while it held a port")?;
+        if issued.insert(port) {
+            return Ok(port);
+        }
+    }
+    Err("no port that this process has not issued".into())
 }
 
 fn paths() -> TestResult<Paths> {
@@ -332,7 +349,10 @@ fn a_public_hook_ticks_the_daemon_with_its_token() -> TestResult {
             .spawn()?,
     );
     let (head, _) = request(paths.port, "POST", "/hooks/tick", "")?;
-    assert!(head.starts_with("HTTP/1.1 401"), "a hook needs its token");
+    assert!(
+        head.starts_with("HTTP/1.1 401"),
+        "a hook needs its token: {head}"
+    );
     let bearer = format!("Authorization: Bearer {HOOK_TOKEN}\r\n");
     let (head, body) = request(paths.port, "POST", "/hooks/tick", &bearer)?;
     assert!(head.starts_with("HTTP/1.1 200"), "the tick answers 200");

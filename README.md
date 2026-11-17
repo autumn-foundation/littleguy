@@ -283,13 +283,14 @@ fetch_max_chars = 20000         # one page of text; `offset` reads on
   set it in the environment; without it there is no search tool.
 - The workspace keeps its files in `workspace/`, next to `lg.db`, and they
   survive a restart. A path stays inside the workspace. `search_notes`
-  finds the files that hold some words, so littleguy can recall a note
-  whose path it forgot. It only reads, so a heartbeat may use it. It comes
+  finds the files that hold some words, so littleguy can find a file
+  whose path it forgot. It reads no note: `list_notes` with a query
+  searches those. It only reads, so a heartbeat may use it. It comes
   with the `search-notes` feature, on by default.
 - Notes are littleguy's own memory of what it learned: `write_note`,
   `read_note`, `list_notes` (with a query to search) and `delete_note`.
   They live in `memory.db`, not in the workspace, so a heartbeat can write
-  them too, where the workspace is read-only. You read them on the
+  them too, where `write_file` and `delete_file` are refused. You read them on the
   **Notes** tab of the Workspace page.
   [ADR 0029](docs/adr/0029-notes-that-a-tick-can-write.md) explains the
   design. `grep_files` finds the

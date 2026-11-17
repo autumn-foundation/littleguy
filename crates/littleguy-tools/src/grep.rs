@@ -1,7 +1,7 @@
 //! `grep_files`: find the lines of the workspace that match a pattern
 //! (issue #75).
 //!
-//! `search_notes` ranks notes by their words. Code needs the other kind of
+//! `search_notes` ranks the files of the workspace by their words. Code needs the other kind of
 //! search: each line that matches, with its path and its line number, as
 //! `rg` gives them. The `regex` crate matches in linear time, so no
 //! pattern can hang a call, and a size limit keeps a pattern small. It only

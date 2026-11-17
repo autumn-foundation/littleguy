@@ -66,7 +66,7 @@ openai = ["littleguy-models/openai"]
 web = ["littleguy-tools/web"]
 # The tools of each `[[mcp.server]]`.
 mcp = ["littleguy-tools/mcp"]
-# `search_notes`: the assistant finds a note of its workspace by its words.
+# `search_notes`: the assistant finds a file of its workspace by its words.
 search-notes = ["littleguy-tools/search-notes"]
 # `write_note` and the other note tools: notes in memory.db that a tick can
 # write too (ADR 0029).

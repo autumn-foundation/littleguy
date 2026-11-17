@@ -2529,7 +2529,7 @@ mod tests {
         let empty = daemon.handle_request(UID, Request::Conversations).await;
         assert!(
             matches!(&empty, Response::Conversations { entries, keep_days: 30, partial: false } if entries.is_empty()),
-            "{empty:?}"
+            "an empty history lists no conversation"
         );
         daemon
             .handle_request(UID, request("cli-1-1", "hello"))
@@ -2580,7 +2580,10 @@ mod tests {
         assert_eq!(beside, Some(Response::Conversation { id: old, turns }));
         // Only the owner reads it.
         let stranger = daemon.handle_request(UID + 1, Request::Conversations).await;
-        assert!(matches!(stranger, Response::Error { .. }), "{stranger:?}");
+        assert!(
+            matches!(stranger, Response::Error { .. }),
+            "a stranger cannot read the history"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

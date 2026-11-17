@@ -1289,7 +1289,10 @@ async fn the_pages_open_while_the_assistant_thinks() {
     }
     gate.notify_one();
     let answer = chat.await.unwrap().unwrap();
-    assert!(matches!(answer, Response::Reply { .. }), "{answer:?}");
+    assert!(
+        matches!(answer, Response::Reply { .. }),
+        "the chat answers once the gate opens"
+    );
 }
 
 #[cfg(feature = "history")]
@@ -1330,7 +1333,10 @@ async fn the_history_lists_past_conversations_and_opens_one_read_only() {
         .collect();
     // The live conversation goes to the chat. The old one opens here.
     assert_eq!(links[0], "/");
-    assert!(links[1].starts_with("/history/"), "{links:?}");
+    assert!(
+        links[1].starts_with("/history/"),
+        "an old conversation opens on its own page"
+    );
     listing.assert_body_contains("green tea");
 
     let old = rig.client.get(&links[1]).send().await;

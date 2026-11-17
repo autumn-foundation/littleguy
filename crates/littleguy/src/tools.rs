@@ -3,7 +3,7 @@
 //!
 //! `[tools]` turns each one on or off. Web search also needs the Brave
 //! Search API key [`SEARCH_KEY_ENV`], sealed with `lg keys` or set in the
-//! environment (ADR 0038). The key never goes in the config file, and the
+//! environment (ADR 0040). The key never goes in the config file, and the
 //! log never shows it.
 //!
 //! The workspace lives in [`WORKSPACE_DIR`] beside the database. The engine
@@ -50,7 +50,7 @@ pub fn search_key(keys: &crate::house_keys::HouseKeys) -> Option<String> {
 }
 
 /// Opens each MCP server of the config and returns its tools. `vars`
-/// reads each variable that a server names (ADR 0038). A server that fails
+/// reads each variable that a server names (ADR 0040). A server that fails
 /// gives no tools, and the log says why. The daemon still starts, so one
 /// broken server does not take the assistant down.
 #[cfg(feature = "mcp")]

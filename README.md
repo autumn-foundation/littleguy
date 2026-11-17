@@ -791,7 +791,15 @@ waits next shows as a new card. An answer streams in as the
 model writes it, over Server-Sent Events, and the whole answer takes its
 place at the end. Claude, OpenAI and OpenRouter stream. The workspace page
 lists the files that the assistant keeps with its file tools, and opens
-each one: Markdown renders, and other text shows as it is. The manage page shows the
+each one: Markdown renders, and other text shows as it is. The history
+page lists the past conversations of the web and the CLI, newest first, and
+opens each one read only, with its tool calls folded away. A Slack or
+Discord message is not in it. Past conversations stay as long as the runs
+that hold them, `[runs] keep_days`, and the page says so. `lg history`
+lists them too, and `lg history <id>` prints one
+([ADR 0039](docs/adr/0039-past-conversations.md)). The pages answer while
+the assistant thinks ([ADR 0040](docs/adr/0038-reads-answer-beside-the-loop.md)).
+The manage page shows the
 calls that wait for approval, who can talk to the assistant, the refine
 overlays and the OAuth connections. An Approve or Deny button answers at
 once: the run goes on behind it, and its answer shows in the section when
@@ -954,7 +962,7 @@ config names (`token_env`, `client_secret_env`, `bearer_env`, the `env` of
 an MCP server). Each one can live in the environment, as above. Or the key
 ring of `LG_SAN_MATEO_KEY` seals it into `house-keys.json` next to
 `lg.db`, so the environment holds one secret instead of many
-([ADR 0038](docs/adr/0038-house-keys-sealed-with-the-key-ring.md)):
+([ADR 0040](docs/adr/0040-house-keys-sealed-with-the-key-ring.md)):
 
 ```sh
 export LG_SAN_MATEO_KEY="$(openssl rand -base64 32)"   # keep it: it opens every key

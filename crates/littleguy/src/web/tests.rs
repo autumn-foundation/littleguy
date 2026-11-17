@@ -92,7 +92,7 @@ async fn rig_extras(
     let listener = daemon::bind(&dir.path().join("lg.sock")).await.unwrap();
     let (handle, jobs) = daemon::jobs(UID);
     // As `lg serve` does, so a chat streams.
-    let handle = handle.with_live(daemon.live());
+    let handle = handle.with_live(daemon.live()).with_reads(daemon.reads());
     #[cfg(feature = "slack")]
     let (links, slack) = slack_links(&daemon, &handle, slack);
     #[cfg(not(feature = "slack"))]
@@ -1223,4 +1223,128 @@ async fn a_call_that_waits_is_decided_in_the_chat() {
         .send()
         .await
         .assert_status(401);
+}
+
+/// A model that holds each answer until the test opens its gate.
+#[derive(Debug)]
+struct Gated {
+    /// Notified when a call starts.
+    entered: Arc<Notify>,
+    /// Holds the answer.
+    gate: Arc<Notify>,
+}
+
+impl autumn_harvest_agent::AgentModel for Gated {
+    fn chat<'a>(
+        &'a self,
+        _request: &'a autumn_harvest_agent::ChatRequest,
+    ) -> autumn_harvest_agent::BoxFuture<
+        'a,
+        Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
+    > {
+        use autumn_harvest_agent::{ChatResponse, ContentPart, StopReason, TokenUsage};
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.gate.notified().await;
+            Ok(ChatResponse {
+                content: vec![ContentPart::Text(String::from("done"))],
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::new(1, 1),
+            })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pages_open_while_the_assistant_thinks() {
+    let entered = Arc::new(Notify::new());
+    let gate = Arc::new(Notify::new());
+    let model = Gated {
+        entered: Arc::clone(&entered),
+        gate: Arc::clone(&gate),
+    };
+    let rig = rig_on(&config(true), None, Arc::new(model)).await;
+    sign_in(&rig).await;
+    let handle = rig.handle.clone();
+    let chat = tokio::spawn(async move {
+        handle
+            .ask(Request::Chat {
+                message_id: String::from("cli-1-1"),
+                text: String::from("think hard"),
+            })
+            .await
+    });
+    // The run holds the loop of the daemon now.
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    for path in ["/", "/workspace", "/manage"] {
+        let page = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rig.client.get(path).send(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{path} waited for the run"));
+        page.assert_status(200);
+    }
+    gate.notify_one();
+    let answer = chat.await.unwrap().unwrap();
+    assert!(
+        matches!(answer, Response::Reply { .. }),
+        "the chat answers once the gate opens"
+    );
+}
+
+#[cfg(feature = "history")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_history_lists_past_conversations_and_opens_one_read_only() {
+    let rig = rig(&config(false)).await;
+    sign_in(&rig).await;
+    let empty = rig.client.get("/history").send().await;
+    empty.assert_status(200);
+    empty.assert_body_contains("for 30 days ([runs] keep_days)");
+    empty.assert_body_contains("No conversation yet.");
+
+    for (id, text) in [("cli-1-1", "green tea"), ("cli-2-1", "oolong")] {
+        rig.handle
+            .ask(Request::Chat {
+                message_id: String::from(id),
+                text: String::from(text),
+            })
+            .await
+            .unwrap();
+    }
+    rig.handle.ask(Request::NewConversation).await.unwrap();
+    rig.handle
+        .ask(Request::Chat {
+            message_id: String::from("cli-3-1"),
+            text: String::from("coffee"),
+        })
+        .await
+        .unwrap();
+
+    let listing = rig.client.get("/history").send().await;
+    listing.assert_status(200);
+    assert_eq!(listing.selector_count("ul.conversations li"), 2);
+    let links: Vec<String> = listing
+        .selector_attr("ul.conversations a", "href")
+        .into_iter()
+        .flatten()
+        .collect();
+    // The live conversation goes to the chat. The old one opens here.
+    assert_eq!(links[0], "/");
+    assert!(
+        links[1].starts_with("/history/"),
+        "an old conversation opens on its own page"
+    );
+    listing.assert_body_contains("green tea");
+
+    let old = rig.client.get(&links[1]).send().await;
+    old.assert_status(200);
+    old.assert_body_contains("you said 'oolong'");
+    assert_eq!(old.selector_count("#thread .msg.you"), 2);
+    assert_eq!(old.selector_count("#composer"), 0, "read only");
+
+    let missing = rig.client.get("/history/99999").send().await;
+    missing.assert_body_contains("no past conversation has the id 99999");
 }

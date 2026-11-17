@@ -1,4 +1,4 @@
-# ADR 0038: House keys sealed with the key ring
+# ADR 0040: House keys sealed with the key ring
 
 ## Status
 

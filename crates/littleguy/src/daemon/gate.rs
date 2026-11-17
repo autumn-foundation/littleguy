@@ -125,12 +125,9 @@ impl Daemon {
     /// The store of the calls that wait, or the error text for a daemon
     /// where no call can wait.
     fn approval_store(&self) -> Result<Arc<SqliteStores>, String> {
-        self.approvals.clone().ok_or_else(|| {
-            String::from(
-                "no call waits for approval in this daemon: it has no [sandbox] section, \
-                 and its tools cannot complete a flow rule",
-            )
-        })
+        self.approvals
+            .clone()
+            .ok_or_else(|| String::from(NO_APPROVALS))
     }
 
     /// Matches the open records to the wait of `run`.
@@ -253,34 +250,6 @@ impl Daemon {
                     .context("the approval record did not save")?
             };
         Ok(Some(claim.record))
-    }
-
-    /// The open records, for `lg approvals`.
-    pub(super) fn approval_list(&self) -> Result<Response> {
-        let stores = match self.approval_store() {
-            Ok(stores) => stores,
-            // A listing with nothing that can wait is off, not broken.
-            Err(message) => return Ok(Response::Off { message }),
-        };
-        let entries = stores
-            .open_approvals()?
-            .into_iter()
-            .filter(|record| record.verdict.is_none())
-            .map(|record| {
-                let text = approvals::describe(&record);
-                // A call that the reviewer left to the owner says why.
-                let text = match record.reason.split_once(approvals::REVIEW_UNSURE) {
-                    Some((_, why)) => format!("The reviewer is unsure: {why}\n{text}"),
-                    None => text,
-                };
-                ApprovalEntry {
-                    id: record.id,
-                    tool: record.tool,
-                    text,
-                }
-            })
-            .collect();
-        Ok(Response::Approvals { entries })
     }
 
     /// Sends `choice` on request `id` to the run. Returns the record, or
@@ -452,4 +421,37 @@ impl Daemon {
             }
         }
     }
+}
+
+/// Why nothing can wait for approval in a daemon with no store for it.
+const NO_APPROVALS: &str = "no call waits for approval in this daemon: it has no [sandbox] \
+     section, and its tools cannot complete a flow rule";
+
+/// The open records of `stores`, for `lg approvals` and the pages.
+pub(super) fn approval_list(stores: Option<&SqliteStores>) -> Result<Response> {
+    let Some(stores) = stores else {
+        // A listing with nothing that can wait is off, not broken.
+        return Ok(Response::Off {
+            message: String::from(NO_APPROVALS),
+        });
+    };
+    let entries = stores
+        .open_approvals()?
+        .into_iter()
+        .filter(|record| record.verdict.is_none())
+        .map(|record| {
+            let text = approvals::describe(&record);
+            // A call that the reviewer left to the owner says why.
+            let text = match record.reason.split_once(approvals::REVIEW_UNSURE) {
+                Some((_, why)) => format!("The reviewer is unsure: {why}\n{text}"),
+                None => text,
+            };
+            ApprovalEntry {
+                id: record.id,
+                tool: record.tool,
+                text,
+            }
+        })
+        .collect();
+    Ok(Response::Approvals { entries })
 }

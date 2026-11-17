@@ -28,8 +28,8 @@ use super::decisions::Poll;
 use crate::client::render;
 use crate::daemon::live::Piece;
 use crate::protocol::{
-    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, Request, Response as Answer, Speaker,
-    Turn,
+    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, PastTurn, Request, Response as Answer,
+    Speaker, Turn,
 };
 
 /// The session key that marks the owner.
@@ -77,6 +77,8 @@ pub fn routes() -> Vec<autumn_web::Route> {
         index,
         manage,
         workspace,
+        history,
+        past,
         decide_plan,
         decide_skill,
         login,
@@ -187,6 +189,7 @@ fn bar(csrf: &str, current: &str) -> Markup {
             nav {
                 a href="/" aria-current=[mark("/")] { "Chat" }
                 a href="/workspace" aria-current=[mark("/workspace")] { "Workspace" }
+                a href="/history" aria-current=[mark("/history")] { "History" }
                 a href="/manage" aria-current=[mark("/manage")] { "Manage" }
                 form method="post" action="/logout" {
                     input type="hidden" name="_csrf" value=(csrf);
@@ -481,6 +484,123 @@ async fn files_view(web: &Web, path: Option<&str>) -> Markup {
             }
             (open_file(file.as_ref()))
         }
+    }
+}
+
+/// The past conversations of the web and the CLI, newest first (ADR
+/// 0039). The page says how long they stay, so a short list never looks
+/// like lost history.
+#[get("/history")]
+async fn history(State(state): State<AppState>, session: Session, csrf: CsrfToken) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(false);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let listing = ask(&web, Request::Conversations).await;
+    let body = html! {
+        (bar(csrf.token(), "/history"))
+        main.history {
+            @match &listing {
+                Answer::Conversations { entries, keep_days, partial } => {
+                    p.note.keep { (crate::client::keep_line(*keep_days)) }
+                    @if entries.is_empty() {
+                        p.empty { "No conversation yet." }
+                    } @else {
+                        ul.conversations {
+                            @for (index, entry) in entries.iter().enumerate() {
+                                @let oldest = index + 1 == entries.len();
+                                @let href = if entry.live { String::from("/") } else { format!("/history/{}", entry.id) };
+                                li {
+                                    a href=(href) {
+                                        span.title { (title_of(&entry.first_text)) }
+                                        span.meta {
+                                            (when(entry.started_ms)) " · " (entry.turns)
+                                            @if entry.turns == 1 { " turn" } @else { " turns" }
+                                            @if entry.live { " · " strong { "now" } }
+                                        }
+                                        @if *partial && oldest {
+                                            span.partial { "Began before the window: its first turns are gone." }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                other => (note(other)),
+            }
+        }
+    };
+    page("History", Some(csrf.token()), &body).into_response()
+}
+
+/// The first text of a conversation as its title: one line, cut for the
+/// list. The page of the conversation shows it whole.
+fn title_of(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(120) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line,
+    }
+}
+
+/// One past conversation, read only: the same thread as the chat, with no
+/// box to write in. It cannot go on; a new message goes to the chat.
+#[get("/history/{id}")]
+async fn past(
+    State(state): State<AppState>,
+    session: Session,
+    csrf: CsrfToken,
+    Path(id): Path<i64>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(false);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let answer = ask(&web, Request::Conversation { id }).await;
+    let body = html! {
+        (bar(csrf.token(), "/history"))
+        main.chat.past {
+            p.note.past-head {
+                a href="/history" { "← All conversations" }
+                " · Read only. A new message goes to the "
+                a href="/" { "chat" } "."
+            }
+            div #scroller {
+                div #thread {
+                    @match &answer {
+                        Answer::Conversation { turns, .. } => @for each in turns { (past_turn(each)) },
+                        other => (note(other)),
+                    }
+                }
+            }
+        }
+    };
+    page("History", Some(csrf.token()), &body).into_response()
+}
+
+/// One turn of a past conversation: as the chat shows it, with each tool
+/// call folded away. A tool result is outside text, so it shows as plain
+/// text, never as markdown.
+fn past_turn(turn: &PastTurn) -> Markup {
+    match turn.from {
+        Speaker::Person => html! { div.msg.you { div.body { (turn.text) } } },
+        Speaker::Assistant | Speaker::Unprompted => html! {
+            @if !turn.text.is_empty() { (answer_turn(&turn.text, !turn.failed)) }
+            @for call in &turn.calls {
+                details.call {
+                    summary { "Called " code { (call.tool) } }
+                    pre.arguments { (call.arguments) }
+                    @if let Some(result) = &call.result {
+                        pre.result { (result) }
+                    }
+                }
+            }
+        },
     }
 }
 

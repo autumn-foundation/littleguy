@@ -665,3 +665,63 @@ button.quiet:hover {
   border: 1px solid var(--line);
   border-radius: 999px;
 }
+
+/* The past conversations (ADR 0039). */
+main.history {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+ul.conversations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+ul.conversations li a {
+  display: block;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--line, #ddd);
+  color: inherit;
+  text-decoration: none;
+}
+
+ul.conversations li a:hover {
+  background: var(--soft, rgba(0, 0, 0, 0.04));
+}
+
+ul.conversations .title {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+ul.conversations .meta,
+ul.conversations .partial {
+  display: block;
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+main.past .past-head {
+  margin: 0.5rem auto;
+  max-width: 48rem;
+  padding: 0 1rem;
+}
+
+details.call {
+  margin: 0.25rem 0 0.75rem;
+  font-size: 0.9em;
+}
+
+details.call summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+details.call pre {
+  max-height: 24rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

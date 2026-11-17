@@ -398,7 +398,7 @@ fn keys(paths: &Paths, words: &[&str], stdin: &str) -> TestResult<Output> {
 }
 
 /// The owner seals the hook token, unsets it, and the daemon reads it
-/// from the sealed file with one secret in its environment (ADR 0038).
+/// from the sealed file with one secret in its environment (ADR 0040).
 #[cfg(feature = "sealed-keys")]
 #[test]
 fn a_sealed_hook_token_reaches_lg_serve() -> TestResult {

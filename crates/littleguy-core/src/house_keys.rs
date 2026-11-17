@@ -1,4 +1,4 @@
-//! The rules of the house keys (ADR 0038).
+//! The rules of the house keys (ADR 0040).
 //!
 //! A house key is a secret that littleguy sends itself, such as a model
 //! key or the search key. The binary seals each one with the key ring of

@@ -1,4 +1,4 @@
-//! The house key kernels (ADR 0038): which names the sealed store takes,
+//! The house key kernels (ADR 0040): which names the sealed store takes,
 //! and where the daemon reads a secret.
 //!
 //! Each function mirrors `littleguy-core/src/house_keys.rs`. The bodies

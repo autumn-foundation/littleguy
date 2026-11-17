@@ -66,20 +66,22 @@ fn refused() -> Response {
     }
 }
 
-impl Daemon {
-    /// The goals and the ideas.
-    pub(super) fn plans(&self) -> Result<Response> {
-        let Some(stores) = self
-            .kit
-            .stores
-            .as_ref()
-            .filter(|_| self.kit.config.tools.plans)
-        else {
-            return Ok(off());
-        };
-        Ok(listing(&stores.plans()?))
-    }
+/// The goals and the ideas of `stores`.
+///
+/// # Errors
+///
+/// Returns an error when the store fails.
+pub(super) fn listing_of(
+    config: &littleguy_core::Config,
+    stores: Option<&littleguy_stores::SqliteStores>,
+) -> Result<Response> {
+    let Some(stores) = stores.filter(|_| config.tools.plans) else {
+        return Ok(off());
+    };
+    Ok(listing(&stores.plans()?))
+}
 
+impl Daemon {
     /// Applies the owner's `decision` on goal or idea `id`, and returns the
     /// listing after it.
     pub(super) fn decide_plan(&self, decision: PlanDecision, id: i64) -> Result<Response> {

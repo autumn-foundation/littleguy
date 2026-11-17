@@ -54,6 +54,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `google` | no | `[google]`: the Gmail and Google Calendar tools. Needs `oauth`. | `axum`, `base64`, `san-mateo`, `san-mateo-sqlite` |
 | `grep-files` | yes | `grep_files`: the assistant finds the lines of its workspace that match a pattern. | `regex` |
 | `heartbeat` | yes | `[heartbeat]`: the assistant wakes on its own every so often. Its precheck skips a tick with no model call when no goal is due and no idea waits. | none |
+| `history` | yes | `lg history` and the History page: the past conversations of the web and the CLI, read from the runtime database (ADR 0039). | none |
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `notes` | yes | `write_note` and the other note tools: notes in memory.db that a tick can write too (ADR 0029). | none |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
@@ -62,7 +63,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `reflection` | yes | The reflection after a memory consolidation pass: the assistant files ideas and drafts skills from what the pass learned. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
-| `sealed-keys` | yes | `lg keys`: the house keys sealed with the key ring of LG_SAN_MATEO_KEY in house-keys.json, so the environment holds one secret (ADR 0038). | `san-mateo` |
+| `sealed-keys` | yes | `lg keys`: the house keys sealed with the key ring of LG_SAN_MATEO_KEY in house-keys.json, so the environment holds one secret (ADR 0040). | `san-mateo` |
 | `search-notes` | yes | `search_notes`: the assistant finds a note of its workspace by its words. | none |
 | `self-debug` | yes | `recent_runs`, `failed_attempts`, `model_usage` and `recent_wakes`: the assistant reads its own run log and tick log to debug itself. | none |
 | `skills` | yes | `[skills]`: SKILL.md files that reach the assistant through its profile overlay, `propose_skill`, and the Skills tab. | none |
@@ -90,6 +91,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 |---|---|---|---|
 | `council` | no | What the council of the owner decided (`council`, ADR 0027). | none |
 | `followups` | no | The wakes that the assistant books (`wakes`). | none |
+| `history` | no | The past conversations of the assistant, read from the runtime database (`conversations`, ADR 0039). | none |
 | `notes` | no | The notes of the assistant (`notes`, ADR 0029). | none |
 | `plans` | no | The goals and ideas of the assistant (`plans`). | none |
 | `self-debug` | no | The run log and the tick log that the assistant reads to debug itself (`runlog`, `tick_log`). | none |

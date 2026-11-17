@@ -38,6 +38,8 @@ use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 pub mod approvals;
+#[cfg(feature = "history")]
+pub mod conversations;
 #[cfg(feature = "council")]
 pub mod council;
 #[cfg(feature = "notes")]
@@ -46,6 +48,7 @@ pub mod notes;
 pub mod plans;
 #[cfg(feature = "self-debug")]
 pub mod runlog;
+pub mod runtime_state;
 #[cfg(feature = "skills")]
 pub mod skill_drafts;
 #[cfg(feature = "self-debug")]

@@ -16,7 +16,7 @@
 //!
 //! `lg serve --model claude`, `openai` or `openrouter` talks to a hosted
 //! model. Each reads its key as a house key: sealed with `lg keys`, or from
-//! the environment (ADR 0038). The key never shows in a process list.
+//! the environment (ADR 0040). The key never shows in a process list.
 //!
 //! - `lg keys set`, `import`, `list`, `remove` and `reseal` keep the house
 //!   keys sealed with the ring of `LG_SAN_MATEO_KEY`, so the environment
@@ -133,6 +133,12 @@ enum Command {
     },
     /// List the calls that wait for an approval.
     Approvals,
+    /// List the past conversations of the web and the CLI, or show one by
+    /// its id. It reads only: it cannot continue an old one.
+    History {
+        /// The id of the conversation to show.
+        id: Option<i64>,
+    },
     /// Run the call that waits as request `id`.
     Approve {
         /// The request number, from `lg approvals`.
@@ -774,7 +780,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     #[cfg(not(feature = "camel"))]
     let camel: Option<camel::Camel> = None;
     let (handle, jobs) = daemon::jobs(uid);
-    let handle = handle.with_live(daemon.live());
+    let handle = handle.with_live(daemon.live()).with_reads(daemon.reads());
     let logins = web::Logins::new(web::base_url(plan.bind));
     // A daemon whose pages do not serve refuses `lg ui`.
     let daemon = if plan.pages {
@@ -850,6 +856,10 @@ async fn run(cli: Cli) -> Result<bool> {
             ask(&socket, &request).await
         }
         Command::Approvals => ask(&socket, &Request::Approvals).await,
+        Command::History { id } => {
+            let request = id.map_or(Request::Conversations, |id| Request::Conversation { id });
+            ask(&socket, &request).await
+        }
         Command::Approve { id } => ask(&socket, &Request::Approve { id }).await,
         Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
         Command::Refine(command) => ask(&socket, &command.request()?).await,

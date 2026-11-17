@@ -53,7 +53,7 @@ pub(super) struct Kit {
     pub(super) api: Option<crate::tools::ApiLink>,
     /// The tenant database of a fleet, which holds the stores.
     pub(super) tenant: Option<PathBuf>,
-    /// The secrets by variable name, opened at start (ADR 0038).
+    /// The secrets by variable name, opened at start (ADR 0040).
     pub(super) keys: Arc<crate::house_keys::HouseKeys>,
     /// The chat services that take messages.
     pub(super) services: Vec<Service>,
@@ -90,7 +90,7 @@ pub(super) struct Assembled {
     pub(super) approvals: Option<Arc<SqliteStores>>,
     pub(super) approver: Option<SenderId>,
     #[cfg(feature = "refine")]
-    pub(super) refine: Option<Box<crate::refine::Refine>>,
+    pub(super) refine: Option<Arc<crate::refine::Refine>>,
 }
 
 impl Kit {

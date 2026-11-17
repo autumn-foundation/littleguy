@@ -3,7 +3,7 @@
 //! San Mateo seals each token with AES-256-GCM and refreshes it before it
 //! expires. Its data lives in `san-mateo.db` next to `lg.db`. The sealing
 //! key comes from `LG_SAN_MATEO_KEY` only, so the file alone opens nothing.
-//! The same ring seals the house keys ([`crate::house_keys`], ADR 0038), and
+//! The same ring seals the house keys ([`crate::house_keys`], ADR 0040), and
 //! its retired keys open the tokens that they sealed.
 //!
 //! The connect pages and the OAuth callback listen on a loopback address.
@@ -90,6 +90,63 @@ impl std::fmt::Debug for Connections {
             .finish_non_exhaustive()
     }
 }
+
+/// The listing of the connections, beside the loop of the daemon.
+#[derive(Clone)]
+pub struct Lister {
+    san: SanMateo,
+}
+
+impl std::fmt::Debug for Lister {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lister").finish_non_exhaustive()
+    }
+}
+
+impl Lister {
+    /// Every connection, with no credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store fails.
+    pub async fn list(&self) -> Result<Vec<ConnectionEntry>> {
+        let summaries = self
+            .san
+            .list_connections(ENVIRONMENT, &ConnectionFilter::default())
+            .await
+            .context("listing the connections")?;
+        Ok(summaries
+            .into_iter()
+            .map(|c| ConnectionEntry {
+                integration: c.provider_config_key,
+                connection: c.connection_id,
+                provider: c.provider,
+                created_at: c.created_at.to_rfc3339(),
+                refresh_exhausted: c.refresh_exhausted,
+            })
+            .collect())
+    }
+}
+
+/// The answer to a listing of the connections: off with no San Mateo.
+///
+/// # Errors
+///
+/// Returns an error when the store fails.
+pub async fn listing(lister: Option<&Lister>) -> Result<crate::protocol::Response> {
+    let Some(lister) = lister else {
+        return Ok(crate::protocol::Response::Off {
+            message: String::from(NO_CONNECTIONS),
+        });
+    };
+    Ok(crate::protocol::Response::Connections {
+        entries: lister.list().await?,
+    })
+}
+
+/// Why a daemon has no connections.
+pub const NO_CONNECTIONS: &str =
+    "this daemon keeps no OAuth connections. Add a [san_mateo] section";
 
 impl Connections {
     /// Opens the store next to `db`, puts each integration of `config`,
@@ -233,21 +290,16 @@ impl Connections {
     ///
     /// Returns an error when the store fails.
     pub async fn list(&self) -> Result<Vec<ConnectionEntry>> {
-        let summaries = self
-            .san
-            .list_connections(ENVIRONMENT, &ConnectionFilter::default())
-            .await
-            .context("listing the connections")?;
-        Ok(summaries
-            .into_iter()
-            .map(|c| ConnectionEntry {
-                integration: c.provider_config_key,
-                connection: c.connection_id,
-                provider: c.provider,
-                created_at: c.created_at.to_rfc3339(),
-                refresh_exhausted: c.refresh_exhausted,
-            })
-            .collect())
+        self.lister().list().await
+    }
+
+    /// A handle that lists the connections. It shares the service, so a
+    /// read needs no loop of the daemon.
+    #[must_use]
+    pub fn lister(&self) -> Lister {
+        Lister {
+            san: self.san.clone(),
+        }
     }
 
     /// Deletes one connection. Returns whether it existed.
@@ -795,7 +847,7 @@ widgets:
             connections.stop().await;
 
             // A rotation keeps the old key as retired, so the connection
-            // that it sealed still opens (ADR 0038).
+            // that it sealed still opens (ADR 0040).
             let rotated = KeyRing::new("k2", [2; 32])
                 .unwrap()
                 .with_base64_key("k1", KEY)

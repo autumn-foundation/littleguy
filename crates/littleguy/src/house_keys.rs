@@ -1,4 +1,4 @@
-//! House keys sealed with the key ring of `LG_SAN_MATEO_KEY` (ADR 0038).
+//! House keys sealed with the key ring of `LG_SAN_MATEO_KEY` (ADR 0040).
 //!
 //! A house key is a secret that littleguy sends itself: a model key, the
 //! search key, a chat token, or a variable that the config names. Each one

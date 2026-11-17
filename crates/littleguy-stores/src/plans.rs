@@ -19,12 +19,6 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use super::{Failure, SqliteStores};
 
-/// The longest title, in characters.
-pub const MAX_TITLE_CHARS: usize = 200;
-
-/// The longest text of a body, a reason or a note, in characters.
-pub const MAX_TEXT_CHARS: usize = 4_000;
-
 /// The most ideas that stay open at once. A run that files ideas in a loop
 /// stops here.
 pub const MAX_OPEN_IDEAS: i64 = 100;
@@ -34,9 +28,6 @@ pub const MAX_PROPOSED_GOALS: i64 = 20;
 
 /// The most goals that stay active at once.
 pub const MAX_ACTIVE_GOALS: i64 = 50;
-
-/// The notes that each goal or idea keeps. Older ones go.
-pub const MAX_NOTES: i64 = 50;
 
 /// The notes of each item in a listing, newest last.
 pub const LISTED_NOTES: i64 = 5;
@@ -144,14 +135,11 @@ fn refuse(message: impl Into<String>) -> AgentError {
     AgentError::new(ErrorKind::Tool, message)
 }
 
-/// `text` trimmed, refused when it is empty or longer than `max`.
-fn checked<'a>(what: &str, text: &'a str, max: usize) -> Result<&'a str, AgentError> {
+/// `text` trimmed, refused when it is empty.
+fn checked<'a>(what: &str, text: &'a str) -> Result<&'a str, AgentError> {
     let text = text.trim();
     if text.is_empty() {
         return Err(refuse(format!("the {what} is empty")));
-    }
-    if text.chars().count() > max {
-        return Err(refuse(format!("the {what} is over {max} characters")));
     }
     Ok(text)
 }
@@ -187,8 +175,7 @@ fn count(tx: &Transaction<'_>, table: &str, status: &str) -> Result<i64, Failure
     )?)
 }
 
-/// Adds a note to `owner` in `table`, once for `key`, and keeps the newest
-/// [`MAX_NOTES`].
+/// Adds a note to `owner` in `table`, once for `key`. Every note stays.
 fn add_note(
     tx: &Transaction<'_>,
     table: &str,
@@ -208,13 +195,6 @@ fn add_note(
              ON CONFLICT (key) DO NOTHING"
         ),
         params![owner, text, now_ms, key],
-    )?;
-    tx.execute(
-        &format!(
-            "DELETE FROM {table} WHERE {column} = ?1 AND id NOT IN \
-             (SELECT id FROM {table} WHERE {column} = ?1 ORDER BY id DESC LIMIT ?2)"
-        ),
-        params![owner, MAX_NOTES],
     )?;
     Ok(())
 }
@@ -237,7 +217,7 @@ impl SqliteStores {
     ///
     /// # Errors
     ///
-    /// Returns a `Tool` error for an empty or long text, or when
+    /// Returns a `Tool` error for an empty text, or when
     /// [`MAX_OPEN_IDEAS`] are open. Returns an error when the store fails.
     pub fn add_idea(
         &self,
@@ -246,8 +226,8 @@ impl SqliteStores {
         body: &str,
         now_ms: i64,
     ) -> Result<i64, AgentError> {
-        let title = checked("title", title, MAX_TITLE_CHARS)?;
-        let body = checked("body", body, MAX_TEXT_CHARS)?;
+        let title = checked("title", title)?;
+        let body = checked("body", body)?;
         self.write(|tx| {
             if let Some(id) = keyed(tx, "ideas", key)? {
                 return Ok(Ok(id));
@@ -270,7 +250,7 @@ impl SqliteStores {
     ///
     /// # Errors
     ///
-    /// Returns a `Tool` error for an empty or long note, or an idea that is
+    /// Returns a `Tool` error for an empty note, or an idea that is
     /// not open. Returns an error when the store fails.
     pub fn research_idea(
         &self,
@@ -279,7 +259,7 @@ impl SqliteStores {
         note: &str,
         now_ms: i64,
     ) -> Result<(), AgentError> {
-        let note = checked("note", note, MAX_TEXT_CHARS)?;
+        let note = checked("note", note)?;
         self.write(|tx| {
             if status(tx, "ideas", id)?.as_deref() != Some("open") {
                 return Ok(Err(refuse(format!("idea {id} is not open"))));
@@ -309,7 +289,7 @@ impl SqliteStores {
     ///
     /// # Errors
     ///
-    /// Returns a `Tool` error for an empty or long text, an interval under
+    /// Returns a `Tool` error for an empty text, an interval under
     /// a minute, an idea that is not open, or when [`MAX_PROPOSED_GOALS`]
     /// wait. Returns an error when the store fails.
     pub fn propose_goal(
@@ -321,8 +301,8 @@ impl SqliteStores {
         idea: Option<i64>,
         now_ms: i64,
     ) -> Result<i64, AgentError> {
-        let title = checked("title", title, MAX_TITLE_CHARS)?;
-        let why = checked("reason", why, MAX_TEXT_CHARS)?;
+        let title = checked("title", title)?;
+        let why = checked("reason", why)?;
         if check_every_secs.is_some_and(|every| every < 60) {
             return Err(refuse("a check interval is at least one minute"));
         }
@@ -416,7 +396,7 @@ impl SqliteStores {
     ///
     /// # Errors
     ///
-    /// Returns a `Tool` error for an empty or long note, or a goal that is
+    /// Returns a `Tool` error for an empty note, or a goal that is
     /// not active. Returns an error when the store fails.
     pub fn goal_progress(
         &self,
@@ -426,7 +406,7 @@ impl SqliteStores {
         finished: bool,
         now_ms: i64,
     ) -> Result<(), AgentError> {
-        let note = checked("note", note, MAX_TEXT_CHARS)?;
+        let note = checked("note", note)?;
         self.write(|tx| {
             if status(tx, "goals", id)?.as_deref() != Some(GoalStatus::Active.as_str()) {
                 return Ok(Err(refuse(format!("goal {id} is not active"))));
@@ -654,7 +634,9 @@ mod tests {
     fn bad_text_and_full_lists_are_refused() {
         let stores = stores();
         refused(stores.add_idea("a", "  ", "b", 0));
-        refused(stores.add_idea("b", &"t".repeat(MAX_TITLE_CHARS + 1), "b", 0));
+        // A long text is no bound. A fresh store keeps the list empty.
+        let long = "t".repeat(100_000);
+        self::stores().add_idea("b", &long, &long, 0).unwrap();
         refused(stores.propose_goal("c", "G", "w", Some(59), None, 0));
         refused(stores.propose_goal("d", "G", "w", None, Some(999), 0));
         for n in 0..MAX_OPEN_IDEAS {
@@ -671,12 +653,22 @@ mod tests {
         }
         refused(stores.propose_goal("over", "G", "w", None, None, 0));
 
-        for n in 0..=MAX_NOTES {
+        for n in 0..200 {
             stores.research_idea(&format!("n{n}"), 2, "x", n).unwrap();
         }
+        let kept: i64 = stores
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT COUNT(*) FROM idea_notes WHERE idea = 2",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(kept, 200);
         let plans = stores.plans().unwrap();
         let idea = plans.ideas.iter().find(|idea| idea.id == 2).unwrap();
         assert_eq!(idea.notes.len(), usize::try_from(LISTED_NOTES).unwrap());
-        assert_eq!(idea.notes.last().unwrap().at_ms, MAX_NOTES);
+        assert_eq!(idea.notes.last().unwrap().at_ms, 199);
     }
 }

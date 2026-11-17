@@ -111,14 +111,18 @@ pub fn approval_reason(name: &str) -> Option<&'static str> {
     (name == SEND_TOOL).then_some(SEND_REASON)
 }
 
-/// `api_get` and `api_send` on `api`, for `integrations`. An answer keeps
-/// at most `max_chars` characters. With no integration there is no tool.
+/// `api_get` and `api_send` on `api`, for `integrations`.
+///
+/// An answer keeps at most `max_chars` characters, or all of them when the
+/// owner sets no bound. A second call would repeat the request, so an
+/// answer has no pages. With no integration there is no tool.
 #[must_use]
 pub fn api_tools(
     api: &Arc<dyn ProviderApi>,
     integrations: &[ApiIntegration],
-    max_chars: usize,
+    max_chars: Option<usize>,
 ) -> Vec<Arc<dyn Tool>> {
+    let max_chars = max_chars.unwrap_or(usize::MAX);
     if integrations.is_empty() {
         return Vec::new();
     }

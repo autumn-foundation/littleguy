@@ -13,16 +13,11 @@ use autumn_harvest_agent::{AgentError, FnTool, Tool, ToolContext, ToolEffect};
 use regex::{Regex, RegexBuilder};
 use serde_json::{Value, json};
 
-use crate::{clip, refuse, text_field};
+use crate::{refuse, text_field};
 
-/// The most matches that one call returns when it names none.
+/// The most matches that one call returns when it names none. A call
+/// names any count, and `more` says when more lines match.
 pub const DEFAULT_GREP_MATCHES: usize = 50;
-
-/// The most matches that one call returns.
-pub const MAX_GREP_MATCHES: usize = 200;
-
-/// The most characters of one matching line that a result shows.
-const MAX_LINE_CHARS: usize = 300;
 
 /// The longest pattern, in bytes.
 const MAX_PATTERN_BYTES: usize = 1000;
@@ -77,7 +72,7 @@ fn hits(path: &str, text: &str, regex: &Regex, room: usize) -> (Vec<Hit>, bool) 
         found.push(Hit {
             path: path.to_owned(),
             line: index + 1,
-            text: clip(line, MAX_LINE_CHARS).0,
+            text: line.to_owned(),
         });
     }
     (found, false)
@@ -90,7 +85,7 @@ fn grep(input: &Value, ctx: &ToolContext) -> Result<Value, AgentError> {
         .as_u64()
         .and_then(|limit| usize::try_from(limit).ok())
         .unwrap_or(DEFAULT_GREP_MATCHES)
-        .clamp(1, MAX_GREP_MATCHES);
+        .max(1);
     let workspace = ctx
         .workspace
         .as_ref()
@@ -149,7 +144,7 @@ pub fn grep_files_tool() -> Arc<dyn Tool> {
                 "literal": {"type": "boolean", "description": "Match `pattern` as plain text. Default false."},
                 "ignore_case": {"type": "boolean", "description": "Match upper and lower case alike. Default false."},
                 "path": {"type": "string", "description": "Keep only the files whose path starts with this, such as `crates/littleguy/src/`."},
-                "limit": {"type": "integer", "minimum": 1, "maximum": MAX_GREP_MATCHES, "description": "The most matches. Default 50."},
+                "limit": {"type": "integer", "minimum": 1, "description": "The most matches. Default 50."},
             },
             "required": ["pattern"],
         }),
@@ -182,10 +177,10 @@ mod tests {
     }
 
     #[test]
-    fn a_long_line_is_cut() {
-        let line = "x".repeat(MAX_LINE_CHARS * 2);
+    fn a_long_line_comes_whole() {
+        let line = "x".repeat(10_000);
         let (found, _) = hits("a.txt", &line, &regex("x"), 1);
-        assert_eq!(found[0].text.chars().count(), MAX_LINE_CHARS);
+        assert_eq!(found[0].text, line);
     }
 
     #[test]

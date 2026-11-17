@@ -44,13 +44,6 @@ pub const SKILLS_ID: &str = "lg-skills";
 /// fit the ceilings gets its reason back on the next attempt.
 pub const MAX_ATTEMPTS: u32 = 3;
 
-/// The largest evidence text, in bytes. The oldest messages go first.
-pub const MAX_EVIDENCE_BYTES: usize = 64 * 1024;
-
-/// The largest text of one tool call or tool result in the evidence, in
-/// characters.
-pub const MAX_PART_CHARS: usize = 500;
-
 /// The path of the overlay store for the database `db`.
 #[must_use]
 pub fn path_for(db: &Path) -> PathBuf {
@@ -361,29 +354,14 @@ pub fn parts(overlay: &ProfileOverlay) -> Vec<String> {
 
 /// The evidence text of the last `messages` messages of `transcript`.
 ///
-/// Each message is one block, headed by its role. A tool call or a tool
-/// result is cut to [`MAX_PART_CHARS`]. The oldest blocks go first when the
-/// text passes [`MAX_EVIDENCE_BYTES`].
+/// Each message is one block, headed by its role, and each block is whole.
+/// The owner bounds the evidence with `[refine] messages`.
 #[must_use]
 pub fn evidence(transcript: &[ChatMessage], messages: u32) -> Evidence {
     let keep = usize::try_from(messages).unwrap_or(usize::MAX);
     let start = transcript.len().saturating_sub(keep);
-    let mut blocks: Vec<String> = transcript[start..].iter().map(block).collect();
-    let mut total: usize = blocks.iter().map(|block| block.len() + 2).sum();
-    let mut first = 0;
-    while total > MAX_EVIDENCE_BYTES && first + 1 < blocks.len() {
-        total -= blocks[first].len() + 2;
-        first += 1;
-    }
-    let mut text = blocks.split_off(first).join("\n\n");
-    if text.len() > MAX_EVIDENCE_BYTES {
-        let cut = text.len() - MAX_EVIDENCE_BYTES;
-        let cut = (cut..=text.len())
-            .find(|&index| text.is_char_boundary(index))
-            .unwrap_or(text.len());
-        text.drain(..cut);
-    }
-    Evidence::text(text)
+    let blocks: Vec<String> = transcript[start..].iter().map(block).collect();
+    Evidence::text(blocks.join("\n\n"))
 }
 
 /// One message as an evidence block.
@@ -401,19 +379,11 @@ fn block(message: &ChatMessage) -> String {
             ContentPart::Text(text) => text.clone(),
             ContentPart::ToolCall {
                 name, arguments, ..
-            } => format!("(calls {name}: {})", cut(&arguments.to_string())),
-            ContentPart::ToolResult { content, .. } => format!("(result: {})", cut(content)),
+            } => format!("(calls {name}: {arguments})"),
+            ContentPart::ToolResult { content, .. } => format!("(result: {content})"),
         })
         .collect();
     format!("[{role}]\n{}", parts.join("\n"))
-}
-
-/// `text` cut to [`MAX_PART_CHARS`] characters.
-fn cut(text: &str) -> String {
-    match text.char_indices().nth(MAX_PART_CHARS) {
-        Some((index, _)) => format!("{}...", &text[..index]),
-        None => text.to_owned(),
-    }
 }
 
 #[cfg(test)]
@@ -611,8 +581,8 @@ mod tests {
     }
 
     #[test]
-    fn the_evidence_cuts_tool_parts_and_stays_under_its_bound() {
-        let long = "x".repeat(MAX_PART_CHARS * 2);
+    fn the_evidence_keeps_each_part_whole() {
+        let long = "x".repeat(100_000);
         let call = ChatMessage {
             role: ChatRole::Assistant,
             content: vec![
@@ -623,22 +593,21 @@ mod tests {
                 },
                 ContentPart::ToolResult {
                     tool_call_id: String::from("c"),
-                    content: long,
+                    content: long.clone(),
                 },
             ],
         };
         let text = evidence(&[call], 10).render().into_owned();
-        assert!(text.contains("(calls web_fetch: "), "{text}");
-        assert!(text.len() < MAX_PART_CHARS * 3, "{}", text.len());
+        assert!(text.contains("(calls web_fetch: "));
+        assert!(text.contains(&format!("(result: {long})")));
 
-        let big = "é".repeat(MAX_EVIDENCE_BYTES);
+        let big = "é".repeat(100_000);
         let many = vec![
             ChatMessage::text(ChatRole::User, "old"),
             ChatMessage::text(ChatRole::User, big),
         ];
         let text = evidence(&many, 10).render().into_owned();
-        assert!(text.len() <= MAX_EVIDENCE_BYTES);
-        assert!(!text.contains("old"));
+        assert!(text.starts_with("[user]\nold"));
     }
 
     #[test]

@@ -589,9 +589,6 @@ fn s3_replica(raw: RawS3) -> Result<S3Replica, ConfigError> {
 /// names no number.
 pub const DEFAULT_REFINE_MESSAGES: u32 = 40;
 
-/// The most transcript messages that a refine proposal reads.
-pub const MAX_REFINE_MESSAGES: u32 = 500;
-
 /// The part of the assistant setup that a refine proposal edits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -632,9 +629,9 @@ struct RawRefine {
 /// Checks the refine section.
 fn refine(raw: RawRefine) -> Result<RefineConfig, ConfigError> {
     let messages = raw.messages.unwrap_or(DEFAULT_REFINE_MESSAGES);
-    if !(1..=MAX_REFINE_MESSAGES).contains(&messages) {
-        return Err(ConfigError::Refine(format!(
-            "messages must be from 1 to {MAX_REFINE_MESSAGES}, not {messages}"
+    if messages == 0 {
+        return Err(ConfigError::Refine(String::from(
+            "messages must be 1 or more, not 0",
         )));
     }
     Ok(RefineConfig {
@@ -1115,16 +1112,13 @@ fn google(raw: RawGoogle, san_mateo: Option<&SanMateoConfig>) -> Result<GoogleCo
     Ok(config)
 }
 
-/// The most characters of one API answer when the config names none.
-pub const DEFAULT_API_MAX_CHARS: usize = 20_000;
-
 /// The `api_get` and `api_send` tools (ADR 0031).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiConfig {
     /// The San Mateo integrations that the tools call.
     pub integrations: Vec<String>,
-    /// The most characters of one answer.
-    pub max_chars: usize,
+    /// The most characters of one answer, or no bound. An owner sets it.
+    pub max_chars: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1164,8 +1158,8 @@ fn api(raw: RawApi, san_mateo: Option<&SanMateoConfig>) -> Result<ApiConfig, Con
         )));
     }
     // Only zero cannot work: an answer of no characters says nothing.
-    let max_chars = raw.max_chars.unwrap_or(DEFAULT_API_MAX_CHARS);
-    if max_chars == 0 {
+    let max_chars = raw.max_chars;
+    if max_chars == Some(0) {
         return Err(ConfigError::Api(String::from(
             "max_chars must be at least 1",
         )));
@@ -2205,11 +2199,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_refine_section_is_refused() {
-        for text in ["messages = 0", "messages = 501"] {
-            let result = Config::parse(&format!("owner = \"mark\"\n[refine]\n{text}"));
-            assert!(matches!(result, Err(ConfigError::Refine(_))), "{text}");
-        }
+    fn a_refine_section_refuses_no_messages_and_takes_any_count_above() {
+        let result = Config::parse("owner = \"mark\"\n[refine]\nmessages = 0");
+        assert!(matches!(result, Err(ConfigError::Refine(_))));
+        let many = Config::parse("owner = \"mark\"\n[refine]\nmessages = 100000").unwrap();
+        assert_eq!(many.refine.map(|refine| refine.messages), Some(100_000));
     }
 
     #[test]
@@ -2748,7 +2742,7 @@ mod tests {
             all.api,
             Some(ApiConfig {
                 integrations: vec![String::from("gh"), String::from("no")],
-                max_chars: DEFAULT_API_MAX_CHARS,
+                max_chars: None,
             })
         );
         assert_eq!(
@@ -2758,7 +2752,7 @@ mod tests {
         let one = parse("integrations = [\"no\"]\nmax_chars = 1").unwrap();
         assert_eq!(
             one.api.map(|a| (a.integrations, a.max_chars)),
-            Some((vec![String::from("no")], 1))
+            Some((vec![String::from("no")], Some(1)))
         );
         let bad = |api: &str| match parse(api) {
             Err(ConfigError::Api(why)) => why,

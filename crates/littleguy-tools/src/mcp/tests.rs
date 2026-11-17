@@ -106,10 +106,8 @@ fn results_become_text() {
     assert_eq!(result_text(&structured), "{\"n\":1}");
     let image = CallToolResult::success(vec![ContentBlock::image("AAAA", "image/png")]);
     assert_eq!(result_text(&image), "[a image block is not shown]");
-    let long = CallToolResult::success(vec![ContentBlock::text("y".repeat(MAX_RESULT_CHARS + 5))]);
-    let cut = result_text(&long);
-    assert!(cut.ends_with("[the result was cut]"));
-    assert!(cut.chars().count() < MAX_RESULT_CHARS + 30);
+    let long = CallToolResult::success(vec![ContentBlock::text("y".repeat(100_000))]);
+    assert_eq!(result_text(&long).chars().count(), 100_000);
 }
 
 #[tokio::test]

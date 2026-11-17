@@ -155,7 +155,7 @@ async fn a_search_lists_each_mail_with_its_headers() {
     let found = run(
         &fake,
         "mail_search",
-        json!({"query": "from:ana", "max": 99}),
+        json!({"query": "from:ana", "max": 9999}),
     )
     .await
     .unwrap();
@@ -171,7 +171,7 @@ async fn a_search_lists_each_mail_with_its_headers() {
     assert!(
         seen[0]
             .params
-            .contains(&(String::from("maxResults"), MAX_RESULTS.to_string())),
+            .contains(&(String::from("maxResults"), MAIL_MAX_RESULTS.to_string())),
         "the bound is clamped"
     );
     assert_eq!(
@@ -201,12 +201,17 @@ async fn a_read_returns_the_text_of_the_mail() {
     let read = run(&fake, "mail_read", json!({"id": "m1"})).await.unwrap();
     assert_eq!(read["text"], "Hello there");
     assert_eq!(read["subject"], "Hi");
-    assert_eq!(read["cut"], false);
+    assert_eq!(read["truncated"], false);
+    assert_eq!(read["length"], 11);
+    let on = run(&fake, "mail_read", json!({"id": "m1", "offset": 6}))
+        .await
+        .unwrap();
+    assert_eq!(on["text"], "there");
     let bad = run(&fake, "mail_read", json!({"id": "../drafts"}))
         .await
         .unwrap_err();
     assert!(bad.to_string().contains("not a Gmail id"));
-    assert!(fake.seen().len() == 1, "a bad id sends nothing");
+    assert!(fake.seen().len() == 2, "a bad id sends nothing");
 }
 
 #[tokio::test]

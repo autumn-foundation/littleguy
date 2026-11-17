@@ -18,7 +18,7 @@ use autumn_harvest_agent::flow::labels;
 use autumn_harvest_agent::{AgentError, ErrorKind, FnTool, Tool, ToolEffect};
 use chrono::{DateTime, Utc};
 use littleguy_stores::RunLog;
-use littleguy_stores::runlog::{Failure, MAX_ROWS, Run, Usage};
+use littleguy_stores::runlog::{Failure, Run, Usage};
 use serde_json::{Value, json};
 
 /// The rows of a call that names no limit.
@@ -105,7 +105,6 @@ fn limit_schema(what: &str) -> Value {
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": MAX_ROWS,
                 "description": format!("The most {what} to return. Default {DEFAULT_ROWS}."),
             },
         },
@@ -133,7 +132,7 @@ pub fn tools(db: &Path) -> Vec<Arc<dyn Tool>> {
             move |input| {
                 let log = runs.clone();
                 async move {
-                    let limit = bounded(&input, "limit", DEFAULT_ROWS, MAX_ROWS);
+                    let limit = bounded(&input, "limit", DEFAULT_ROWS, u32::MAX);
                     let failed_only = input["failed_only"].as_bool().unwrap_or(false);
                     let rows = blocking(move || log.runs(limit, failed_only)).await?;
                     Ok(json!({"runs": rows.iter().map(run_json).collect::<Vec<_>>()}))
@@ -152,7 +151,7 @@ pub fn tools(db: &Path) -> Vec<Arc<dyn Tool>> {
             move |input| {
                 let log = failures.clone();
                 async move {
-                    let limit = bounded(&input, "limit", DEFAULT_ROWS, MAX_ROWS);
+                    let limit = bounded(&input, "limit", DEFAULT_ROWS, u32::MAX);
                     let rows = blocking(move || log.failures(limit)).await?;
                     Ok(json!({"failures": rows.iter().map(failure_json).collect::<Vec<_>>()}))
                 }

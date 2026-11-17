@@ -270,7 +270,7 @@ web_search = true               # needs LG_BRAVE_API_KEY
 files = true                    # read_file, write_file, list_files, delete_file, search_notes, grep_files
 runs = true                     # recent_runs, failed_attempts, model_usage
 plans = true                    # goals and ideas; see below
-fetch_max_chars = 20000         # the most text of one page
+fetch_max_chars = 20000         # one page of text; `offset` reads on
 ```
 
 - `web_fetch` resolves the host first and refuses a private, loopback,
@@ -507,8 +507,8 @@ approve = "auto"
 
 With `"auto"`, code runs unasked as with `"untrusted"`. Each call that
 would wait for you goes to a reviewer first: any call that waits, also one
-that a flow rule holds. The reviewer reads your last six messages and the
-call, and nothing that the assistant read. So a page can steer the
+that a flow rule holds. The reviewer reads your messages in the
+conversation and the call, and nothing that the assistant read. So a page can steer the
 assistant, but it cannot talk to the reviewer. A call that plainly does
 what you asked runs. A call that works against you is denied, and the
 assistant reads why. When the reviewer cannot tell, or its model fails,
@@ -758,7 +758,7 @@ client_secret_env = "LG_GITHUB_CLIENT_SECRET"
 
 [api]
 integrations = ["github"]   # leave it out for every integration
-max_chars = 20000           # the most characters of one answer
+# max_chars = 20000         # cut each answer here; unset, it comes whole
 ```
 
 - `api_get` sends a `GET` and runs at once. Its answers count as

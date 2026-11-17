@@ -206,7 +206,7 @@ bind = "127.0.0.1:3004"
 ## for you.
 # [api]
 # integrations = ["github"]
-# max_chars = 20000
+# max_chars = 20000   # unset, an answer comes whole
 
 ## Apache Camel routes that feed the assistant.
 # [[camel.route]]

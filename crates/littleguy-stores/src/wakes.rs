@@ -32,9 +32,6 @@ pub const MIN_AHEAD_MS: i64 = 60 * 1000;
 /// The furthest ahead, for messages.
 pub const MAX_AHEAD: &str = "seven days";
 
-/// The longest text of a wake, in characters.
-pub const MAX_ABOUT_CHARS: usize = 2_000;
-
 /// One wake that waits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWake {
@@ -56,7 +53,7 @@ impl SqliteStores {
     ///
     /// # Errors
     ///
-    /// Returns a `Tool` error for an empty or long text, a time too near or
+    /// Returns a `Tool` error for an empty text, a time too near or
     /// too far, or a full list or chain. Returns an error when the store
     /// fails.
     pub fn add_wake(
@@ -70,11 +67,6 @@ impl SqliteStores {
         let about = about.trim();
         if about.is_empty() {
             return Err(refuse("say what to look at"));
-        }
-        if about.chars().count() > MAX_ABOUT_CHARS {
-            return Err(refuse(format!(
-                "the text is over {MAX_ABOUT_CHARS} characters"
-            )));
         }
         if at_ms < now_ms.saturating_add(MIN_AHEAD_MS) {
             return Err(refuse("a wake is at least one minute ahead"));
@@ -219,7 +211,10 @@ mod tests {
         refused(stores.add_wake("a", MINUTE - 1, "x", 0, 0));
         refused(stores.add_wake("b", MAX_AHEAD_MS + 1, "x", 0, 0));
         refused(stores.add_wake("c", 5 * MINUTE, "  ", 0, 0));
-        refused(stores.add_wake("d", 5 * MINUTE, &"x".repeat(MAX_ABOUT_CHARS + 1), 0, 0));
+        // A long text is no bound. A fresh store keeps the list empty.
+        self::stores()
+            .add_wake("d", 5 * MINUTE, &"x".repeat(100_000), 0, 0)
+            .unwrap();
         for n in 0..MAX_PENDING {
             // Each comes after a message of a person, so no chain forms.
             stores

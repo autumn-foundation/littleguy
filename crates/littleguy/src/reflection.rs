@@ -6,7 +6,6 @@
 //! reads the report of each pass and the facts that it wrote, and the
 //! prompt lists them. A pass that wrote no fact gets no reflection.
 
-use std::fmt::Write as _;
 use std::str::FromStr;
 
 use autumn_harvest::{ExecutionId, WorkflowEvent};
@@ -16,12 +15,6 @@ use autumn_harvest_sqlite::{ExecutionOutcome, SqliteRuntime};
 /// The activity of a pass that writes its facts. Its input holds each
 /// entry as the memory block gets it.
 const WRITE_ACTIVITY: &str = "agent_consolidate_write";
-
-/// The most facts that a reflection prompt lists.
-pub const MAX_FACTS_SHOWN: usize = 40;
-
-/// The most characters of one fact in the prompt.
-const MAX_FACT_CHARS: usize = 240;
 
 /// What one pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -74,13 +67,9 @@ pub fn read_pass(rt: &SqliteRuntime, exec: &str) -> anyhow::Result<Pass> {
     })
 }
 
-/// `text` on one line, clipped to `max` characters.
-fn one_line(text: &str, max: usize) -> String {
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    match text.char_indices().nth(max) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text,
-    }
+/// `text` on one line.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The prompt of the reflection on `passes`, or `None` when they wrote no
@@ -100,17 +89,11 @@ pub fn prompt(passes: &[Pass]) -> Option<String> {
         "Your memory was just consolidated. The pass read {episodes} episodes and added \
          {added} to your memory block:\n"
     );
-    for fact in facts.iter().take(MAX_FACTS_SHOWN) {
+    // Every fact, whole: the reflection judges what the pass wrote.
+    for fact in &facts {
         text.push_str("- ");
-        text.push_str(&one_line(fact, MAX_FACT_CHARS));
+        text.push_str(&one_line(fact));
         text.push('\n');
-    }
-    if facts.len() > MAX_FACTS_SHOWN {
-        let _ = writeln!(
-            text,
-            "- and {} more, in your memory block.",
-            facts.len() - MAX_FACTS_SHOWN
-        );
     }
     text.push_str(crate::wake::REFLECT_PROMPT);
     Some(text)
@@ -154,15 +137,18 @@ mod tests {
     }
 
     #[test]
-    fn a_long_list_says_how_many_more() {
+    fn a_long_list_shows_every_fact_whole() {
+        let long = "y".repeat(1_000);
+        let mut facts: Vec<String> = (0..100).map(|n| format!("fact {n}")).collect();
+        facts.push(long.clone());
         let many = Pass {
             episodes: 50,
-            facts: (0..MAX_FACTS_SHOWN + 3)
-                .map(|n| format!("fact {n}"))
-                .collect(),
+            facts,
             stop: String::from("completed"),
         };
         let text = prompt(&[many]).unwrap();
-        assert!(text.contains("- and 3 more, in your memory block."));
+        assert!(text.contains("- fact 99\n"));
+        assert!(text.contains(&format!("- {long}\n")));
+        assert!(!text.contains("more, in your memory block"));
     }
 }

@@ -33,8 +33,8 @@ one by replay and picks a winner. littleguy cannot use it as it stands:
   overlay, so a version above the ceilings of the refine policy is never
   stored or activated.
 - **One proposer call, outside a workflow.** `lg refine propose` reads the
-  last `messages` messages of the assistant transcript (40 by default, at
-  most 500, and at most 64 KiB). It asks the engine `ModelProposer`, over
+  last `messages` messages of the assistant transcript (40 by default;
+  ADR 0034 removed a bound of 500 and of 64 KiB). It asks the engine `ModelProposer`, over
   the model of the assistant, for one overlay of the configured dimension.
   A reply that does not decode, or does not fit the ceilings, goes back
   with its reason, up to three attempts. `KEEP_BASE` stores nothing.

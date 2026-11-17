@@ -51,7 +51,7 @@ mod tests;
 pub use fetch::{FetchTool, MAX_BODY_BYTES, MAX_REDIRECTS};
 pub use files::{MAX_READ_CHARS, file_tools};
 #[cfg(feature = "grep-files")]
-pub use grep::{DEFAULT_GREP_MATCHES, MAX_GREP_MATCHES, grep_files_tool};
+pub use grep::{DEFAULT_GREP_MATCHES, grep_files_tool};
 #[cfg(feature = "search-notes")]
 pub use notes::{DEFAULT_MATCHES, Hit, limit_of, rank, search_notes_tool};
 #[cfg(feature = "web")]

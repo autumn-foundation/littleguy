@@ -81,6 +81,10 @@ pub(super) struct Kit {
     /// Whether the conversation holds untrusted input, for `approve =
     /// "untrusted"`. It lives across reloads (ADR 0033).
     pub(super) untrusted: Arc<crate::guard::Untrusted>,
+    /// The boot of this process. The daemon captures it once at its start,
+    /// so a reload keeps it.
+    #[cfg(feature = "self-debug")]
+    pub(super) boot: crate::config_view::Boot,
 }
 
 /// The parts of the daemon that a config shapes.
@@ -244,7 +248,7 @@ impl Kit {
             crate::memory::PassTokens::wrap(Arc::clone(&self.model), config.memory.pass_tokens);
         // The assistant can read what this load of the config turned on.
         #[cfg(feature = "self-debug")]
-        let tools = crate::config_view::with_summary(tools, config);
+        let tools = crate::config_view::with_summary(tools, config, &self.boot);
         // Each tool call goes in the traces, so the tick log can say what a
         // tick did (ADR 0028).
         #[cfg(feature = "self-debug")]

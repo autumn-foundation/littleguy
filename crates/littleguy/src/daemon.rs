@@ -675,6 +675,8 @@ impl Daemon {
             #[cfg(feature = "skills")]
             skills_dir: crate::plans::SkillsDir::default(),
             untrusted: Arc::default(),
+            #[cfg(feature = "self-debug")]
+            boot: crate::config_view::Boot::this_process().clone(),
         };
         let built = kit.assemble(config, &chats)?;
         sqlite::register(&mut rt, Arc::new(built.harness));
@@ -5477,6 +5479,44 @@ mod tests {
             "the heartbeat is on"
         );
         assert!(text.contains(r#""refine":null"#), "refine is absent");
+    }
+
+    /// The `config_summary` value that the assistant reads now.
+    #[cfg(feature = "self-debug")]
+    async fn summary_seen(daemon: &mut Daemon, key: &str) -> serde_json::Value {
+        let seen = daemon
+            .handle_request(UID, request(key, "use config_summary {}"))
+            .await;
+        let text = reply_text(&seen);
+        let json = text.strip_prefix("log: ").unwrap_or(text);
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[cfg(feature = "self-debug")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reload_keeps_the_boot_and_the_summary_names_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config,
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        let before = summary_seen(&mut daemon, "b-1").await;
+        let boot = crate::config_view::Boot::this_process();
+        assert_eq!(before["boot"]["id"], boot.id.as_str());
+        assert_eq!(before["build"]["version"], crate::config_view::VERSION);
+        // A live change rebuilds the tool. It must not stamp a new boot.
+        std::thread::sleep(Duration::from_millis(5));
+        config.max_steps = Some(7);
+        let merge = daemon.reload(config).unwrap();
+        assert!(!merge.is_empty(), "the reload rebuilt the tools");
+        let after = summary_seen(&mut daemon, "b-2").await;
+        assert_eq!(after["agent"]["max_steps"], 7, "the reload applied");
+        assert_eq!(after["boot"], before["boot"], "a reload is not a restart");
     }
 
     #[cfg(feature = "self-debug")]

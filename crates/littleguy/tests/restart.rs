@@ -369,6 +369,83 @@ fn hooks_without_a_token_stop_the_daemon_at_start() -> TestResult {
     Ok(())
 }
 
+/// A ring key of 32 bytes in base64. Tests only.
+#[cfg(feature = "sealed-keys")]
+const RING_KEY: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+/// Runs `lg keys <words>` on `paths` with `stdin` and the ring key.
+#[cfg(feature = "sealed-keys")]
+fn keys(paths: &Paths, words: &[&str], stdin: &str) -> TestResult<Output> {
+    let mut child = Command::new(LG)
+        .arg("keys")
+        .arg("--db")
+        .arg(&paths.db)
+        .args(words)
+        .env("LG_SAN_MATEO_KEY", RING_KEY)
+        .env_remove("LG_SAN_MATEO_KEY_ID")
+        .env_remove("LG_SAN_MATEO_KEY_RETIRED")
+        .env("LG_LOG", "warn")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(stdin.as_bytes())?;
+    Ok(child.wait_with_output()?)
+}
+
+/// The owner seals the hook token, unsets it, and the daemon reads it
+/// from the sealed file with one secret in its environment (ADR 0040).
+#[cfg(feature = "sealed-keys")]
+#[test]
+fn a_sealed_hook_token_reaches_lg_serve() -> TestResult {
+    let paths = hooked_paths()?;
+    let sealed = keys(
+        &paths,
+        &["set", "LG_HOOK_TOKEN"],
+        &format!("{HOOK_TOKEN}\n"),
+    )?;
+    assert!(sealed.status.success(), "{sealed:?}");
+    let listed = keys(&paths, &["list"], "")?;
+    assert_eq!(
+        String::from_utf8(listed.stdout)?.trim(),
+        "LG_HOOK_TOKEN\tk1"
+    );
+    let file = std::fs::read_to_string(paths.db.with_file_name("house-keys.json"))?;
+    assert!(!file.contains(HOOK_TOKEN), "the file holds no plaintext");
+
+    // Without the ring key, the sealed file stops the start.
+    let refused = serve_command(&paths, &paths.socket)
+        .env_remove("LG_HOOK_TOKEN")
+        .env_remove("LG_SAN_MATEO_KEY")
+        .stdin(Stdio::null())
+        .output()?;
+    assert!(!refused.status.success(), "lg serve fails");
+    assert!(String::from_utf8(refused.stderr)?.contains("LG_SAN_MATEO_KEY"));
+    assert!(!paths.db.exists(), "the database is not opened");
+
+    let child = Running(
+        serve_command(&paths, &paths.socket)
+            .env_remove("LG_HOOK_TOKEN")
+            .env("LG_SAN_MATEO_KEY", RING_KEY)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .spawn()?,
+    );
+    let bearer = format!("Authorization: Bearer {HOOK_TOKEN}\r\n");
+    let (head, body) = request(paths.port, "POST", "/hooks/tick", &bearer)?;
+    assert!(
+        head.starts_with("HTTP/1.1 200"),
+        "the sealed token opens: {head}"
+    );
+    assert!(body.contains("ticked"));
+    kill(child)
+}
+
 /// The signing secret of the Slack tests.
 #[cfg(feature = "slack")]
 const SLACK_SECRET: &str = "8f742231b10e8888abcd99yyyzzz85a5";

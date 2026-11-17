@@ -4,7 +4,9 @@
 #   docker compose exec lg lg ui        # a sign-in link for the pages
 #   docker compose exec lg lg chat "hi"
 #
-# The keys come from your shell by name. This file holds no value.
+# The keys come from your shell by name. This file holds no value. With
+# the house keys sealed in the volume (`lg keys`), only LG_SAN_MATEO_KEY
+# needs to pass.
 
 services:
   lg:
@@ -15,6 +17,9 @@ services:
       - LG_MODEL_NAME
       - LG_REVIEWER_MODEL_NAME
       - LG_REASONING
+      - LG_SAN_MATEO_KEY
+      - LG_SAN_MATEO_KEY_ID
+      - LG_SAN_MATEO_KEY_RETIRED
       - OPENROUTER_API_KEY
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY

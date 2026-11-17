@@ -71,3 +71,11 @@ fn the_address_proof_covers_the_shipped_kernel() -> TestResult {
         "formal/verus/src/addr.rs",
     )
 }
+
+#[test]
+fn the_house_key_proof_covers_the_shipped_kernels() -> TestResult {
+    mirrors(
+        "crates/littleguy-core/src/house_keys.rs",
+        "formal/verus/src/house_keys.rs",
+    )
+}

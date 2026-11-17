@@ -2,8 +2,9 @@
 //! own run log ([`crate::runlog`]) and the tools of the MCP servers.
 //!
 //! `[tools]` turns each one on or off. Web search also needs the Brave
-//! Search API key in [`SEARCH_KEY_ENV`]. The key never goes in the config
-//! file, and the log never shows it.
+//! Search API key [`SEARCH_KEY_ENV`], sealed with `lg keys` or set in the
+//! environment (ADR 0040). The key never goes in the config file, and the
+//! log never shows it.
 //!
 //! The workspace lives in [`WORKSPACE_DIR`] beside the database. The engine
 //! saves each change of a successful tool call there as a snapshot, so the
@@ -41,23 +42,22 @@ pub fn workspace_for(db: &Path) -> PathBuf {
         .join(WORKSPACE_DIR)
 }
 
-/// The search key of the environment, when it is set and not empty.
+/// The search key of `keys`, when it is set and not empty.
 #[must_use]
-pub fn search_key_from_env() -> Option<String> {
-    std::env::var(SEARCH_KEY_ENV)
-        .ok()
+pub fn search_key(keys: &crate::house_keys::HouseKeys) -> Option<String> {
+    keys.get(SEARCH_KEY_ENV)
         .filter(|key| !key.trim().is_empty())
 }
 
-/// Opens each MCP server of the config and returns its tools. A server
-/// that fails gives no tools, and the log says why. The daemon still
-/// starts, so one broken server does not take the assistant down.
+/// Opens each MCP server of the config and returns its tools. `vars`
+/// reads each variable that a server names (ADR 0040). A server that fails
+/// gives no tools, and the log says why. The daemon still starts, so one
+/// broken server does not take the assistant down.
 #[cfg(feature = "mcp")]
-pub async fn mcp_tools(servers: &[McpServer]) -> Vec<Arc<dyn Tool>> {
+pub async fn mcp_tools(servers: &[McpServer], vars: Vars) -> Vec<Arc<dyn Tool>> {
     if servers.is_empty() {
         return Vec::new();
     }
-    let vars: Vars = Arc::new(|name: &str| std::env::var(name).ok());
     let found = littleguy_tools::mcp::connect(servers, &vars).await;
     for (id, error) in &found.failed {
         tracing::warn!(server = %id, %error, "an MCP server gives no tools");
@@ -72,7 +72,10 @@ pub async fn mcp_tools(servers: &[McpServer]) -> Vec<Arc<dyn Tool>> {
 /// are none. A config with servers fails at start
 /// ([`crate::features::check`]).
 #[cfg(not(feature = "mcp"))]
-pub fn mcp_tools(_servers: &[McpServer]) -> std::future::Ready<Vec<Arc<dyn Tool>>> {
+pub fn mcp_tools(
+    _servers: &[McpServer],
+    _vars: crate::house_keys::Env,
+) -> std::future::Ready<Vec<Arc<dyn Tool>>> {
     std::future::ready(Vec::new())
 }
 
@@ -135,7 +138,9 @@ fn web_tools(config: &ToolsConfig, search_key: Option<&str>) -> Vec<Arc<dyn Tool
     match (config.web_search, search_key) {
         (true, Some(key)) => tools.push(Arc::new(SearchTool::new(key))),
         (true, None) => {
-            tracing::info!("web search is off: set {SEARCH_KEY_ENV} to turn it on");
+            tracing::info!(
+                "web search is off: seal {SEARCH_KEY_ENV} with `lg keys set` to turn it on"
+            );
         }
         (false, _) => {}
     }
@@ -294,7 +299,11 @@ mod tests {
     #[cfg(not(feature = "mcp"))]
     #[tokio::test]
     async fn without_mcp_there_are_no_mcp_tools() {
-        assert!(mcp_tools(&[]).await.is_empty());
+        assert!(
+            mcp_tools(&[], crate::house_keys::process_env())
+                .await
+                .is_empty()
+        );
     }
 
     #[test]
@@ -305,7 +314,11 @@ mod tests {
     #[cfg(feature = "mcp")]
     #[tokio::test]
     async fn a_broken_mcp_server_gives_no_tools() {
-        assert!(mcp_tools(&[]).await.is_empty());
+        assert!(
+            mcp_tools(&[], crate::house_keys::process_env())
+                .await
+                .is_empty()
+        );
         let broken = McpServer {
             id: String::from("gone"),
             transport: littleguy_core::McpTransport::Stdio {
@@ -318,7 +331,11 @@ mod tests {
             tools: None,
             timeout_secs: 5,
         };
-        assert!(mcp_tools(&[broken]).await.is_empty());
+        assert!(
+            mcp_tools(&[broken], crate::house_keys::process_env())
+                .await
+                .is_empty()
+        );
     }
 
     #[cfg(all(feature = "mcp", feature = "web"))]
@@ -336,7 +353,7 @@ mod tests {
             tools: Some(vec![String::from("echo"), String::from("gone")]),
             timeout_secs: 5,
         };
-        let mcp = mcp_tools(&[web]).await;
+        let mcp = mcp_tools(&[web], crate::house_keys::process_env()).await;
         let config = ToolsConfig {
             web_search: false,
             files: false,

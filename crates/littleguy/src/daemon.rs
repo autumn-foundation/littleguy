@@ -515,6 +515,9 @@ pub struct Extras {
     /// model of the assistant (ADR 0037).
     #[cfg(feature = "auto-approve")]
     pub reviewer: Option<Arc<dyn AgentModel>>,
+    /// The secrets by variable name: the sealed house keys, then the
+    /// environment (ADR 0040).
+    pub keys: Arc<crate::house_keys::HouseKeys>,
 }
 
 /// The daemon state: the runtime, the routing table and the pairings.
@@ -657,6 +660,7 @@ impl Daemon {
             #[cfg(feature = "api")]
             api: extras.api,
             tenant: extras.tenant,
+            keys: extras.keys,
             services,
             stores: None,
             config: config.clone(),

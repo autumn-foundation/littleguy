@@ -232,7 +232,9 @@ pub fn prompt(passes: &[Pass]) -> Option<String> {
 
 /// The tick log row of `passes` when they sent no fact, so no reflection
 /// runs. A pass that ended without a mark says so, because its episodes
-/// wait for the next pass, which can fail the same way.
+/// wait for the next pass, which can fail the same way. Only the tick log
+/// of `self-debug` reads it.
+#[cfg(feature = "self-debug")]
 #[must_use]
 pub fn skipped(passes: &[Pass]) -> String {
     let Some(first) = passes.first() else {
@@ -384,6 +386,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "self-debug")]
     #[test]
     fn a_skipped_reflection_says_when_the_episodes_wait() {
         let stuck = pass("p1", "invalid_reply", &["e1"; 20], &[]);

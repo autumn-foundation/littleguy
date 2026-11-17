@@ -82,17 +82,19 @@ pub const FOLLOWUP_PROMPT: &str = "A wake that you booked with wake_me is due. C
 pub const REFLECT_PROMPT: &str = "Call list_plans. For anything worth planning or \
      researching that is not an idea yet, file one with add_idea. Add what you now know \
      to a related open idea with research_idea. Do not file an idea that exists. Propose \
-     a goal only when an idea is clearly worth doing. If you found a way of doing \
-     something that you will need again, draft a skill with propose_skill. Reply with \
-     exactly HEARTBEAT_OK unless the owner should know something now.";
+     a goal only when an idea is clearly worth doing. When what you now know answers an \
+     open idea that needs no goal, conclude it with conclude_idea. If you found a way of \
+     doing something that you will need again, draft a skill with propose_skill. Reply \
+     with exactly HEARTBEAT_OK unless the owner should know something now.";
 
 /// What a reflection tick does, in a build without skills.
 #[cfg(all(feature = "reflection", not(feature = "skills")))]
 pub const REFLECT_PROMPT: &str = "Call list_plans. For anything worth planning or \
      researching that is not an idea yet, file one with add_idea. Add what you now know \
      to a related open idea with research_idea. Do not file an idea that exists. Propose \
-     a goal only when an idea is clearly worth doing. Reply with exactly HEARTBEAT_OK \
-     unless the owner should know something now.";
+     a goal only when an idea is clearly worth doing. When what you now know answers an \
+     open idea that needs no goal, conclude it with conclude_idea. Reply with exactly \
+     HEARTBEAT_OK unless the owner should know something now.";
 
 /// The prefix of the op key that arms one brief slot.
 pub const BRIEF_KEY: &str = "brief:";
@@ -937,6 +939,13 @@ mod tests {
 
         stores.add_idea("i", "An idea", "b", 0).unwrap();
         assert!(due.should_run(&heartbeat).await, "an idea waits");
+        assert_eq!(verdict.take_skipped(), Some(false));
+        // An answered idea waits for nothing, so it wakes no tick.
+        stores.conclude_idea("c", 1, "Answered.", 1).unwrap();
+        assert!(!due.should_run(&heartbeat).await, "an answered idea");
+        assert_eq!(verdict.take_skipped(), Some(true));
+        assert!(stores.reopen_idea(1).unwrap());
+        assert!(due.should_run(&heartbeat).await, "a reopened idea waits");
         assert_eq!(verdict.take_skipped(), Some(false));
         let quiet_research = Due {
             plans: Some(Arc::clone(&stores)),

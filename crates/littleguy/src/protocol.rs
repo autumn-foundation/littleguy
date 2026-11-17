@@ -149,8 +149,9 @@ pub enum Request {
         /// The skill.
         name: String,
     },
-    /// Accept a proposed goal, or decline it, drop an active goal, or drop
-    /// an open idea. Only the owner may.
+    /// Accept a proposed goal, or decline it, drop an active goal, drop an
+    /// open or answered idea, or reopen an answered idea. Only the owner
+    /// may.
     Decide {
         /// What to do.
         decision: PlanDecision,
@@ -210,8 +211,10 @@ pub enum PlanDecision {
     Decline,
     /// Drop an active goal.
     DropGoal,
-    /// Drop an open idea.
+    /// Drop an open or answered idea.
     DropIdea,
+    /// Reopen an idea that the assistant concluded as answered.
+    ReopenIdea,
 }
 
 /// One note of a goal or an idea.
@@ -255,7 +258,7 @@ pub struct NoteEntry {
     pub updated_ms: i64,
 }
 
-/// One open idea.
+/// One open or answered idea.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdeaEntry {
     /// Its number.
@@ -605,6 +608,10 @@ pub enum Response {
         goals: Vec<GoalEntry>,
         /// The open ideas, oldest first.
         ideas: Vec<IdeaEntry>,
+        /// The newest answered ideas, the last concluded first. An older
+        /// daemon sends none.
+        #[serde(default)]
+        answered: Vec<IdeaEntry>,
     },
     /// The skills of the skills folder, the files that do not load, and
     /// the drafts that wait.
@@ -728,6 +735,10 @@ mod tests {
             Request::Decide {
                 decision: PlanDecision::DropIdea,
                 id: 4,
+            },
+            Request::Decide {
+                decision: PlanDecision::ReopenIdea,
+                id: 5,
             },
             Request::Workspace,
             Request::WorkspaceFile {

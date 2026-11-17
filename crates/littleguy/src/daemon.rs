@@ -5638,7 +5638,7 @@ mod tests {
             .await;
         assert_eq!(said(&proposed), r#"log: {"goal":1,"status":"proposed"}"#);
 
-        let Response::Plans { goals, ideas } = daemon.handle_request(UID, Request::Plans).await
+        let Response::Plans { goals, ideas, .. } = daemon.handle_request(UID, Request::Plans).await
         else {
             panic!("no plans");
         };
@@ -5658,7 +5658,7 @@ mod tests {
                 Response::Error { message } if message == "only the owner of the daemon may do that"
             ));
         }
-        let Response::Plans { goals, ideas } = daemon.handle_request(UID, accept.clone()).await
+        let Response::Plans { goals, ideas, .. } = daemon.handle_request(UID, accept.clone()).await
         else {
             panic!("the accept failed");
         };
@@ -5683,9 +5683,90 @@ mod tests {
             daemon.handle_request(UID, Request::Plans).await,
             Response::Plans {
                 goals: Vec::new(),
-                ideas: Vec::new()
+                ideas: Vec::new(),
+                answered: Vec::new(),
             }
         );
+    }
+
+    #[cfg(feature = "plans")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_idea_leaves_the_open_list_until_the_owner_reopens_it() {
+        use crate::protocol::PlanDecision;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        for (id, text) in [
+            (
+                "p-1",
+                r#"use add_idea {"title": "Docs links", "body": "Do they rot?"}"#,
+            ),
+            (
+                "p-2",
+                r#"use add_idea {"title": "Other", "body": "Still open."}"#,
+            ),
+        ] {
+            daemon.handle_request(UID, request(id, text)).await;
+        }
+        let concluded = daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-3",
+                    r#"use conclude_idea {"idea": 1, "note": "No: all links resolve."}"#,
+                ),
+            )
+            .await;
+        assert_eq!(
+            reply_text(&concluded),
+            r#"log: {"idea":1,"status":"answered"}"#
+        );
+
+        // The assistant's listing names it, and carries no body or notes.
+        let listed = daemon
+            .handle_request(UID, request("p-4", "use list_plans {}"))
+            .await;
+        let listing: serde_json::Value =
+            serde_json::from_str(reply_text(&listed).trim_start_matches("log: ")).unwrap();
+        assert_eq!(listing["ideas"].as_array().unwrap().len(), 1);
+        assert_eq!(listing["ideas"][0]["id"], 2);
+        assert_eq!(
+            listing["answered_ideas"],
+            serde_json::json!([{"id": 1, "title": "Docs links"}])
+        );
+
+        // The owner sees it, with its closing note.
+        let Response::Plans {
+            ideas, answered, ..
+        } = daemon.handle_request(UID, Request::Plans).await
+        else {
+            panic!("no plans");
+        };
+        assert_eq!(ideas.iter().map(|idea| idea.id).collect::<Vec<_>>(), [2]);
+        assert_eq!(answered[0].id, 1);
+        assert_eq!(answered[0].notes[0].text, "No: all links resolve.");
+
+        let reopen = |id| Request::Decide {
+            decision: PlanDecision::ReopenIdea,
+            id,
+        };
+        assert!(matches!(
+            daemon.handle_request(UID + 1, reopen(1)).await,
+            Response::Error { message } if message == "only the owner of the daemon may do that"
+        ));
+        assert!(matches!(
+            daemon.handle_request(UID, reopen(2)).await,
+            Response::Error { message } if message == "2 is not an answered idea"
+        ));
+        let Response::Plans {
+            ideas, answered, ..
+        } = daemon.handle_request(UID, reopen(1)).await
+        else {
+            panic!("the reopen failed");
+        };
+        assert_eq!(ideas.iter().map(|idea| idea.id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(answered, []);
     }
 
     /// A model whose council members vote `accept`, and that answers the

@@ -8,8 +8,14 @@
 //!   a check every so often, and it keeps progress notes.
 //!
 //! So every change that the assistant makes is safe on a run with no person
-//! present: it files, notes, proposes and finishes. Only the owner accepts,
-//! declines and drops.
+//! present: it files, notes, proposes, finishes and concludes. Only the
+//! owner accepts, declines, drops and reopens.
+//!
+//! An idea is `open`, `answered`, `promoted` or `dropped`. The assistant
+//! concludes an open idea that its research answered, and the idea leaves
+//! the open list (ADR 0041). Its row and its notes stay. The owner reopens
+//! it when they disagree. An accepted goal promotes its idea, and the owner
+//! drops an idea that is open or answered.
 //!
 //! Each insert of a tool call carries the key of that call. A retried call
 //! therefore adds one row, and gets back the same id.
@@ -31,6 +37,9 @@ pub const MAX_ACTIVE_GOALS: i64 = 50;
 
 /// The notes of each item in a listing, newest last.
 pub const LISTED_NOTES: i64 = 5;
+
+/// The answered ideas in the owner's listing, the last concluded first.
+pub const LISTED_ANSWERED: i64 = 20;
 
 /// Where a goal stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,7 +91,7 @@ pub struct Note {
     pub text: String,
 }
 
-/// One idea that is still open.
+/// One idea that is open or answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Idea {
     /// The number that the owner and the assistant use.
@@ -121,13 +130,18 @@ pub struct Goal {
     pub notes: Vec<Note>,
 }
 
-/// The goals that wait or are active, and the open ideas.
+/// The goals that wait or are active, the open ideas and the answered
+/// ones.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Plans {
     /// The active goals, the first due first, then the proposed ones.
     pub goals: Vec<Goal>,
-    /// The ideas, the oldest first.
+    /// The open ideas, the oldest first.
     pub ideas: Vec<Idea>,
+    /// The newest [`LISTED_ANSWERED`] answered ideas, the last concluded
+    /// first. Only the owner's listing shows them: the assistant's working
+    /// set is the open ideas.
+    pub answered: Vec<Idea>,
 }
 
 /// A refusal that the model can read and act on.
@@ -234,8 +248,9 @@ impl SqliteStores {
             }
             if count(tx, "ideas", "open")? >= MAX_OPEN_IDEAS {
                 return Ok(Err(refuse(format!(
-                    "{MAX_OPEN_IDEAS} ideas are open. Propose a goal from one, or ask the \
-                     owner to drop some, before you file another"
+                    "{MAX_OPEN_IDEAS} ideas are open. Conclude the ones that you answered, \
+                     propose a goal from one, or ask the owner to drop some, before you file \
+                     another"
                 ))));
             }
             tx.execute(
@@ -269,8 +284,70 @@ impl SqliteStores {
         })?
     }
 
-    /// Drops the open idea `id`. Returns whether it was open. Only the
-    /// owner drops an idea.
+    /// Concludes the open idea `id` with the closing `note`, for the call
+    /// `key`. The idea is answered: it leaves the open list, and its row and
+    /// notes stay. A retried call succeeds once more.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `Tool` error for an empty note, or an idea that is not
+    /// open. Returns an error when the store fails.
+    pub fn conclude_idea(
+        &self,
+        key: &str,
+        id: i64,
+        note: &str,
+        now_ms: i64,
+    ) -> Result<(), AgentError> {
+        let note = checked("note", note)?;
+        self.write(|tx| {
+            // The note of this call exists: an earlier try concluded it.
+            if keyed(tx, "idea_notes", key)?.is_some() {
+                return Ok(Ok(()));
+            }
+            match status(tx, "ideas", id)?.as_deref() {
+                Some("open") => {}
+                Some("answered") => {
+                    return Ok(Err(refuse(format!("idea {id} is answered already"))));
+                }
+                _ => return Ok(Err(refuse(format!("idea {id} is not open")))),
+            }
+            add_note(tx, "idea_notes", id, key, note, now_ms)?;
+            tx.execute(
+                "UPDATE ideas SET status = 'answered' WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(Ok(()))
+        })?
+    }
+
+    /// Reopens the answered idea `id`. Returns whether it was answered.
+    /// Only the owner reopens an idea.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `Tool` error when [`MAX_OPEN_IDEAS`] are open. Returns an
+    /// error when the store fails.
+    pub fn reopen_idea(&self, id: i64) -> Result<bool, AgentError> {
+        self.write(|tx| {
+            if status(tx, "ideas", id)?.as_deref() != Some("answered") {
+                return Ok(Ok(false));
+            }
+            if count(tx, "ideas", "open")? >= MAX_OPEN_IDEAS {
+                return Ok(Err(refuse(format!(
+                    "{MAX_OPEN_IDEAS} ideas are open. Drop one first"
+                ))));
+            }
+            tx.execute(
+                "UPDATE ideas SET status = 'open' WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(Ok(true))
+        })?
+    }
+
+    /// Drops the open or answered idea `id`. Returns whether it was open or
+    /// answered. Only the owner drops an idea.
     ///
     /// # Errors
     ///
@@ -278,7 +355,8 @@ impl SqliteStores {
     pub fn drop_idea(&self, id: i64) -> Result<bool, AgentError> {
         self.write(|tx| {
             Ok(tx.execute(
-                "UPDATE ideas SET status = 'dropped' WHERE id = ?1 AND status = 'open'",
+                "UPDATE ideas SET status = 'dropped' WHERE id = ?1 \
+                 AND status IN ('open', 'answered')",
                 params![id],
             )? == 1)
         })
@@ -441,8 +519,8 @@ impl SqliteStores {
         })
     }
 
-    /// The active and proposed goals and the open ideas, each with its
-    /// newest notes.
+    /// The active and proposed goals, the open ideas and the newest
+    /// answered ones, each with its newest notes.
     ///
     /// # Errors
     ///
@@ -489,27 +567,41 @@ impl SqliteStores {
                     Ok(goal)
                 })
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut statement = conn.prepare(
+            let ideas = |query: &str| -> rusqlite::Result<Vec<Idea>> {
+                let mut statement = conn.prepare(query)?;
+                statement
+                    .query_map([], |row| {
+                        Ok(Idea {
+                            id: row.get(0)?,
+                            title: row.get(1)?,
+                            body: row.get(2)?,
+                            created_ms: row.get(3)?,
+                            notes: Vec::new(),
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .map(|mut idea| {
+                        idea.notes = notes("idea_notes", "idea", idea.id)?;
+                        Ok(idea)
+                    })
+                    .collect()
+            };
+            let open = ideas(
                 "SELECT id, title, body, created_ms FROM ideas WHERE status = 'open' ORDER BY id",
             )?;
-            let ideas = statement
-                .query_map([], |row| {
-                    Ok(Idea {
-                        id: row.get(0)?,
-                        title: row.get(1)?,
-                        body: row.get(2)?,
-                        created_ms: row.get(3)?,
-                        notes: Vec::new(),
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-                .into_iter()
-                .map(|mut idea| {
-                    idea.notes = notes("idea_notes", "idea", idea.id)?;
-                    Ok(idea)
-                })
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(Plans { goals, ideas })
+            // The closing note is the newest note of an answered idea, so
+            // its time orders the list.
+            let answered = ideas(&format!(
+                "SELECT id, title, body, created_ms FROM ideas WHERE status = 'answered' \
+                 ORDER BY (SELECT MAX(id) FROM idea_notes WHERE idea = ideas.id) DESC, id DESC \
+                 LIMIT {LISTED_ANSWERED}"
+            ))?;
+            Ok(Plans {
+                goals,
+                ideas: open,
+                answered,
+            })
         })
     }
 }
@@ -628,6 +720,88 @@ mod tests {
         assert!(stores.drop_goal(plain).unwrap());
         assert!(!stores.drop_goal(plain).unwrap());
         assert_eq!(stores.plans().unwrap().goals, []);
+    }
+
+    #[test]
+    fn a_concluded_idea_leaves_the_open_list_and_the_owner_can_reopen_it() {
+        let stores = stores();
+        let first = stores.add_idea("a", "First", "b", 0).unwrap();
+        let second = stores.add_idea("b", "Second", "b", 0).unwrap();
+        stores.research_idea("n", first, "Looked.", 1).unwrap();
+        refused(stores.conclude_idea("c0", first, "  ", 2));
+        stores
+            .conclude_idea("c1", first, "Answered: no goal.", 2)
+            .unwrap();
+        // A retry of the same call succeeds and adds no note.
+        stores
+            .conclude_idea("c1", first, "Answered: no goal.", 3)
+            .unwrap();
+        let plans = stores.plans().unwrap();
+        assert_eq!(
+            plans.ideas.iter().map(|idea| idea.id).collect::<Vec<_>>(),
+            [second]
+        );
+        assert_eq!(plans.answered.len(), 1);
+        assert_eq!(plans.answered[0].id, first);
+        assert_eq!(
+            plans.answered[0]
+                .notes
+                .iter()
+                .map(|note| note.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Looked.", "Answered: no goal."]
+        );
+
+        // An answered idea takes no note, no second conclusion and no goal.
+        refused(stores.research_idea("n2", first, "late", 4));
+        let again = stores.conclude_idea("c2", first, "again", 4).unwrap_err();
+        assert!(again.to_string().contains("answered already"), "{again}");
+        refused(stores.propose_goal("g", "G", "w", None, Some(first), 4));
+        refused(stores.conclude_idea("c3", 999, "none", 4));
+
+        // The last concluded comes first.
+        stores.conclude_idea("c4", second, "Done too.", 5).unwrap();
+        let answered: Vec<i64> = stores
+            .plans()
+            .unwrap()
+            .answered
+            .iter()
+            .map(|idea| idea.id)
+            .collect();
+        assert_eq!(answered, [second, first]);
+
+        // The owner reopens it, and the assistant works on it again.
+        assert!(stores.reopen_idea(first).unwrap());
+        assert!(!stores.reopen_idea(first).unwrap(), "once");
+        stores.research_idea("n3", first, "More.", 6).unwrap();
+        let plans = stores.plans().unwrap();
+        assert_eq!(plans.ideas[0].id, first);
+        assert_eq!(plans.answered.len(), 1);
+
+        // The owner drops an answered idea as well as an open one.
+        assert!(stores.drop_idea(second).unwrap());
+        assert!(!stores.reopen_idea(second).unwrap());
+        assert_eq!(stores.plans().unwrap().answered, []);
+    }
+
+    #[test]
+    fn an_answered_idea_frees_a_place_and_a_reopen_respects_the_cap() {
+        let stores = stores();
+        for n in 0..MAX_OPEN_IDEAS {
+            stores.add_idea(&format!("i{n}"), "I", "b", 0).unwrap();
+        }
+        refused(stores.add_idea("over", "I", "b", 0));
+        stores.conclude_idea("c", 1, "Answered.", 1).unwrap();
+        stores.add_idea("room", "I", "b", 0).unwrap();
+        refused(stores.reopen_idea(1));
+        for n in 0..=LISTED_ANSWERED {
+            stores
+                .conclude_idea(&format!("d{n}"), n + 2, "Answered.", n + 2)
+                .unwrap();
+        }
+        let answered = stores.plans().unwrap().answered;
+        assert_eq!(answered.len(), usize::try_from(LISTED_ANSWERED).unwrap());
+        assert_eq!(answered[0].id, LISTED_ANSWERED + 2, "the last first");
     }
 
     #[test]

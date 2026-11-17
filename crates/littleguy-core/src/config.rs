@@ -941,7 +941,8 @@ pub const DEFAULT_HEARTBEAT_PROMPT: &str = "This is a heartbeat: no one is here,
      goal whose `due` is true, and record what you found with goal_progress. If no goal is \
      due, pick one open idea, research it a little, and add what you learned with \
      research_idea. Propose a goal when the research shows that the idea is worth doing. \
-     Tell the owner only what they should know now. If nothing needs them, reply with \
+     When the research answers the idea and it needs no goal, conclude it with \
+     conclude_idea. Tell the owner only what they should know now. If nothing needs them, reply with \
      exactly HEARTBEAT_OK.";
 
 /// Where a heartbeat that has news speaks.

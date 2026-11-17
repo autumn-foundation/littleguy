@@ -3,10 +3,12 @@
 //! The goal and idea tools come with the `plans` feature. A build without
 //! it keeps the wake and skill tools, and `list_plans` lists only those.
 //!
-//! The assistant files ideas, researches them, proposes goals and works on
-//! the goals that the owner accepted. It cannot accept, decline or drop: a
-//! proposed goal does nothing until the owner accepts it on the pages, as a
-//! refine overlay does nothing until the owner activates it.
+//! The assistant files ideas, researches them, concludes the ones that its
+//! research answered, proposes goals and works on the goals that the owner
+//! accepted. It cannot accept, decline, drop or reopen: a proposed goal does
+//! nothing until the owner accepts it on the pages, as a refine overlay does
+//! nothing until the owner activates it. A concluded idea grants nothing: it
+//! leaves the open list, and the owner can reopen it (ADR 0041).
 //!
 //! Every tool here is `ReadOnly` or `Internal`, so an unattended run, such as
 //! a heartbeat tick, may call each one. The texts can hold what a research
@@ -212,7 +214,8 @@ fn list_plans_description() -> String {
         text.push_str(
             " An active goal is yours to work on; a goal with `due` true needs a check now. \
              A proposed goal waits for the owner to accept it. An idea is something to plan \
-             and research.",
+             and research. `ideas` holds the open ones; `answered_ideas` names the newest \
+             that you concluded with conclude_idea, so you do not file them again.",
         );
     }
     if cfg!(feature = "followups") {
@@ -329,6 +332,13 @@ fn list_plans(
                         .map(|goal| goal_json(goal, now))
                         .collect();
                     listing["ideas"] = plans.ideas.iter().map(idea_json).collect();
+                    // The answered ideas by name only, so a tick does not
+                    // file one again, and does not read its notes again.
+                    listing["answered_ideas"] = plans
+                        .answered
+                        .iter()
+                        .map(|idea| json!({"id": idea.id, "title": idea.title}))
+                        .collect();
                     listing
                 };
                 Ok(listing)
@@ -528,11 +538,12 @@ fn wake_tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool
 #[cfg(feature = "plans")]
 #[expect(
     clippy::too_many_lines,
-    reason = "four tools, each a schema and a short body, read best in one list"
+    reason = "five tools, each a schema and a short body, read best in one list"
 )]
 fn goal_tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
     let file = Arc::clone(stores);
     let research = Arc::clone(stores);
+    let conclude = Arc::clone(stores);
     let propose = Arc::clone(stores);
     let progress = Arc::clone(stores);
     vec![
@@ -580,6 +591,30 @@ fn goal_tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
                     let idea = id(&input, "idea")?;
                     stores.research_idea(&call_key(&ctx), idea, text(&input, "note")?, now_ms())?;
                     Ok(json!({"idea": idea, "noted": true}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
+        FnTool::with_context(
+            "conclude_idea",
+            "Conclude an open idea that your research answered and that needs no goal. The \
+             note says the answer. The idea leaves the open list of list_plans; the owner sees \
+             it under Answered on the Workspace page and can reopen it. To act on an idea, \
+             propose a goal instead.",
+            object(
+                &json!({
+                    "idea": {"type": "integer"},
+                    "note": {"type": "string", "description": "The answer, and why the idea needs no more work."},
+                }),
+                &["idea", "note"],
+            ),
+            move |input, ctx| {
+                let stores = Arc::clone(&conclude);
+                async move {
+                    let idea = id(&input, "idea")?;
+                    stores.conclude_idea(&call_key(&ctx), idea, text(&input, "note")?, now_ms())?;
+                    Ok(json!({"idea": idea, "status": "answered"}))
                 }
             },
         )
@@ -668,7 +703,13 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         let goals: &[&str] = if cfg!(feature = "plans") {
-            &["add_idea", "research_idea", "propose_goal", "goal_progress"]
+            &[
+                "add_idea",
+                "research_idea",
+                "conclude_idea",
+                "propose_goal",
+                "goal_progress",
+            ]
         } else {
             &[]
         };

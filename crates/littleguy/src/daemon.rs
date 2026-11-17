@@ -232,6 +232,44 @@ pub fn harness(
 /// The most bytes of one workspace file that a request shows.
 pub const MAX_SHOWN_BYTES: usize = 256 * 1024;
 
+/// The notes of the assistant in `stores`, for the owner (ADR 0029).
+///
+/// # Errors
+///
+/// Returns an error when the store fails.
+#[cfg(feature = "notes")]
+fn notes_listing(config: &Config, stores: Option<&SqliteStores>) -> Result<Response> {
+    let Some(stores) = stores.filter(|_| config.tools.files && config.memory.enabled) else {
+        return Ok(Response::Off {
+            message: String::from(
+                "notes are off: they need `files = true` under [tools] and memory on",
+            ),
+        });
+    };
+    let notes = stores
+        .notes()?
+        .into_iter()
+        .map(|note| crate::protocol::NoteEntry {
+            name: note.name,
+            text: note.text,
+            updated_ms: note.updated_ms,
+        })
+        .collect();
+    Ok(Response::Notes { notes })
+}
+
+/// A build without notes: the listing is off.
+#[cfg(not(feature = "notes"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the notes build reads the store, and the callers handle both the same way"
+)]
+fn notes_listing(_config: &Config, _stores: Option<&SqliteStores>) -> Result<Response> {
+    Ok(Response::Off {
+        message: crate::features::missing("notes", "notes"),
+    })
+}
+
 /// The text of a workspace file, when it is UTF-8 and at most
 /// [`MAX_SHOWN_BYTES`].
 fn shown_text(data: &[u8]) -> Option<String> {
@@ -520,7 +558,7 @@ pub struct Daemon {
     logins: Option<crate::web::Logins>,
     /// The overlay store and the proposer, with a `[refine]` section.
     #[cfg(feature = "refine")]
-    refine: Option<Box<crate::refine::Refine>>,
+    refine: Option<Arc<crate::refine::Refine>>,
     /// What a reload of the config needs, and the config that runs.
     kit: Box<reload::Kit>,
     /// The readers of the answers that the model writes now.
@@ -532,6 +570,8 @@ pub struct Daemon {
     rolls: u64,
     /// When the last purge of the ended runs finished.
     purged_at: Option<DateTime<Utc>>,
+    /// The reads that answer beside the loop.
+    reads: Arc<Reads>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
@@ -675,6 +715,7 @@ impl Daemon {
             roll_due: true,
             rolls: 0,
             purged_at: None,
+            reads: Arc::default(),
         })
     }
 
@@ -701,6 +742,37 @@ impl Daemon {
     pub fn with_logins(mut self, logins: crate::web::Logins) -> Self {
         self.logins = Some(logins);
         self
+    }
+
+    /// The reads that answer beside the loop. A [`Handle`] with them
+    /// answers a read while a run holds the loop.
+    #[must_use]
+    pub fn reads(&self) -> Arc<Reads> {
+        Arc::clone(&self.reads)
+    }
+
+    /// What a read needs, as the daemon has it now.
+    fn view(&self) -> reads::View {
+        reads::View {
+            owner_uid: self.owner_uid,
+            config: Arc::new(self.kit.config.clone()),
+            stores: self.kit.stores.clone(),
+            approvals: self.approvals.clone(),
+            db: self.kit.db.clone(),
+            assistant: self.assistant().clone(),
+            pairs: self.pairs(),
+            #[cfg(feature = "refine")]
+            refine: self.refine.clone(),
+            #[cfg(feature = "skills")]
+            skills_dir: self.skills_dir(),
+            #[cfg(feature = "oauth")]
+            connections: self.connections.as_ref().map(Connections::lister),
+        }
+    }
+
+    /// Publishes what a read needs now, for the reads beside the loop.
+    fn publish(&self) {
+        self.reads.publish(self.view());
     }
 
     /// The readers of live answers. A [`Handle`] with them streams a chat.
@@ -1398,44 +1470,8 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns an error when the store fails.
-    #[cfg(feature = "notes")]
     fn notes_listing(&self) -> Result<Response> {
-        let config = &self.kit.config;
-        let Some(stores) = self
-            .kit
-            .stores
-            .as_ref()
-            .filter(|_| config.tools.files && config.memory.enabled)
-        else {
-            return Ok(Response::Off {
-                message: String::from(
-                    "notes are off: they need `files = true` under [tools] and memory on",
-                ),
-            });
-        };
-        let notes = stores
-            .notes()?
-            .into_iter()
-            .map(|note| crate::protocol::NoteEntry {
-                name: note.name,
-                text: note.text,
-                updated_ms: note.updated_ms,
-            })
-            .collect();
-        Ok(Response::Notes { notes })
-    }
-
-    /// A build without notes: the listing is off.
-    #[cfg(not(feature = "notes"))]
-    #[expect(
-        clippy::unused_self,
-        clippy::unnecessary_wraps,
-        reason = "the notes build reads the store, and the router calls both the same way"
-    )]
-    fn notes_listing(&self) -> Result<Response> {
-        Ok(Response::Off {
-            message: crate::features::missing("notes", "notes"),
-        })
+        notes_listing(&self.kit.config, self.kit.stores.as_deref())
     }
 
     /// A build without skills: the listing is off, and an action fails.
@@ -1585,8 +1621,7 @@ impl Daemon {
 #[cfg(feature = "oauth")]
 async fn oauth_request(connections: Option<&Connections>, request: Request) -> Result<Response> {
     let Some(connections) = connections else {
-        let message =
-            String::from("this daemon keeps no OAuth connections. Add a [san_mateo] section");
+        let message = String::from(crate::oauth::NO_CONNECTIONS);
         // A listing is off. An action on a connection fails.
         return Ok(if matches!(request, Request::Connections) {
             Response::Off { message }
@@ -1775,6 +1810,8 @@ pub struct Handle {
     uid: u32,
     /// The readers of live answers, when the daemon streams them.
     live: Option<Arc<live::Live>>,
+    /// The reads that answer beside the loop, when the daemon has them.
+    reads: Option<Arc<Reads>>,
 }
 
 impl Handle {
@@ -1784,6 +1821,12 @@ impl Handle {
     ///
     /// Returns an error when the daemon stops before it answers.
     pub async fn ask(&self, request: Request) -> Result<Response> {
+        // A read answers at once, also while a run holds the loop.
+        if let Some(reads) = &self.reads
+            && let Some(answer) = reads.answer(self.uid, &request).await
+        {
+            return Ok(answer);
+        }
         let (reply, answer) = oneshot::channel();
         self.tx
             .send(Job::Socket {
@@ -1794,6 +1837,13 @@ impl Handle {
             .await
             .context("the daemon is stopping")?;
         answer.await.context("the daemon dropped the request")
+    }
+
+    /// Answers each read from `reads`, beside the loop.
+    #[must_use]
+    pub fn with_reads(mut self, reads: Arc<Reads>) -> Self {
+        self.reads = Some(reads);
+        self
     }
 
     /// Streams chats with the readers of `live`.
@@ -1859,6 +1909,7 @@ pub fn jobs(owner_uid: u32) -> (Handle, Jobs) {
             tx: tx.clone(),
             uid: owner_uid,
             live: None,
+            reads: None,
         },
         Jobs { tx, rx },
     )
@@ -1963,10 +2014,12 @@ async fn serve(
     stop: impl Future<Output = ()>,
 ) -> Result<()> {
     let Jobs { tx, mut rx } = jobs;
+    daemon.publish();
     let mut tasks = vec![tokio::spawn(accept_loop(
         listener,
         tx.clone(),
         daemon.live(),
+        daemon.reads(),
     ))];
     #[cfg(feature = "discord")]
     if let Some(link) = links.discord {
@@ -2030,6 +2083,8 @@ async fn serve(
             }
             () = &mut stop => break,
         }
+        // Each job may change what a read sees: a pair, a reload, a skill.
+        daemon.publish();
     }
     for task in tasks {
         task.abort();
@@ -2115,14 +2170,20 @@ async fn decide_press(jobs: &mpsc::Sender<Job>, press: Press) -> Option<gate::Pr
     answer.await.ok()
 }
 
-async fn accept_loop(listener: UnixListener, tx: mpsc::Sender<Job>, live: Arc<live::Live>) {
+async fn accept_loop(
+    listener: UnixListener,
+    tx: mpsc::Sender<Job>,
+    live: Arc<live::Live>,
+    reads: Arc<Reads>,
+) {
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 let tx = tx.clone();
                 let live = Arc::clone(&live);
+                let reads = Arc::clone(&reads);
                 tokio::spawn(async move {
-                    if let Err(error) = serve_connection(stream, tx, &live).await {
+                    if let Err(error) = serve_connection(stream, tx, &live, &reads).await {
                         tracing::debug!(error = %format!("{error:#}"), "a connection failed");
                     }
                 });
@@ -2251,6 +2312,7 @@ async fn serve_connection(
     stream: UnixStream,
     tx: mpsc::Sender<Job>,
     taps: &live::Live,
+    reads: &Reads,
 ) -> Result<()> {
     let peer = stream.peer_cred().context("reading the peer credentials")?;
     let uid = peer.uid();
@@ -2281,6 +2343,10 @@ async fn serve_connection(
                 stream_chat(uid, message_id, text, &tx, taps, &mut write).await?
             }
             Ok(request) => {
+                // A read answers at once, also while a run holds the loop.
+                if let Some(answer) = reads.answer(uid, &request).await {
+                    return write_line(&mut write, &answer).await;
+                }
                 let (reply, answer) = oneshot::channel();
                 tx.send(Job::Socket {
                     uid,
@@ -2320,8 +2386,10 @@ mod council;
 mod discord;
 mod gate;
 pub mod live;
+pub use reads::Reads;
 #[cfg(feature = "plans")]
 mod plans;
+mod reads;
 #[cfg(feature = "refine")]
 mod refine;
 mod reload;
@@ -2412,6 +2480,48 @@ mod tests {
         );
         assert_eq!(model.calls(), 1);
         assert_eq!(daemon.assistant().as_str(), "assistant/mark");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_state_on_file_is_the_state_that_the_runtime_gives() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon = open(&db, Arc::new(OfflineModel::new()));
+        let before = reads::committed_state(&db, daemon.assistant()).unwrap();
+        assert!(
+            matches!(before, reads::Committed::NoRun),
+            "no run, no state"
+        );
+        for n in 0..3 {
+            daemon
+                .handle_request(UID, request(&format!("m-{n}"), &format!("hello {n}")))
+                .await;
+        }
+        let engine = daemon.state().await.unwrap().unwrap();
+        let reads::Committed::State(file) =
+            reads::committed_state(&db, daemon.assistant()).unwrap()
+        else {
+            panic!("the run has a snapshot");
+        };
+        assert_eq!(file.transcript, engine.transcript);
+        assert_eq!(file.workspace, engine.workspace);
+        assert_eq!(file.segments, engine.segments);
+        assert_eq!(file.last_answer, engine.last_answer);
+        // The reads answer the history as the loop does.
+        daemon.publish();
+        let beside = daemon.reads().answer(UID, &Request::History).await;
+        let looped = daemon.handle_request(UID, Request::History).await;
+        assert_eq!(beside, Some(looped));
+        // A stranger gets nothing beside the loop. The loop refuses it.
+        assert_eq!(
+            daemon.reads().answer(UID + 1, &Request::History).await,
+            None
+        );
+        // A write is never a read.
+        assert_eq!(
+            daemon.reads().answer(UID, &request("m-9", "hi")).await,
+            None
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

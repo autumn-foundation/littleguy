@@ -701,7 +701,7 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     #[cfg(not(feature = "camel"))]
     let camel: Option<camel::Camel> = None;
     let (handle, jobs) = daemon::jobs(uid);
-    let handle = handle.with_live(daemon.live());
+    let handle = handle.with_live(daemon.live()).with_reads(daemon.reads());
     let logins = web::Logins::new(web::base_url(plan.bind));
     // A daemon whose pages do not serve refuses `lg ui`.
     let daemon = if plan.pages {

@@ -31,14 +31,14 @@ pub(super) fn attach(
     config: &Config,
     db: &Path,
     model: Arc<dyn AgentModel>,
-) -> Result<(AgentHarness, Option<Box<Refine>>)> {
+) -> Result<(AgentHarness, Option<Arc<Refine>>)> {
     let Some(settings) = &config.refine else {
         return Ok((assistant, None));
     };
     let refine = Refine::open(&path_for(db), settings, &assistant, model)?;
     Ok((
         assistant.overlay_store(refine.store()),
-        Some(Box::new(refine)),
+        Some(Arc::new(refine)),
     ))
 }
 
@@ -55,6 +55,17 @@ impl Daemon {
         let owner = self.routing.assistant().name().to_owned();
         answer(self.refine.as_deref(), owner, query, request)
     }
+}
+
+/// The answer to a read of the overlays: the listing or one version. It
+/// needs no state of the assistant.
+///
+/// # Errors
+///
+/// Returns an error when the store fails.
+pub(super) async fn read(refine: Option<&Refine>, request: Request) -> Result<Response> {
+    let no_state = std::future::ready(Ok(None));
+    answer(refine, String::new(), no_state, request).await
 }
 
 /// The answer to `request`, over the refine state `refine`.

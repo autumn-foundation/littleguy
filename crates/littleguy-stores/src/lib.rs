@@ -46,6 +46,7 @@ pub mod notes;
 pub mod plans;
 #[cfg(feature = "self-debug")]
 pub mod runlog;
+pub mod runtime_state;
 #[cfg(feature = "skills")]
 pub mod skill_drafts;
 #[cfg(feature = "self-debug")]

@@ -22,16 +22,38 @@ const ASSISTANT_AUTHOR: &str = "littleguy";
 
 /// Why skills are off in this daemon, or `None` when they work.
 fn off_reason(daemon: &Daemon) -> Option<String> {
-    if daemon.skills_dir().is_none() {
+    off_for(daemon.skills_dir().is_some(), daemon.refine.is_some())
+}
+
+/// Why skills are off with or without a folder and a refine section.
+fn off_for(has_dir: bool, has_refine: bool) -> Option<String> {
+    if !has_dir {
         return Some(String::from(
             "skills need a folder: set `dir` under [skills]",
         ));
     }
-    daemon.refine.is_none().then(|| {
+    (!has_refine).then(|| {
         String::from(
             "skills need a [refine] section: they reach the assistant through its profile overlay",
         )
     })
+}
+
+/// The answer to a listing of the skills: off, or the skills of `dir`
+/// and the drafts of `stores`.
+///
+/// # Errors
+///
+/// Returns an error when the folder or the store fails.
+pub(super) fn listing_of(
+    dir: Option<&std::path::Path>,
+    has_refine: bool,
+    stores: Option<&littleguy_stores::SqliteStores>,
+) -> Result<Response> {
+    if let Some(message) = off_for(dir.is_some(), has_refine) {
+        return Ok(Response::Off { message });
+    }
+    listing(dir, stores)
 }
 
 impl Daemon {
@@ -97,49 +119,7 @@ impl Daemon {
 
     /// The listing of the skills and the drafts.
     fn skills_listing(&self) -> Result<Response> {
-        let Some(dir) = self.skills_dir() else {
-            return Ok(Response::Off {
-                message: String::from("skills need a folder: set `dir` under [skills]"),
-            });
-        };
-        let found = skills::load(&dir)?;
-        let drafts = match self.kit.stores.as_ref() {
-            Some(stores) => stores.skill_drafts()?,
-            None => Vec::new(),
-        };
-        let path = |path: &std::path::Path| path.display().to_string();
-        Ok(Response::Skills {
-            drafts: drafts
-                .into_iter()
-                .map(|draft| SkillDraftEntry {
-                    revises: found.skills.iter().any(|skill| skill.name == draft.name),
-                    id: draft.id,
-                    name: draft.name,
-                    description: draft.description,
-                    body: draft.body,
-                    created_ms: draft.created_ms,
-                })
-                .collect(),
-            skills: found
-                .skills
-                .into_iter()
-                .map(|skill| SkillEntry {
-                    path: path(&skill.path),
-                    name: skill.name,
-                    description: skill.description,
-                    body: skill.body,
-                    author: skill.author,
-                })
-                .collect(),
-            invalid: found
-                .invalid
-                .into_iter()
-                .map(|file| InvalidSkill {
-                    path: path(&file.path),
-                    reason: file.reason,
-                })
-                .collect(),
-        })
+        listing(self.skills_dir().as_deref(), self.kit.stores.as_deref())
     }
 
     /// Handles one skills request of the owner. Each change answers with the
@@ -197,4 +177,54 @@ impl Daemon {
         self.sync_skills().await;
         self.skills_listing()
     }
+}
+
+/// The skills of `dir` and the drafts of `stores`.
+fn listing(
+    dir: Option<&std::path::Path>,
+    stores: Option<&littleguy_stores::SqliteStores>,
+) -> Result<Response> {
+    let Some(dir) = dir else {
+        return Ok(Response::Off {
+            message: String::from("skills need a folder: set `dir` under [skills]"),
+        });
+    };
+    let found = skills::load(dir)?;
+    let drafts = match stores {
+        Some(stores) => stores.skill_drafts()?,
+        None => Vec::new(),
+    };
+    let path = |path: &std::path::Path| path.display().to_string();
+    Ok(Response::Skills {
+        drafts: drafts
+            .into_iter()
+            .map(|draft| SkillDraftEntry {
+                revises: found.skills.iter().any(|skill| skill.name == draft.name),
+                id: draft.id,
+                name: draft.name,
+                description: draft.description,
+                body: draft.body,
+                created_ms: draft.created_ms,
+            })
+            .collect(),
+        skills: found
+            .skills
+            .into_iter()
+            .map(|skill| SkillEntry {
+                path: path(&skill.path),
+                name: skill.name,
+                description: skill.description,
+                body: skill.body,
+                author: skill.author,
+            })
+            .collect(),
+        invalid: found
+            .invalid
+            .into_iter()
+            .map(|file| InvalidSkill {
+                path: path(&file.path),
+                reason: file.reason,
+            })
+            .collect(),
+    })
 }

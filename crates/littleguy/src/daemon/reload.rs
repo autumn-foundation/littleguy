@@ -88,7 +88,7 @@ pub(super) struct Assembled {
     pub(super) approvals: Option<Arc<SqliteStores>>,
     pub(super) approver: Option<SenderId>,
     #[cfg(feature = "refine")]
-    pub(super) refine: Option<Box<crate::refine::Refine>>,
+    pub(super) refine: Option<Arc<crate::refine::Refine>>,
 }
 
 impl Kit {

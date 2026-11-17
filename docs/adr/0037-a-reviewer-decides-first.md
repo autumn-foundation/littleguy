@@ -24,8 +24,8 @@ that serves the owner's words from one that does not.
   that would wait for the owner goes to a reviewer first: a `run_code`
   call after outside text, and a call that a flow rule holds.
 - **The reviewer reads only the owner's words and the call.** It gets the
-  text of the last six user turns, with the message whose op is in
-  flight, and the tool and arguments of the call. It never reads a tool
+  text of every user turn of the conversation, with the message whose op
+  is in flight (ADR 0034 removed a bound of six), and the tool and arguments of the call. It never reads a tool
   result. So outside text cannot reach it.
 - **Three answers.** The reviewer answers JSON: `approve`, `deny` or
   `ask`, with a reason. An approval sends the engine signal, and the run

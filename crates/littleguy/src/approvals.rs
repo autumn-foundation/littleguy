@@ -22,8 +22,10 @@ pub const BUTTON_PREFIX: &str = "lg";
 /// The requester of a call from `lg chat`.
 pub const CLI_REQUESTER: &str = "cli";
 
-/// The most characters of the code in a notice. A notice must fit one
-/// chat message with its frame.
+/// The most characters of the code in a chat notice. Discord and Slack
+/// split a long message, and a split breaks the code frame, so a notice
+/// shows the start and names the places that show all of it. The web
+/// card and `lg approvals` show the whole call.
 pub const MAX_SHOWN_CHARS: usize = 1_500;
 
 /// Who asked for the work that waits.
@@ -231,9 +233,15 @@ fn known_parts(record: &ApprovalRecord) -> Option<(String, String)> {
 
 /// What the call does, for a person: the runtime and the code of a
 /// `run_code` call, the mail of a send, the event of an invite, the method
-/// and path of an `api_send`, or the arguments of any other call.
+/// and path of an `api_send`, or the arguments of any other call. The
+/// text holds the whole call.
 #[must_use]
 pub fn describe(record: &ApprovalRecord) -> String {
+    describe_within(record, None)
+}
+
+/// [`describe`], with at most `shown` characters of the body.
+fn describe_within(record: &ApprovalRecord, shown: Option<usize>) -> String {
     let arguments = &record.arguments;
     let (body, header) = known_parts(record).unwrap_or_else(|| {
         match (arguments["runtime"].as_str(), arguments["code"].as_str()) {
@@ -251,11 +259,13 @@ pub fn describe(record: &ApprovalRecord) -> String {
     });
     let mut text = header;
     if !body.is_empty() {
-        let (shown, cut) = cut(&body, MAX_SHOWN_CHARS);
+        let (shown, cut) = cut(&body, shown.unwrap_or(usize::MAX));
         text.push('\n');
         text.push_str(&fence(&shown));
         if cut {
-            text.push_str("\n(cut: the call holds more)");
+            text.push_str(
+                "\n(cut: the call holds more. `lg approvals` and the web chat show all of it.)",
+            );
         }
     }
     let extra: Vec<&str> = ["args", "stdin", "files", "env"]
@@ -276,7 +286,7 @@ pub fn notice(record: &ApprovalRecord) -> String {
         record.id,
         record.reason,
         record.tool,
-        describe(record),
+        describe_within(record, Some(MAX_SHOWN_CHARS)),
         record.id,
         record.id
     )
@@ -449,11 +459,16 @@ mod tests {
     }
 
     #[test]
-    fn a_long_call_is_cut_and_every_shape_is_described() {
+    fn a_long_call_is_whole_in_a_listing_and_cut_only_in_a_chat_notice() {
         let long = "x".repeat(MAX_SHOWN_CHARS + 10);
-        let text = describe(&record(json!({"runtime": "sh", "code": long})));
-        assert!(text.contains("(cut: the call holds more)"));
-        assert!(text.chars().count() < MAX_SHOWN_CHARS + 100);
+        let call = record(json!({"runtime": "sh", "code": long}));
+        let text = describe(&call);
+        assert!(text.contains(&long), "the listing holds the whole call");
+        assert!(!text.contains("(cut:"));
+        let sent = notice(&call);
+        assert!(sent.contains("(cut: the call holds more."), "{sent}");
+        assert!(sent.contains("lg approvals"), "{sent}");
+        assert!(sent.chars().count() < MAX_SHOWN_CHARS + 300);
         assert!(describe(&record(json!({"runtime": "sh"}))).contains("no code"));
         assert!(describe(&record(Value::Null)).contains("not recorded"));
         let mut other = record(json!({"path": "a.txt"}));

@@ -35,9 +35,6 @@ pub const SEPARATOR: &str = "__";
 /// The longest tool name that a model provider takes.
 pub const MAX_TOOL_NAME: usize = 64;
 
-/// The most characters of one result that the model reads.
-pub const MAX_RESULT_CHARS: usize = 20_000;
-
 /// The most characters of one tool description.
 pub const MAX_DESCRIPTION_CHARS: usize = 1_024;
 
@@ -177,10 +174,11 @@ pub fn tool_name(server: &str, tool: &str) -> Option<String> {
 ///
 /// Structured content wins, because it holds the full answer. Otherwise
 /// the text blocks join with new lines. Each other block becomes a short
-/// note. The text is cut at [`MAX_RESULT_CHARS`].
+/// note. The model reads all of it: a second call could repeat what the
+/// tool did, so a result has no pages.
 #[must_use]
 pub fn result_text(result: &CallToolResult) -> String {
-    let text = result.structured_content.as_ref().map_or_else(
+    result.structured_content.as_ref().map_or_else(
         || {
             result
                 .content
@@ -190,12 +188,7 @@ pub fn result_text(result: &CallToolResult) -> String {
                 .join("\n")
         },
         Value::to_string,
-    );
-    let (mut text, cut) = clip(&text, MAX_RESULT_CHARS);
-    if cut {
-        text.push_str("\n[the result was cut]");
-    }
-    text
+    )
 }
 
 /// The text of one content block.

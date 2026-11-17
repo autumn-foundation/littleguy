@@ -7,8 +7,8 @@
 //! query.
 //!
 //! The queries read no message text. Run inputs, outputs and events hold
-//! the conversation, so no query selects them. An error text can quote
-//! what failed, so it is clipped.
+//! the conversation, so no query selects them. An error text comes whole:
+//! the assistant reads it to learn what failed.
 //!
 //! The runtime keeps its single-writer lock on a sidecar file, and the file
 //! is in WAL mode. A reader therefore never blocks the writer, and the
@@ -19,12 +19,6 @@ use std::time::Duration;
 
 use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, params};
-
-/// The most rows that one call returns.
-pub const MAX_ROWS: u32 = 50;
-
-/// The most characters of one error text.
-pub const MAX_ERROR_CHARS: usize = 500;
 
 /// How long a read waits for a lock before it fails.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -46,7 +40,7 @@ pub struct Run {
     pub attempt: i64,
     /// The schedule that started the run, if one did.
     pub schedule: Option<String>,
-    /// The error of a run that failed, clipped.
+    /// The error of a run that failed.
     pub error: Option<String>,
 }
 
@@ -61,7 +55,7 @@ pub struct Failure {
     pub activity: String,
     /// The 1-based attempt.
     pub attempt: i64,
-    /// What went wrong, clipped.
+    /// What went wrong.
     pub error: String,
 }
 
@@ -101,17 +95,9 @@ fn read_error(error: &rusqlite::Error) -> AgentError {
     )
 }
 
-/// At most [`MAX_ERROR_CHARS`] of `text`, with a mark when it was cut.
-fn clip(text: &str) -> String {
-    match text.char_indices().nth(MAX_ERROR_CHARS) {
-        Some((at, _)) => format!("{}…", &text[..at]),
-        None => text.to_owned(),
-    }
-}
-
-/// A row cap between 1 and [`MAX_ROWS`].
+/// A row count of at least 1.
 fn cap(limit: u32) -> u32 {
-    limit.clamp(1, MAX_ROWS)
+    limit.max(1)
 }
 
 impl RunLog {
@@ -165,7 +151,7 @@ impl RunLog {
                     closed_ms: micros(row.get(4)?),
                     attempt: row.get(5)?,
                     schedule: row.get(6)?,
-                    error: row.get::<_, Option<String>>(7)?.map(|text| clip(&text)),
+                    error: row.get(7)?,
                 })
             })
             .map_err(|e| read_error(&e))?;
@@ -196,7 +182,7 @@ impl RunLog {
                     workflow: row.get(1)?,
                     activity: row.get(2)?,
                     attempt: row.get(3)?,
-                    error: clip(&row.get::<_, String>(4)?),
+                    error: row.get(4)?,
                 })
             })
             .map_err(|e| read_error(&e))?;
@@ -220,12 +206,11 @@ impl RunLog {
                  FROM harvest_llm_ledger \
                  WHERE recorded_at >= ?1 \
                  GROUP BY model \
-                 ORDER BY 5 DESC, 2 DESC, model \
-                 LIMIT ?2",
+                 ORDER BY 5 DESC, 2 DESC, model",
             )
             .map_err(|e| read_error(&e))?;
         let rows = statement
-            .query_map(params![since_ms, MAX_ROWS], |row| {
+            .query_map(params![since_ms], |row| {
                 Ok(Usage {
                     model: row.get(0)?,
                     calls: row.get(1)?,
@@ -277,11 +262,7 @@ mod tests {
         assert_eq!(ids, ["r3", "r2", "r1"]);
         assert_eq!(runs[0].started_ms, Some(3_000));
         let error = runs[1].error.as_deref().unwrap();
-        assert_eq!(
-            error.chars().count(),
-            MAX_ERROR_CHARS + 1,
-            "clipped, with a mark"
-        );
+        assert_eq!(error, "x".repeat(900), "an error comes whole");
         assert!(!format!("{runs:?}").contains("secret"));
 
         let failed = log.runs(10, true).unwrap();

@@ -24,7 +24,7 @@ fn api_config() -> Config {
     config.san_mateo = Some(section("acme", None));
     config.api = Some(ApiConfig {
         integrations: vec![String::from("acme")],
-        max_chars: 1_000,
+        max_chars: Some(1_000),
     });
     config
 }

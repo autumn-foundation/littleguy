@@ -275,8 +275,8 @@ async fn a_search_returns_clean_results() {
     let sent_key = seen.first().is_some_and(|(_, _, key)| key == "secret-key");
     assert!(sent_key);
     assert_eq!(seen[0].0, "green tea");
-    // The count is capped at ten.
-    assert_eq!(seen[0].1, "10");
+    // The count stops at 20, the most that the API takes.
+    assert_eq!(seen[0].1, "20");
 }
 
 #[tokio::test]

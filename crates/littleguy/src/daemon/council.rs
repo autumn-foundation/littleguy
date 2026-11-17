@@ -33,9 +33,6 @@ const COUNCIL_SYSTEM: &str = "You sit on a council that decides the proposals of
      that the owner would not want. Decline one that repeats an open goal or a skill. Answer \
      with JSON only: {\"accept\": true or false, \"reason\": \"one short sentence\"}.";
 
-/// The most output tokens of one vote.
-const VOTE_TOKENS: u32 = 300;
-
 /// One vote of one member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Vote {
@@ -115,7 +112,9 @@ async fn ask_member(model: &dyn AgentModel, brief: &str, member: u32) -> Vote {
             ChatMessage::text(ChatRole::User, brief),
         ],
         tools: Vec::new(),
-        max_tokens: Some(VOTE_TOKENS),
+        // No output cap: a reasoning model thinks first, and a cap can end
+        // the vote before its answer.
+        max_tokens: None,
         temperature: None,
         draw: Some(DrawId::new(member)),
     };

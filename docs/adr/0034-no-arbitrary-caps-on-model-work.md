@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-11-16. It amends ADR 0030.
+Accepted, 2026-11-16. It amends ADR 0030. The second decision, on the
+caps of stores, tools and prompts, amends ADRs 0010, 0013, 0031 and 0037.
 
 ## Context
 
@@ -67,6 +68,64 @@ its own output.
   15-minute bound of its model-turn activity. That is an engine matter.
 - The pass wrapper is a workaround. Remove it when the engine takes the
   cap as a setting, and map `pass_tokens` to that setting.
-- The Claude model sends a fixed cap of 16 000 tokens when a request names
-  none, because the Messages API needs one. A later change asks the API
-  for the cap of the model instead.
+
+## Second decision: the caps of stores, tools and prompts
+
+A sweep found more invented bounds. Each one dropped or refused work, or
+hid part of what the owner or the model read:
+
+- The Claude model sent a cap of 16 000 tokens when a request named none,
+  and a council vote sent 300. A model that reasons can spend that on its
+  reasoning before it answers.
+- The plans store refused a title over 200 characters and a text over
+  4000, and kept only the newest 50 notes of a goal or an idea. A wake
+  refused a text over 2000 characters.
+- `[refine] messages` refused a count over 500, and the evidence was cut
+  to 64 KiB and to 500 characters a tool part.
+- An `api_get` answer and an MCP result were cut at 20 000 characters, and
+  a mail at 20 000 with no way to read on.
+- A web search took at most 10 results, a Google list 25, a grep 200
+  matches with each line cut at 300 characters, and the run log 50 rows
+  with each error cut at 500 characters.
+- A reflection listed 40 facts at 240 characters each, and the reviewer
+  of ADR 0037 read only the last six messages of the owner.
+- The web card and `lg approvals` showed 1500 characters of the code that
+  the owner approved.
+
+So:
+
+- **Where an API needs a number, it gets the API's own maximum.** A
+  Claude request that names no cap asks for the most output of the
+  model: 128 000 tokens on a current model, less on the models before the
+  4.6 line. A search asks for up to 20 results, the Brave maximum, a
+  Gmail search up to 500 and a Calendar list up to 2500.
+- **A council vote has no output cap.**
+- **A store refuses only empty text.** No length bound, and every note
+  stays.
+- **A setting refuses only a value that cannot work.** `[refine]
+  messages` refuses 0.
+- **A result that a tool can read again comes in pages.** A mail reads on
+  from an `offset`, as `read_file` and `web_fetch` do. An `api_get` answer
+  and an MCP result come whole: a second call could repeat what the call
+  did. `[api] max_chars` is unset by default, and an owner who wants a
+  bound sets one.
+- **A prompt gets its input whole.** The reflection lists every fact, the
+  refine evidence holds each message whole, and the reviewer reads every
+  message of the owner in the conversation.
+- **The owner sees the whole call.** The web card and `lg approvals` show
+  all of it. Only a Discord or Slack notice cuts the code, because those
+  services split a long message and a split breaks the code frame. The
+  notice then names the places that show all of it.
+
+The bounds against a runaway loop stay: open ideas, proposed and active
+goals, skill drafts, pending wakes, the chain of wakes and how far ahead
+a wake may be. So do the limits of outside services and of security,
+such as the size of a Discord message, the length of a tool name, a body
+of 2 MiB from a fetch, and the size of a compiled pattern.
+
+### Consequences
+
+- A long result, mail or prompt costs input tokens, and a long call
+  costs output tokens, as the model chooses.
+- A Claude request without streaming can now run long. The HTTP client
+  has no read timeout, and the engine bounds the model call.

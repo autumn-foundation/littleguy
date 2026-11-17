@@ -43,8 +43,9 @@ pub const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 pub const API_VERSION: &str = "2026-10-21";
 /// The beta that turns on the server-side refusal fallback.
 pub const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
-/// The output cap of one turn when the task sets none.
-pub const DEFAULT_MAX_TOKENS: u32 = 16_000;
+/// The most output of one turn on a current model. The API needs a number,
+/// so a turn that sets none asks for the model's own maximum.
+pub const MAX_OUTPUT_TOKENS: u32 = 128_000;
 /// The effort of the default model.
 pub const EFFORT: &str = "high";
 pub use crate::http::{MAX_BODY_BYTES, SseFrames, error_kind};
@@ -216,6 +217,25 @@ impl AgentModel for ClaudeModel {
     fn model_id(&self) -> Option<&str> {
         Some(&self.id)
     }
+}
+
+/// The most output that `model` takes in one turn. The models before the
+/// 4.6 line take less than [`MAX_OUTPUT_TOKENS`], and the API refuses a
+/// request for more.
+#[must_use]
+pub fn output_cap(model: &str) -> u32 {
+    const OLDER: [(&str, u32); 6] = [
+        ("claude-opus-4-0", 32_000),
+        ("claude-opus-4-1", 32_000),
+        ("claude-opus-4-5", 64_000),
+        ("claude-sonnet-4-0", 64_000),
+        ("claude-sonnet-4-5", 64_000),
+        ("claude-haiku-4-5", 64_000),
+    ];
+    OLDER
+        .iter()
+        .find(|(prefix, _)| model.starts_with(prefix))
+        .map_or(MAX_OUTPUT_TOKENS, |(_, cap)| *cap)
 }
 
 /// The streamed form of `body`: `"stream": true`, and eager input streaming
@@ -608,7 +628,7 @@ pub fn request_body(
     // `cache_control` caches the growing transcript.
     let mut body = json!({
         "model": model,
-        "max_tokens": request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        "max_tokens": request.max_tokens.unwrap_or_else(|| output_cap(model)),
         "messages": messages,
         "cache_control": {"type": "ephemeral"},
     });
@@ -728,10 +748,24 @@ mod tests {
     }
 
     #[test]
+    fn a_request_with_no_cap_asks_for_the_most_that_the_model_takes() {
+        assert_eq!(output_cap(DEFAULT_MODEL), MAX_OUTPUT_TOKENS);
+        assert_eq!(output_cap("claude-sonnet-5-5"), MAX_OUTPUT_TOKENS);
+        assert_eq!(output_cap("claude-haiku-4-5"), 64_000);
+        assert_eq!(output_cap("claude-opus-4-1-20250805"), 32_000);
+        let body = request_body(&request(), "claude-haiku-4-5", |_, _| None);
+        assert_eq!(body["max_tokens"], 64_000);
+        let mut capped = request();
+        capped.max_tokens = Some(512);
+        let body = request_body(&capped, DEFAULT_MODEL, |_, _| None);
+        assert_eq!(body["max_tokens"], 512);
+    }
+
+    #[test]
     fn the_request_body_maps_roles_tools_and_settings() {
         let body = request_body(&request(), DEFAULT_MODEL, |_, _| None);
         assert_eq!(body["model"], DEFAULT_MODEL);
-        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(body["max_tokens"], MAX_OUTPUT_TOKENS);
         assert_eq!(body["system"], "You are a researcher.");
         assert_eq!(body["output_config"]["effort"], "high");
         assert_eq!(body["fallbacks"], "default");

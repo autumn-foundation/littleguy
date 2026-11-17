@@ -83,7 +83,8 @@ flowchart LR
 - The tool list is fixed when the daemon starts. A connection made later
   works at once, because each call looks up the connection. With no
   connection, a call fails and tells the owner to run `lg connect`.
-- Mail text is cut at 20,000 characters, and a search returns at most 25
-  mails, so one mail cannot fill the context.
+- Mail text comes in pages of 20,000 characters, and `offset` reads on. A
+  search returns up to 500 mails, the Gmail maximum (ADR 0034 replaced a
+  cut at 20,000 and a bound of 25).
 - HTML mail reaches the model as text, through the same converter as web
   fetch.

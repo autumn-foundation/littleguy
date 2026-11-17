@@ -53,7 +53,7 @@ fn github() -> Vec<ApiIntegration> {
 
 fn tools_on(fake: &Arc<Fake>, max_chars: usize) -> (Arc<dyn Tool>, Arc<dyn Tool>) {
     let api: Arc<dyn ProviderApi> = Arc::clone(fake) as Arc<dyn ProviderApi>;
-    let mut tools = api_tools(&api, &github(), max_chars).into_iter();
+    let mut tools = api_tools(&api, &github(), Some(max_chars)).into_iter();
     (tools.next().unwrap(), tools.next().unwrap())
 }
 
@@ -89,7 +89,7 @@ fn a_read_is_untrusted_and_private_and_a_send_is_external() {
 #[test]
 fn no_integration_gives_no_tool() {
     let api: Arc<dyn ProviderApi> = Fake::new(200, "text/plain", b"");
-    assert!(api_tools(&api, &[], 100).is_empty());
+    assert!(api_tools(&api, &[], None).is_empty());
 }
 
 #[tokio::test]

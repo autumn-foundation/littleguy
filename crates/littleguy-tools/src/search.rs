@@ -14,8 +14,8 @@ use crate::{refuse, text_field, tls};
 /// The web search endpoint of the Brave Search API.
 pub const BRAVE_ENDPOINT: &str = "https://api.search.brave.com/res/v1/web/search";
 
-/// The most results of one search.
-const MAX_COUNT: u64 = 10;
+/// The most results of one search: the API's own maximum.
+const MAX_COUNT: u64 = 20;
 
 /// The results of one search when the model names no count.
 const DEFAULT_COUNT: u64 = 5;

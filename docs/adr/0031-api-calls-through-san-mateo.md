@@ -47,7 +47,7 @@ write the catalog can send a token to any host.
   ```toml
   [api]
   integrations = ["github", "notion"]   # the default is every [[san_mateo.integration]]
-  max_chars = 20000                     # the most characters of one answer
+  # max_chars = 20000                   # cut each answer here; unset, it comes whole
   ```
 
   Each name must be a `[[san_mateo.integration]]`. The tool descriptions
@@ -64,7 +64,8 @@ write the catalog can send a token to any host.
 - **An answer comes back whole, with its status.** A non-2xx status is an
   answer, not an error, so the model can learn the API from it. The body
   is JSON when it parses, text when it does not, and a byte count when it
-  is not text. A long body is cut at `max_chars`, and `cut` says so. A few
+  is not text. When the owner sets `max_chars`, a long body is cut there,
+  and `cut` says so. Unset, the body comes whole (ADR 0034). A few
   headers come back for paging and rate limits: `Link`, `Location`,
   `Retry-After` and the `X-RateLimit-*` headers.
 

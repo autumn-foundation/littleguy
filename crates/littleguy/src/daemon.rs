@@ -4593,11 +4593,8 @@ mod tests {
         assert!(text.contains(&format!("({}) and marked them", pass.episode_ids[0])));
         // The next op reads the block again, so it already holds the fact.
         let recall = daemon.handle_request(UID, request("r-2", "recall")).await;
-        assert!(
-            reply_text(&recall).contains(&pass.facts[0]),
-            "{}",
-            reply_text(&recall)
-        );
+        // The assertion prints no reply, so a failure logs no conversation.
+        assert!(reply_text(&recall).contains(&pass.facts[0]));
     }
 
     #[cfg(feature = "reflection")]

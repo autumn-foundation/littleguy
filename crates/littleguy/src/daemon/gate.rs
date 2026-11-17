@@ -252,11 +252,6 @@ impl Daemon {
         Ok(Some(claim.record))
     }
 
-    /// The open records, for `lg approvals`.
-    pub(super) fn approval_list(&self) -> Result<Response> {
-        approval_list(self.approvals.as_deref())
-    }
-
     /// Sends `choice` on request `id` to the run. Returns the record, or
     /// the text for the person when the request does not wait.
     ///

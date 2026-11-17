@@ -113,6 +113,22 @@ impl View {
                     Err(error) => Err(error),
                 }
             }
+            #[cfg(feature = "history")]
+            Request::Conversations => {
+                super::history::listing(&self.config, &self.db, &self.assistant)
+            }
+            #[cfg(feature = "history")]
+            Request::Conversation { id } => {
+                super::history::conversation(&self.db, &self.assistant, *id)
+            }
+            #[cfg(not(feature = "history"))]
+            Request::Conversations => Ok(Response::Off {
+                message: crate::features::missing("past conversations", "history"),
+            }),
+            #[cfg(not(feature = "history"))]
+            Request::Conversation { .. } => Ok(Response::Error {
+                message: crate::features::missing("past conversations", "history"),
+            }),
             Request::Approvals => super::gate::approval_list(self.approvals.as_deref()),
             Request::Notes => super::notes_listing(&self.config, self.stores.as_deref()),
             #[cfg(feature = "plans")]

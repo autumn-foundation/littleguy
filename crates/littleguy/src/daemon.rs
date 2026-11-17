@@ -864,7 +864,6 @@ impl Daemon {
                     message: String::from("only the owner of the daemon may do that"),
                 })
             }
-            Request::Approvals => self.approval_list(),
             Request::Approve { id } => {
                 self.decide_and_resume(id, crate::approvals::Choice::Approve)
                     .await
@@ -885,16 +884,21 @@ impl Daemon {
                 },
             )),
             Request::History => self.history().await,
+            // The same reads as beside the loop (ADR 0038).
+            request @ (Request::Approvals
+            | Request::Notes
+            | Request::Plans
+            | Request::Conversations
+            | Request::Conversation { .. }) => {
+                self.view().answer(&request).await.unwrap_or_else(|| {
+                    Ok(Response::Error {
+                        message: String::from("this read cannot be answered"),
+                    })
+                })
+            }
             Request::NewConversation => self.new_conversation().await,
             Request::Workspace => self.workspace_files().await,
             Request::WorkspaceFile { path } => self.workspace_file(path).await,
-            #[cfg(feature = "plans")]
-            Request::Plans => self.plans(),
-            Request::Notes => self.notes_listing(),
-            #[cfg(not(feature = "plans"))]
-            Request::Plans => Ok(Response::Off {
-                message: crate::features::missing("goals and ideas", "plans"),
-            }),
             request @ (Request::Skills
             | Request::AcceptSkill { .. }
             | Request::DeclineSkill { .. }
@@ -1463,15 +1467,6 @@ impl Daemon {
             .get_or_insert_with(|| Wake::idle(brief_armed))
             .set_followup(next, now);
         Ok(())
-    }
-
-    /// The notes of the assistant, for the owner (ADR 0029).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the store fails.
-    fn notes_listing(&self) -> Result<Response> {
-        notes_listing(&self.kit.config, self.kit.stores.as_deref())
     }
 
     /// A build without skills: the listing is off, and an action fails.
@@ -2385,6 +2380,8 @@ mod council;
 #[cfg(feature = "discord")]
 mod discord;
 mod gate;
+#[cfg(feature = "history")]
+mod history;
 pub mod live;
 pub use reads::Reads;
 #[cfg(feature = "plans")]
@@ -2521,6 +2518,71 @@ mod tests {
         assert_eq!(
             daemon.reads().answer(UID, &request("m-9", "hi")).await,
             None
+        );
+    }
+
+    #[cfg(feature = "history")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_conversation_leaves_the_old_one_to_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(&dir.path().join("lg.db"), Arc::new(OfflineModel::new()));
+        let empty = daemon.handle_request(UID, Request::Conversations).await;
+        assert!(
+            matches!(&empty, Response::Conversations { entries, keep_days: 30, partial: false } if entries.is_empty()),
+            "an empty history lists no conversation"
+        );
+        daemon
+            .handle_request(UID, request("cli-1-1", "hello"))
+            .await;
+        daemon.handle_request(UID, request("cli-2-1", "tea")).await;
+        daemon.handle_request(UID, Request::NewConversation).await;
+        daemon
+            .handle_request(UID, request("cli-3-1", "again"))
+            .await;
+
+        let Response::Conversations { entries, .. } =
+            daemon.handle_request(UID, Request::Conversations).await
+        else {
+            panic!("a listing");
+        };
+        let shape: Vec<(i64, &str, bool)> = entries
+            .iter()
+            .map(|entry| (entry.turns, entry.first_text.as_str(), entry.live))
+            .collect();
+        assert_eq!(shape, [(1, "again", true), (2, "hello", false)]);
+
+        let old = entries[1].id;
+        let Response::Conversation { turns, .. } = daemon
+            .handle_request(UID, Request::Conversation { id: old })
+            .await
+        else {
+            panic!("a conversation");
+        };
+        let said: Vec<(Speaker, &str)> = turns
+            .iter()
+            .map(|turn| (turn.from, turn.text.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (Speaker::Person, "hello"),
+                (Speaker::Assistant, "littleguy (offline): you said 'hello'"),
+                (Speaker::Person, "tea"),
+                (Speaker::Assistant, "littleguy (offline): you said 'tea'"),
+            ]
+        );
+        // The reads answer the same beside the loop.
+        daemon.publish();
+        let beside = daemon
+            .reads()
+            .answer(UID, &Request::Conversation { id: old })
+            .await;
+        assert_eq!(beside, Some(Response::Conversation { id: old, turns }));
+        // Only the owner reads it.
+        let stranger = daemon.handle_request(UID + 1, Request::Conversations).await;
+        assert!(
+            matches!(stranger, Response::Error { .. }),
+            "a stranger cannot read the history"
         );
     }
 

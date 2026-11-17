@@ -1289,5 +1289,62 @@ async fn the_pages_open_while_the_assistant_thinks() {
     }
     gate.notify_one();
     let answer = chat.await.unwrap().unwrap();
-    assert!(matches!(answer, Response::Reply { .. }), "{answer:?}");
+    assert!(
+        matches!(answer, Response::Reply { .. }),
+        "the chat answers once the gate opens"
+    );
+}
+
+#[cfg(feature = "history")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_history_lists_past_conversations_and_opens_one_read_only() {
+    let rig = rig(&config(false)).await;
+    sign_in(&rig).await;
+    let empty = rig.client.get("/history").send().await;
+    empty.assert_status(200);
+    empty.assert_body_contains("for 30 days ([runs] keep_days)");
+    empty.assert_body_contains("No conversation yet.");
+
+    for (id, text) in [("cli-1-1", "green tea"), ("cli-2-1", "oolong")] {
+        rig.handle
+            .ask(Request::Chat {
+                message_id: String::from(id),
+                text: String::from(text),
+            })
+            .await
+            .unwrap();
+    }
+    rig.handle.ask(Request::NewConversation).await.unwrap();
+    rig.handle
+        .ask(Request::Chat {
+            message_id: String::from("cli-3-1"),
+            text: String::from("coffee"),
+        })
+        .await
+        .unwrap();
+
+    let listing = rig.client.get("/history").send().await;
+    listing.assert_status(200);
+    assert_eq!(listing.selector_count("ul.conversations li"), 2);
+    let links: Vec<String> = listing
+        .selector_attr("ul.conversations a", "href")
+        .into_iter()
+        .flatten()
+        .collect();
+    // The live conversation goes to the chat. The old one opens here.
+    assert_eq!(links[0], "/");
+    assert!(
+        links[1].starts_with("/history/"),
+        "an old conversation opens on its own page"
+    );
+    listing.assert_body_contains("green tea");
+
+    let old = rig.client.get(&links[1]).send().await;
+    old.assert_status(200);
+    old.assert_body_contains("you said 'oolong'");
+    assert_eq!(old.selector_count("#thread .msg.you"), 2);
+    assert_eq!(old.selector_count("#composer"), 0, "read only");
+
+    let missing = rig.client.get("/history/99999").send().await;
+    missing.assert_body_contains("no past conversation has the id 99999");
 }

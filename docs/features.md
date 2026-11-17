@@ -54,6 +54,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `google` | no | `[google]`: the Gmail and Google Calendar tools. Needs `oauth`. | `axum`, `base64`, `san-mateo`, `san-mateo-sqlite` |
 | `grep-files` | yes | `grep_files`: the assistant finds the lines of its workspace that match a pattern. | `regex` |
 | `heartbeat` | yes | `[heartbeat]`: the assistant wakes on its own every so often. Its precheck skips a tick with no model call when no goal is due and no idea waits. | none |
+| `history` | yes | `lg history` and the History page: the past conversations of the web and the CLI, read from the runtime database (ADR 0039). | none |
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `notes` | yes | `write_note` and the other note tools: notes in memory.db that a tick can write too (ADR 0029). | none |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
@@ -89,6 +90,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 |---|---|---|---|
 | `council` | no | What the council of the owner decided (`council`, ADR 0027). | none |
 | `followups` | no | The wakes that the assistant books (`wakes`). | none |
+| `history` | no | The past conversations of the assistant, read from the runtime database (`conversations`, ADR 0039). | none |
 | `notes` | no | The notes of the assistant (`notes`, ADR 0029). | none |
 | `plans` | no | The goals and ideas of the assistant (`plans`). | none |
 | `self-debug` | no | The run log and the tick log that the assistant reads to debug itself (`runlog`, `tick_log`). | none |

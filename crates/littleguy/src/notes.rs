@@ -25,6 +25,50 @@ fn text<'a>(input: &'a Value, name: &str) -> Result<&'a str, AgentError> {
         .ok_or_else(|| refuse(format!("`{name}` must be text")))
 }
 
+/// Adds when a note last changed, as the store stamped it, to `entry`.
+/// `updated_ms` is exact for code. `updated` is RFC 3339, so a model reads
+/// a date and not an epoch count. A stale note then looks stale before a
+/// re-read.
+fn stamped(mut entry: Value, updated_ms: i64) -> Value {
+    entry["updated_ms"] = json!(updated_ms);
+    entry["updated"] = chrono::DateTime::<Utc>::from_timestamp_millis(updated_ms)
+        .map_or(Value::Null, |at| {
+            json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        });
+    entry
+}
+
+/// The reply of `list_notes`: every note, or the notes that match a query.
+fn list_notes(stores: &SqliteStores, input: &Value) -> Result<Value, AgentError> {
+    let notes = stores.notes()?;
+    let Some(query) = input["query"].as_str().filter(|q| !q.trim().is_empty()) else {
+        let all = notes.iter().map(|note| {
+            let entry = json!({"note": note.name, "chars": note.text.chars().count()});
+            stamped(entry, note.updated_ms)
+        });
+        return Ok(json!({"notes": all.collect::<Vec<_>>()}));
+    };
+    let docs = notes
+        .iter()
+        .map(|note| (note.name.as_str(), note.text.as_str()));
+    let (hits, more) = littleguy_tools::rank(docs, query, littleguy_tools::limit_of(input))?;
+    let matches = hits.iter().map(|hit| {
+        let entry = json!({
+            "note": hit.name,
+            "matched": hit.matched,
+            "of": hit.of,
+            "snippet": hit.snippet,
+        });
+        // The ranker drops the row, so the hit finds it again by name.
+        // Names are unique in the store, so the first match is the row.
+        match notes.iter().find(|note| note.name == hit.name) {
+            Some(note) => stamped(entry, note.updated_ms),
+            None => entry,
+        }
+    });
+    Ok(json!({"query": query, "more": more, "matches": matches.collect::<Vec<_>>()}))
+}
+
 fn name_schema(extra: Option<(&str, &str)>) -> Value {
     let mut properties = json!({
         "name": {"type": "string", "description": "A short name, such as ui-punchlist."}
@@ -65,7 +109,7 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
         .shared(),
         FnTool::new(
             "read_note",
-            "Read one of your notes by its name.",
+            "Read one of your notes by its name, with when it last changed.",
             name_schema(None),
             move |input| {
                 let stores = Arc::clone(&read);
@@ -74,7 +118,10 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
                     let note = stores
                         .note(name)?
                         .ok_or_else(|| refuse(format!("there is no note named `{name}`")))?;
-                    Ok(json!({"note": note.name, "text": note.text}))
+                    Ok(stamped(
+                        json!({"note": note.name, "text": note.text}),
+                        note.updated_ms,
+                    ))
                 }
             },
         )
@@ -83,7 +130,7 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
         .shared(),
         FnTool::new(
             "list_notes",
-            "List your notes with their sizes. With a query, list only the notes that hold its \
+            "List your notes with their sizes and when each last changed. With a query, list only the notes that hold its \
              words, the best first, each with a snippet, when you half remember a note.",
             json!({
                 "type": "object",
@@ -95,27 +142,7 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
             move |input| {
                 let stores = Arc::clone(&list);
                 async move {
-                    let notes = stores.notes()?;
-                    let Some(query) = input["query"].as_str().filter(|q| !q.trim().is_empty())
-                    else {
-                        return Ok(json!({"notes": notes.iter().map(|note| json!({
-                            "note": note.name,
-                            "chars": note.text.chars().count(),
-                        })).collect::<Vec<_>>()}));
-                    };
-                    let docs = notes.iter().map(|note| (note.name.as_str(), note.text.as_str()));
-                    let (hits, more) =
-                        littleguy_tools::rank(docs, query, littleguy_tools::limit_of(&input))?;
-                    Ok(json!({
-                        "query": query,
-                        "more": more,
-                        "matches": hits.iter().map(|hit| json!({
-                            "note": hit.name,
-                            "matched": hit.matched,
-                            "of": hit.of,
-                            "snippet": hit.snippet,
-                        })).collect::<Vec<_>>(),
-                    }))
+                    list_notes(&stores, &input)
                 }
             },
         )
@@ -212,5 +239,69 @@ mod tests {
                     .any(|l| l == labels::UNTRUSTED_INPUT)
             );
         }
+    }
+
+    /// `read_note` and both forms of `list_notes` name when a note last
+    /// changed, so a stale note does not read like a fresh one.
+    #[tokio::test]
+    async fn each_read_of_a_note_names_when_it_last_changed() {
+        let stores = Arc::new(SqliteStores::open_in_memory().unwrap());
+        // 2025-11-16T12:00:00Z and 2025-01-02T03:04:05Z.
+        let fresh = 1_763_294_400_000_i64;
+        let stale = 1_735_787_045_000_i64;
+        stores
+            .write_note("drinks", "Mark likes green tea.", fresh)
+            .unwrap();
+        stores
+            .write_note("todo", "Fix the docs links.", stale)
+            .unwrap();
+        let tools = tools(&stores);
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name() == name)
+                .unwrap()
+                .clone()
+        };
+        let ctx = autumn_harvest_agent::ToolContext {
+            run_id: autumn_harvest_agent::RunId::new("r"),
+            call_id: String::from("c"),
+            session_id: None,
+            step: 0,
+            workspace: None,
+        };
+
+        let read = tool("read_note")
+            .execute(json!({"name": "todo"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(read["updated_ms"], stale);
+        assert_eq!(read["updated"], "2025-01-02T03:04:05Z");
+
+        let all = tool("list_notes").execute(json!({}), &ctx).await.unwrap();
+        let all = all["notes"].as_array().unwrap();
+        assert_eq!(all[0]["note"], "drinks");
+        assert_eq!(all[0]["updated_ms"], fresh);
+        assert_eq!(all[0]["updated"], "2025-11-16T12:00:00Z");
+        assert_eq!(all[1]["note"], "todo");
+        assert_eq!(all[1]["updated_ms"], stale);
+
+        let found = tool("list_notes")
+            .execute(json!({"query": "docs links"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(found["matches"][0]["note"], "todo");
+        assert_eq!(found["matches"][0]["updated_ms"], stale);
+        assert_eq!(found["matches"][0]["updated"], "2025-01-02T03:04:05Z");
+
+        // A rewrite moves the stamp forward.
+        stores
+            .write_note("todo", "The docs links are fixed.", fresh)
+            .unwrap();
+        let read = tool("read_note")
+            .execute(json!({"name": "todo"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(read["updated_ms"], fresh);
     }
 }

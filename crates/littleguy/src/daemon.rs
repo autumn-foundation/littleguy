@@ -4536,6 +4536,93 @@ mod tests {
         assert_eq!(facts.len(), 1, "the pass wrote its fact: {facts:?}");
     }
 
+    /// Fire the nightly schedule now, as 03:00 would, and read the pass
+    /// that it ran.
+    #[cfg(feature = "reflection")]
+    async fn run_one_pass(daemon: &mut Daemon) -> crate::reflection::Pass {
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        let filter = autumn_harvest_sqlite::ExecutionFilter {
+            workflow_name: Some(String::from(
+                autumn_harvest_agent::consolidate::CONSOLIDATE_WORKFLOW_NAME,
+            )),
+            ..autumn_harvest_sqlite::ExecutionFilter::default()
+        };
+        let listed = daemon.rt.list_executions(&filter).unwrap().executions;
+        let autumn_harvest_sqlite::Stored::Value(id) = &listed[0].exec_id else {
+            panic!("no pass id");
+        };
+        crate::reflection::read_pass(&daemon.rt, id).unwrap()
+    }
+
+    #[cfg(feature = "reflection")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_pass_names_its_instance_and_the_episodes_that_it_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        let before = Utc::now();
+        let pass = run_one_pass(&mut daemon).await;
+        assert_eq!(pass.stop, "completed");
+        assert!(pass.marked);
+        assert_eq!(pass.episodes, 1);
+        assert_eq!(pass.episode_ids.len(), 1, "{pass:?}");
+        // The fact cites the episode that the pass read.
+        assert!(pass.facts[0].contains(&pass.episode_ids[0]), "{pass:?}");
+        assert_ne!(pass.exec, "");
+        let started = pass.started.expect("a start time");
+        assert!(started >= before - chrono::Duration::seconds(1));
+        let text = crate::reflection::prompt(std::slice::from_ref(&pass)).unwrap();
+        assert!(text.contains(&format!("- pass {}, started ", pass.exec)));
+        assert!(text.contains(&format!("({}) and marked them", pass.episode_ids[0])));
+        // The next op reads the block again, so it already holds the fact.
+        let recall = daemon.handle_request(UID, request("r-2", "recall")).await;
+        // The assertion prints no reply, so a failure logs no conversation.
+        assert!(reply_text(&recall).contains(&pass.facts[0]));
+    }
+
+    #[cfg(feature = "reflection")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_that_ended_without_a_mark_reads_the_same_episodes_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(BadPassModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        let first = run_one_pass(&mut daemon).await;
+        assert_eq!(first.stop, "invalid_reply");
+        assert!(!first.marked);
+        assert_eq!(first.facts, Vec::<String>::new());
+        assert_eq!(first.episode_ids.len(), 1, "{first:?}");
+        // The episode stays pending, so a second pass reads the same id.
+        let second = run_one_pass(&mut daemon).await;
+        assert_ne!(second.exec, first.exec, "another pass instance");
+        assert_eq!(second.episode_ids, first.episode_ids);
+    }
+
     #[cfg(all(feature = "reflection", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_consolidation_pass_wakes_one_reflection_then_the_timer_stops() {

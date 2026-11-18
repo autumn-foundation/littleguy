@@ -323,6 +323,14 @@ accept it on the **Goals** tab of the Workspace page, as a refine overlay does n
 you activate it. An accepted goal can ask for a check every so often, and
 littleguy notes its progress and marks it done.
 
+When its research answers an idea that needs no goal, littleguy concludes
+it with `conclude_idea` and a note that says the answer. The idea leaves
+the open list, so a tick no longer reads it again, and a heartbeat with
+only answered ideas costs no model call. It waits under **Answered** on the
+**Ideas** tab, where you reopen or drop it.
+[ADR 0041](docs/adr/0041-an-answered-idea-leaves-the-open-list.md) explains
+the design.
+
 littleguy can also book a **wake** with `wake_me`: "look at the deploy
 again in 20 minutes". At that time it wakes on its own, read-only, looks,
 and tells you only what you should know. It can book at most 10 wakes in a
@@ -333,7 +341,7 @@ it went: the tools it called and the start of its answer;
 explains the design. Booked wakes come with the `followups` feature, which
 is on by default.
 
-littleguy cannot accept, decline or drop anything; only you can. Every
+littleguy cannot accept, decline, drop or reopen anything; only you can. Every
 tool it has works on a run with no one present, so a later heartbeat can
 research ideas and check goals on its own. [ADR 0020](docs/adr/0020-goals-and-ideas.md)
 explains the design.
@@ -423,7 +431,7 @@ deliver = "web"                 # where news goes: the web chat, for now
 ```
 
 A tick runs with no one present. Its own bookkeeping persists: it can
-file ideas, add notes to them, propose goals and book wakes. The
+file ideas, add notes to them, conclude them, propose goals and book wakes. The
 workspace is read-only on a tick: `write_file` and `delete_file` are
 refused there with "this run may only read data", rather than answering
 success for a change that the engine would not keep. It cannot act

@@ -676,15 +676,22 @@ fn goal_doc(goal: &crate::protocol::GoalEntry) -> Markup {
     }
 }
 
-/// One idea, as a document.
-fn idea_doc(idea: &crate::protocol::IdeaEntry) -> Markup {
+/// One idea, as a document. littleguy concludes an idea that its research
+/// answered; the owner reopens it when they disagree (ADR 0041).
+fn idea_doc(idea: &crate::protocol::IdeaEntry, answered: bool) -> Markup {
     html! {
         article.doc {
             header {
                 h2 { span.id { "#" (idea.id) } " " (idea.title) }
-                div.actions { (decide_button("drop-idea", idea.id, "Drop")) }
+                div.actions {
+                    @if answered { (decide_button("reopen-idea", idea.id, "Reopen")) }
+                    (decide_button("drop-idea", idea.id, "Drop"))
+                }
             }
-            p.meta { "filed " (when(idea.created_ms)) }
+            p.meta {
+                @if answered { span.tag { "answered" } " · " }
+                "filed " (when(idea.created_ms))
+            }
             (markdown(&idea.body))
             (plan_notes("Research", &idea.notes))
         }
@@ -743,6 +750,26 @@ fn waiting_first(goals: &[crate::protocol::GoalEntry]) -> Vec<&crate::protocol::
     sorted
 }
 
+/// The links to `ideas` in the list of the ideas tab. The idea `open` is
+/// the current page.
+fn idea_list(tab: Tab, ideas: &[crate::protocol::IdeaEntry], open: Option<i64>) -> Markup {
+    html! {
+        ul {
+            @for idea in ideas {
+                @let url = tab.url(Some(idea.id));
+                li {
+                    a href=(url) aria-current=[(open == Some(idea.id)).then_some("page")]
+                        hx-get=(url) hx-select="#plan-view" hx-target="#plan-view"
+                        hx-swap="outerHTML" hx-push-url="true" {
+                        span.path { "#" (idea.id) " " (idea.title) }
+                        span.size { (idea.notes.len()) " notes" }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The goals or the ideas tab: the list, and the item `id`, or the first.
 /// `notice` goes on top of the open item.
 fn plans_view(tab: Tab, plans: &Answer, id: Option<i64>, notice: Option<Markup>) -> Markup {
@@ -780,31 +807,26 @@ fn plans_view(tab: Tab, plans: &Answer, id: Option<i64>, notice: Option<Markup>)
                         }
                     }
                 }
-                (Tab::Ideas, Answer::Plans { ideas, .. }) => {
-                    @let open = id.and_then(|id| ideas.iter().find(|i| i.id == id)).or_else(|| ideas.first());
+                (Tab::Ideas, Answer::Plans { ideas, answered, .. }) => {
+                    // The open ideas come first, then the ones littleguy answered.
+                    @let all = ideas.iter().map(|i| (i, false)).chain(answered.iter().map(|i| (i, true)));
+                    @let open = id.and_then(|id| all.clone().find(|(i, _)| i.id == id)).or_else(|| all.clone().next());
                     nav.files aria-label="Ideas" {
-                        @if ideas.is_empty() {
+                        @if ideas.is_empty() && answered.is_empty() {
                             p.note { "No ideas yet. littleguy files them from your chats and its own research." }
+                        } @else if ideas.is_empty() {
+                            p.note { "No open ideas." }
                         }
-                        ul {
-                            @for idea in ideas {
-                                @let current = open.is_some_and(|o| o.id == idea.id);
-                                @let url = tab.url(Some(idea.id));
-                                li {
-                                    a href=(url) aria-current=[current.then_some("page")]
-                                        hx-get=(url) hx-select="#plan-view" hx-target="#plan-view"
-                                        hx-swap="outerHTML" hx-push-url="true" {
-                                        span.path { "#" (idea.id) " " (idea.title) }
-                                        span.size { (idea.notes.len()) " notes" }
-                                    }
-                                }
-                            }
+                        (idea_list(tab, ideas, open.map(|(o, _)| o.id)))
+                        @if !answered.is_empty() {
+                            h3 { "Answered" }
+                            (idea_list(tab, answered, open.map(|(o, _)| o.id)))
                         }
                     }
                     section #file {
                         @if let Some(notice) = notice { (notice) }
                         @match open {
-                            Some(idea) => (idea_doc(idea)),
+                            Some((idea, answered)) => (idea_doc(idea, answered)),
                             None => p.note { "Nothing to open." },
                         }
                     }
@@ -835,6 +857,7 @@ async fn decide_plan(
         "decline" => (PlanDecision::Decline, Tab::Goals),
         "drop-goal" => (PlanDecision::DropGoal, Tab::Goals),
         "drop-idea" => (PlanDecision::DropIdea, Tab::Ideas),
+        "reopen-idea" => (PlanDecision::ReopenIdea, Tab::Ideas),
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
     let answer = ask(&web, Request::Decide { decision, id }).await;

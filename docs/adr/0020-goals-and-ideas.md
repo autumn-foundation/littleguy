@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-11-14.
+Accepted, 2026-11-14. ADR 0041 adds a sixth tool, `conclude_idea`, and
+the `answered` status of an idea.
 
 ## Context
 

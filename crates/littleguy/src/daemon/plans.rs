@@ -46,6 +46,7 @@ fn listing(plans: &Plans) -> Response {
     Response::Plans {
         goals: plans.goals.iter().map(goal).collect(),
         ideas: plans.ideas.iter().map(idea).collect(),
+        answered: plans.answered.iter().map(idea).collect(),
     }
 }
 
@@ -100,7 +101,8 @@ impl Daemon {
             ),
             PlanDecision::Decline => (stores.decline_goal(id)?, "a proposed goal"),
             PlanDecision::DropGoal => (stores.drop_goal(id)?, "an active goal"),
-            PlanDecision::DropIdea => (stores.drop_idea(id)?, "an open idea"),
+            PlanDecision::DropIdea => (stores.drop_idea(id)?, "an open or answered idea"),
+            PlanDecision::ReopenIdea => (stores.reopen_idea(id)?, "an answered idea"),
         };
         if !changed {
             return Ok(Response::Error {

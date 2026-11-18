@@ -271,6 +271,12 @@ impl Kit {
         });
         let approver = config.approvals.approver.clone();
         warn_unreachable(approver.as_ref(), &self.services);
+        // A reload refuses a section that this build leaves out, as the
+        // start does (ADR 0026).
+        #[cfg(not(feature = "compaction"))]
+        if config.compaction.is_some() {
+            anyhow::bail!(crate::features::missing("[compaction]", "compaction"));
+        }
         // A heartbeat tick asks first whether a goal is due or an idea waits.
         #[cfg(feature = "heartbeat")]
         let precheck = config.heartbeat.as_ref().map(|beat| Due {

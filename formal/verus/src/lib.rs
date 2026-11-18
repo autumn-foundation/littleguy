@@ -7,6 +7,7 @@
 use vstd::prelude::*;
 
 pub mod addr;
+pub mod compaction;
 pub mod house_keys;
 pub mod pairing;
 pub mod patch_path;

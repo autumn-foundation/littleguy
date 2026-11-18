@@ -3689,9 +3689,11 @@ dependencies = [
 name = "littleguy-core"
 version = "0.1.0"
 dependencies = [
+ "autumn-harvest",
  "autumn-harvest-agent",
  "proptest",
  "serde",
+ "serde_json",
  "thiserror",
  "toml 0.9.12+spec-1.1.0",
  "url",

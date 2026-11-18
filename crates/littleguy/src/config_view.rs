@@ -121,7 +121,12 @@ pub fn summary(config: &Config, boot: &Boot) -> Value {
             "id": boot.id.as_str(),
         },
         "build": {"version": VERSION, "features": features, "left_out_of_build": left_out},
-        "agent": {"window": config.window, "max_steps": config.max_steps},
+        "agent": {
+            "window": config.window,
+            "max_steps": config.max_steps,
+            // null is the engine cap.
+            "max_request_bytes": config.max_request_bytes,
+        },
         "tools": {
             "web_fetch": config.tools.web_fetch,
             "web_search": config.tools.web_search,
@@ -152,6 +157,12 @@ pub fn summary(config: &Config, boot: &Boot) -> Value {
             "schedule": brief.schedule,
             "timezone": brief.timezone,
             "sends_to_a_chat": brief.to.is_some(),
+        })),
+        // A null max_resets is no bound.
+        "compaction": config.compaction.map(|section| json!({
+            "at_percent": section.at_percent,
+            "max_resets": section.max_resets,
+            "notes_bytes": section.notes_bytes,
         })),
         "refine": config.refine.as_ref().map(|refine| json!({"messages": refine.messages})),
         "skills": {
@@ -288,6 +299,8 @@ mod tests {
             "owner = \"mark\"\nsystem = \"Private prompt text.\"\n\
              [discord]\nallowed = [\"123456789012345678\"]\n\
              [approvals]\napprover = \"876543210987654321\"\n\
+             max_request_bytes = 600000\n\
+             [compaction]\nmax_resets = 4\n\
              [heartbeat]\nevery_minutes = 45\nquiet = \"22:00-08:00\"\n\
              [hooks]\ntoken_env = \"LG_TEST_HOOK_TOKEN_NAME\"\n\
              [[mcp.server]]\nid = \"docs\"\nurl = \"{SECRET_URL}\"\n\
@@ -320,6 +333,10 @@ mod tests {
         assert_eq!(value["mcp_servers"][0]["transport"], "http");
         assert_eq!(value["camel_routes"][0], "inbox");
         assert_eq!(value["hooks"]["token_set"], false);
+        assert_eq!(value["agent"]["max_request_bytes"], 600_000);
+        assert_eq!(value["compaction"]["at_percent"], 80);
+        assert_eq!(value["compaction"]["max_resets"], 4);
+        assert_eq!(value["compaction"]["notes_bytes"], 8_192);
     }
 
     #[test]
@@ -328,6 +345,8 @@ mod tests {
         let value = summary(&plain, &boot());
         assert_eq!(value["heartbeat"], Value::Null, "no [heartbeat] section");
         assert_eq!(value["refine"], Value::Null);
+        assert_eq!(value["compaction"], Value::Null, "no [compaction] section");
+        assert_eq!(value["agent"]["max_request_bytes"], Value::Null);
         assert_eq!(value["skills"]["off_without_refine"], true);
         let off = Config::parse("owner = \"mark\"\n[tools]\nfiles = false").unwrap();
         assert_eq!(summary(&off, &boot())["tools"]["files"], false);

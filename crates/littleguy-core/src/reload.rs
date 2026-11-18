@@ -74,7 +74,7 @@ pub fn merge(current: &Config, mut next: Config) -> Merge {
         };
     }
     keep!(owner);
-    profile!(system, window, max_steps);
+    profile!(system, window, max_steps, max_request_bytes, compaction);
     live!(discord, slack, camel);
     keep!(san_mateo, google);
     live!(memory, brief, heartbeat, skills);
@@ -132,6 +132,19 @@ mod tests {
         // The restart sections keep the running values.
         assert_eq!(merge.config.ui, current.ui);
         assert_eq!(merge.config.hooks, current.hooks);
+    }
+
+    #[test]
+    fn compaction_and_the_request_cap_apply_from_the_next_message() {
+        let merge = merge(
+            &parse(""),
+            parse("max_request_bytes = 600000\n[compaction]\nat_percent = 70"),
+        );
+        assert_eq!(merge.profile, ["max_request_bytes", "compaction"]);
+        assert_eq!(merge.applied, [] as [&str; 0]);
+        assert_eq!(merge.restart, [] as [&str; 0]);
+        assert_eq!(merge.config.max_request_bytes, Some(600_000));
+        assert_eq!(merge.config.compaction.map(|c| c.at_percent), Some(70));
     }
 
     #[test]

@@ -180,7 +180,8 @@ const fn chat_config(config: &Config, service: Service) -> &littleguy_core::Chat
 /// answer of each heartbeat tick to the owner. The daemon arms each tick.
 /// `tools` gives the assistant its tools, and a workspace when the file
 /// tools are on. `guard` adds the `run_code` tool, the flow rules and the
-/// approval gate.
+/// approval gate. With `[compaction]`, the assistant saves progress notes
+/// near the request cap, and the engine resets its window (ADR 0043).
 #[must_use]
 pub fn harness(
     config: &Config,
@@ -190,7 +191,7 @@ pub fn harness(
     tools: crate::tools::Tools,
     guard: Option<crate::guard::Guard>,
 ) -> AgentHarness {
-    let profile = AgentProfile::new(ASSISTANT_KIND)
+    let mut profile = AgentProfile::new(ASSISTANT_KIND)
         .system(config.system.as_str())
         .window(config.window)
         // A tick with no cap of its own takes this one too. With no bound
@@ -199,6 +200,14 @@ pub fn harness(
         // Each op ends its run, so the next op reads the profile again
         // (ADR 0035).
         .max_ops_per_run(runs::OPS_PER_RUN);
+    // With no cap in the config, the engine cap applies.
+    profile.max_request_bytes = config.max_request_bytes;
+    // Near the request cap, the assistant saves its progress notes, and the
+    // engine resets the window to the task and the notes (ADR 0043).
+    #[cfg(feature = "compaction")]
+    if let Some(section) = &config.compaction {
+        profile = profile.context_reset(section.context_reset());
+    }
     // Each tool cuts its own result, by a setting of the owner such as
     // `fetch_max_chars`. The engine cuts no result again (ADR 0034).
     let harness = AgentHarness::new(model).tool_output_limit(usize::MAX);
@@ -6413,6 +6422,8 @@ mod tests {
 
     #[cfg(feature = "api")]
     mod api;
+    #[cfg(feature = "compaction")]
+    mod compaction;
     #[cfg(feature = "mcp")]
     mod flow;
     #[cfg(feature = "google")]

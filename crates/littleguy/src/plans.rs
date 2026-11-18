@@ -3,10 +3,12 @@
 //! The goal and idea tools come with the `plans` feature. A build without
 //! it keeps the wake and skill tools, and `list_plans` lists only those.
 //!
-//! The assistant files ideas, researches them, proposes goals and works on
-//! the goals that the owner accepted. It cannot accept, decline or drop: a
-//! proposed goal does nothing until the owner accepts it on the pages, as a
-//! refine overlay does nothing until the owner activates it.
+//! The assistant files ideas, researches them, concludes the ones that its
+//! research answered, proposes goals and works on the goals that the owner
+//! accepted. It cannot accept, decline, drop or reopen: a proposed goal does
+//! nothing until the owner accepts it on the pages, as a refine overlay does
+//! nothing until the owner activates it. A concluded idea grants nothing: it
+//! leaves the open list, and the owner can reopen it (ADR 0041).
 //!
 //! Every tool here is `ReadOnly` or `Internal`, so an unattended run, such as
 //! a heartbeat tick, may call each one. The texts can hold what a research
@@ -91,7 +93,7 @@ fn text<'a>(input: &'a Value, name: &str) -> Result<&'a str, AgentError> {
         .ok_or_else(|| refuse(format!("`{name}` must be text")))
 }
 
-#[cfg(any(feature = "plans", feature = "followups"))]
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn id(input: &Value, name: &str) -> Result<i64, AgentError> {
     input[name]
         .as_i64()
@@ -212,7 +214,8 @@ fn list_plans_description() -> String {
         text.push_str(
             " An active goal is yours to work on; a goal with `due` true needs a check now. \
              A proposed goal waits for the owner to accept it. An idea is something to plan \
-             and research.",
+             and research. `ideas` holds the open ones; `answered_ideas` names the newest \
+             that you concluded with conclude_idea, so you do not file them again.",
         );
     }
     if cfg!(feature = "followups") {
@@ -244,7 +247,7 @@ pub fn tools(
     #[cfg(feature = "self-debug")]
     let tools = tools.chain(std::iter::once(recent_wakes(stores)));
     #[cfg(feature = "skills")]
-    let tools = tools.chain(std::iter::once(propose_skill(stores, skills)));
+    let tools = tools.chain([read_skill_draft(stores), propose_skill(stores, skills)]);
     #[cfg(feature = "followups")]
     let tools = tools.chain(wake_tools(stores, wakes));
     // A build with none of the tool groups has no tools here.
@@ -329,9 +332,57 @@ fn list_plans(
                         .map(|goal| goal_json(goal, now))
                         .collect();
                     listing["ideas"] = plans.ideas.iter().map(idea_json).collect();
+                    // The answered ideas by name only, so a tick does not
+                    // file one again, and does not read its notes again.
+                    listing["answered_ideas"] = plans
+                        .answered
+                        .iter()
+                        .map(|idea| json!({"id": idea.id, "title": idea.title}))
+                        .collect();
                     listing
                 };
                 Ok(listing)
+            }
+        },
+    )
+    .effect(ToolEffect::ReadOnly)
+    .label(labels::UNTRUSTED_INPUT)
+    .shared()
+}
+
+/// `read_skill_draft`: the whole text of one waiting draft.
+///
+/// `list_plans` lists each draft without its body, since a body can be long
+/// and the listing is read every tick. A revision replaces the whole
+/// draft, so this tool lets the assistant read a draft before it revises it.
+/// `load_skill` reads the skills folder only, and a draft has no file there.
+#[cfg(feature = "skills")]
+fn read_skill_draft(stores: &Arc<SqliteStores>) -> Arc<dyn Tool> {
+    let read = Arc::clone(stores);
+    FnTool::new(
+        "read_skill_draft",
+        "Read one waiting skill draft in full: its name, description and body. list_plans \
+         lists the drafts and their ids. Read a draft before you revise it, since a \
+         revision replaces its whole text.",
+        object(
+            &json!({"id": {"type": "integer", "description": "The id of the draft, from list_plans."}}),
+            &["id"],
+        ),
+        move |input| {
+            let stores = Arc::clone(&read);
+            async move {
+                let draft = id(&input, "id")?;
+                let found = stores.skill_draft(draft)?.ok_or_else(|| {
+                    refuse(format!(
+                        "no skill draft {draft} waits. list_plans lists the waiting drafts"
+                    ))
+                })?;
+                Ok(json!({
+                    "skill_draft": found.id,
+                    "name": found.name,
+                    "description": found.description,
+                    "body": found.body,
+                }))
             }
         },
     )
@@ -352,8 +403,9 @@ fn propose_skill(stores: &Arc<SqliteStores>, skills: &SkillsDir) -> Arc<dyn Tool
          need again, and after a task that took many tool rounds, so the next time is \
          shorter. It does nothing until the owner accepts it on the Skills tab; tell them \
          you drafted it. Check list_plans first: a draft with the name of a skill or of a \
-         waiting draft revises it. A name close to another one is refused, so revise that \
-         one, or name it in not_a_duplicate_of when yours is a different skill.",
+         waiting draft revises it, and replaces its whole text. Read a waiting draft with \
+         read_skill_draft before you revise it. A name close to another one is refused, so \
+         revise that one, or name it in not_a_duplicate_of when yours is a different skill.",
         object(
             &json!({
                 "name": {"type": "string", "description": "lowercase-with-dashes, for example triage-inbox."},
@@ -528,11 +580,12 @@ fn wake_tools(stores: &Arc<SqliteStores>, wakes: &WakeLinks) -> Vec<Arc<dyn Tool
 #[cfg(feature = "plans")]
 #[expect(
     clippy::too_many_lines,
-    reason = "four tools, each a schema and a short body, read best in one list"
+    reason = "five tools, each a schema and a short body, read best in one list"
 )]
 fn goal_tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
     let file = Arc::clone(stores);
     let research = Arc::clone(stores);
+    let conclude = Arc::clone(stores);
     let propose = Arc::clone(stores);
     let progress = Arc::clone(stores);
     vec![
@@ -580,6 +633,30 @@ fn goal_tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
                     let idea = id(&input, "idea")?;
                     stores.research_idea(&call_key(&ctx), idea, text(&input, "note")?, now_ms())?;
                     Ok(json!({"idea": idea, "noted": true}))
+                }
+            },
+        )
+        .effect(ToolEffect::Internal)
+        .shared(),
+        FnTool::with_context(
+            "conclude_idea",
+            "Conclude an open idea that your research answered and that needs no goal. The \
+             note says the answer. The idea leaves the open list of list_plans; the owner sees \
+             it under Answered on the Workspace page and can reopen it. To act on an idea, \
+             propose a goal instead.",
+            object(
+                &json!({
+                    "idea": {"type": "integer"},
+                    "note": {"type": "string", "description": "The answer, and why the idea needs no more work."},
+                }),
+                &["idea", "note"],
+            ),
+            move |input, ctx| {
+                let stores = Arc::clone(&conclude);
+                async move {
+                    let idea = id(&input, "idea")?;
+                    stores.conclude_idea(&call_key(&ctx), idea, text(&input, "note")?, now_ms())?;
+                    Ok(json!({"idea": idea, "status": "answered"}))
                 }
             },
         )
@@ -668,12 +745,18 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         let goals: &[&str] = if cfg!(feature = "plans") {
-            &["add_idea", "research_idea", "propose_goal", "goal_progress"]
+            &[
+                "add_idea",
+                "research_idea",
+                "conclude_idea",
+                "propose_goal",
+                "goal_progress",
+            ]
         } else {
             &[]
         };
         let skills: &[&str] = if cfg!(feature = "skills") {
-            &["propose_skill"]
+            &["read_skill_draft", "propose_skill"]
         } else {
             &[]
         };
@@ -703,12 +786,12 @@ mod tests {
                 tool.name()
             );
         }
-        // `list_plans` shows text that a research read, and `recent_wakes`
-        // the answers of ticks, so both are untrusted.
-        for tool in tools
-            .iter()
-            .filter(|tool| ["list_plans", "recent_wakes"].contains(&tool.name()))
-        {
+        // `list_plans` shows text that a research read, `read_skill_draft` a
+        // draft that a tainted run wrote, and `recent_wakes` the answers of
+        // ticks, so all three are untrusted.
+        for tool in tools.iter().filter(|tool| {
+            ["list_plans", "read_skill_draft", "recent_wakes"].contains(&tool.name())
+        }) {
             assert!(
                 tool.labels()
                     .iter()

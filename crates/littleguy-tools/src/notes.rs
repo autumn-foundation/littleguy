@@ -1,8 +1,10 @@
 //! `search_notes`: find the files of the workspace that hold some words.
 //!
-//! The assistant can recall a note only when it knows the path. This tool
+//! The assistant can read a file only when it knows the path. This tool
 //! scans the workspace for the words of a query and returns the files that
-//! hold them, with a short snippet each. It is a linear scan with no index:
+//! hold them, with a short snippet each. It reads no note of `memory.db`.
+//! `list_notes` with a query ranks those, with the same [`rank`] (issue
+//! #35). It is a linear scan with no index:
 //! a workspace of a few hundred short notes is far below the size where an
 //! index earns its keep. It only reads, so a heartbeat tick may call it.
 
@@ -207,9 +209,10 @@ fn search(input: &Value, ctx: &ToolContext) -> Result<Value, AgentError> {
 pub fn search_notes_tool() -> Arc<dyn Tool> {
     FnTool::with_context(
         "search_notes",
-        "Search the files of your workspace for words, when you half remember a note but \
-         not its path. It returns the files that hold the most of the words first, each with \
-         a short snippet. Read a match with read_file.",
+        "Search the files of your workspace for words, when you half remember a file of \
+         your workspace but not its path. It does not read your notes. It returns the files \
+         that hold the most of the words first, each with a short snippet. Read a match \
+         with read_file.",
         json!({
             "type": "object",
             "properties": {

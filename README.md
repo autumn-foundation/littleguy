@@ -224,10 +224,9 @@ read and any fact the store refused, and files
 [ideas](#goals-and-ideas) for anything worth planning or researching. The
 store skips a fact that the block holds already, so the prompt counts what
 was sent, not what changed. A pass that ended without a mark says so, since
-its episodes wait for the next pass
-([ADR 0041](docs/adr/0041-the-reflection-counts-what-the-pass-sent.md)). A
-pass that sent no fact wakes no reflection, and `recent_wakes` says why.
-`pass_episodes = 8` under `[memory]` sets how many episodes one pass reads
+its episodes wait for the next pass. A pass that sent no fact wakes no
+reflection, and `recent_wakes` says why. `pass_episodes = 8` under
+`[memory]` sets how many episodes one pass reads
 ([ADR 0030](docs/adr/0030-a-reflection-hears-what-the-pass-did.md)), and
 `pass_tokens` can cap the output of its model call. By default a pass has
 no cap of its own, so the limit of the provider applies. The engine fixes
@@ -288,13 +287,14 @@ fetch_max_chars = 20000         # one page of text; `offset` reads on
   set it in the environment; without it there is no search tool.
 - The workspace keeps its files in `workspace/`, next to `lg.db`, and they
   survive a restart. A path stays inside the workspace. `search_notes`
-  finds the files that hold some words, so littleguy can recall a note
-  whose path it forgot. It only reads, so a heartbeat may use it. It comes
+  finds the files that hold some words, so littleguy can find a file
+  whose path it forgot. It reads no note: `list_notes` with a query
+  searches those. It only reads, so a heartbeat may use it. It comes
   with the `search-notes` feature, on by default.
 - Notes are littleguy's own memory of what it learned: `write_note`,
   `read_note`, `list_notes` (with a query to search) and `delete_note`.
   They live in `memory.db`, not in the workspace, so a heartbeat can write
-  them too, where the workspace is read-only. You read them on the
+  them too, where `write_file` and `delete_file` are refused. You read them on the
   **Notes** tab of the Workspace page.
   [ADR 0029](docs/adr/0029-notes-that-a-tick-can-write.md) explains the
   design. `grep_files` finds the
@@ -327,6 +327,14 @@ accept it on the **Goals** tab of the Workspace page, as a refine overlay does n
 you activate it. An accepted goal can ask for a check every so often, and
 littleguy notes its progress and marks it done.
 
+When its research answers an idea that needs no goal, littleguy concludes
+it with `conclude_idea` and a note that says the answer. The idea leaves
+the open list, so a tick no longer reads it again, and a heartbeat with
+only answered ideas costs no model call. It waits under **Answered** on the
+**Ideas** tab, where you reopen or drop it.
+[ADR 0041](docs/adr/0041-an-answered-idea-leaves-the-open-list.md) explains
+the design.
+
 littleguy can also book a **wake** with `wake_me`: "look at the deploy
 again in 20 minutes". At that time it wakes on its own, read-only, looks,
 and tells you only what you should know. It can book at most 10 wakes in a
@@ -337,7 +345,7 @@ it went: the tools it called and the start of its answer;
 explains the design. Booked wakes come with the `followups` feature, which
 is on by default.
 
-littleguy cannot accept, decline or drop anything; only you can. Every
+littleguy cannot accept, decline, drop or reopen anything; only you can. Every
 tool it has works on a run with no one present, so a later heartbeat can
 research ideas and check goals on its own. [ADR 0020](docs/adr/0020-goals-and-ideas.md)
 explains the design.
@@ -427,7 +435,7 @@ deliver = "web"                 # where news goes: the web chat, for now
 ```
 
 A tick runs with no one present. Its own bookkeeping persists: it can
-file ideas, add notes to them, propose goals and book wakes. The
+file ideas, add notes to them, conclude them, propose goals and book wakes. The
 workspace is read-only on a tick: `write_file` and `delete_file` are
 refused there with "this run may only read data", rather than answering
 success for a change that the engine would not keep. It cannot act

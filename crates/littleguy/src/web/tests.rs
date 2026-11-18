@@ -991,6 +991,60 @@ async fn the_owner_accepts_a_proposed_goal_on_the_goals_tab() {
         .assert_status(401);
 }
 
+#[cfg(feature = "plans")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_reopens_an_answered_idea_on_the_ideas_tab() {
+    let rig = rig_on(&config(false), None, Arc::new(Saver)).await;
+    let token = sign_in(&rig).await;
+    for (id, text) in [
+        (
+            "a-1",
+            r#"use add_idea {"title": "Docs links", "body": "Do they rot?"}"#,
+        ),
+        (
+            "a-2",
+            r#"use conclude_idea {"idea": 1, "note": "No: all links resolve."}"#,
+        ),
+    ] {
+        let answer = rig
+            .handle
+            .ask(Request::Chat {
+                message_id: id.to_owned(),
+                text: text.to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(reply_text(&answer), "saved");
+    }
+
+    // The answered idea sits under its own heading, and opens with Reopen.
+    let ideas = rig.client.get("/workspace?tab=ideas").send().await;
+    ideas.assert_text_contains("#plan-view .files .note", "No open ideas");
+    ideas.assert_text_contains("#plan-view .files h3", "Answered");
+    ideas.assert_text_contains("#file .doc .tag", "answered");
+    ideas.assert_text_contains("#file .doc", "No: all links resolve.");
+    ideas.assert_selector_count("#file button[hx-post='/plans/reopen-idea/1']", 1);
+    ideas.assert_selector_count("#file button[hx-post='/plans/drop-idea/1']", 1);
+
+    let reopened = rig
+        .client
+        .post("/plans/reopen-idea/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    reopened.assert_status(200);
+    reopened.assert_selector_count("#plan-view .files h3", 0);
+    reopened.assert_selector_count("#file .doc .tag", 0);
+    reopened.assert_selector_count("#file button[hx-post='/plans/reopen-idea/1']", 0);
+    let again = rig
+        .client
+        .post("/plans/reopen-idea/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    again.assert_text_contains("#plan-view .error", "1 is not an answered idea");
+}
+
 #[cfg(feature = "skills")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_accepts_and_retires_a_skill_on_the_skills_tab() {

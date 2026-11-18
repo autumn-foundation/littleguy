@@ -1537,10 +1537,10 @@ impl Daemon {
             stores.mark_sent(&key)?;
             // A pass that cannot be read counts as one that wrote nothing.
             let done = crate::reflection::read_pass(&self.rt, &id).unwrap_or_default();
-            if !done.marked() {
+            if !done.marked && done.episodes > 0 {
                 tracing::warn!(pass = %id, stop = %done.stop, episodes = done.episodes,
                     "a consolidation pass ended without a mark, so its episodes wait for the next pass");
-            } else if done.sent.is_empty() {
+            } else if done.facts.is_empty() {
                 tracing::warn!(pass = %id, stop = %done.stop, episodes = done.episodes,
                     "a consolidation pass sent no facts, so no reflection follows");
             }
@@ -4486,22 +4486,6 @@ mod tests {
             "skipped: the consolidation pass sent no facts (invalid_reply) and ended without \
              a mark, so 1 episode waits for the next pass; no model call"
         );
-        // The pass wrote no mark, so its episode ids come from its model turn.
-        let filter = autumn_harvest_sqlite::ExecutionFilter {
-            workflow_name: Some(String::from(
-                autumn_harvest_agent::consolidate::CONSOLIDATE_WORKFLOW_NAME,
-            )),
-            ..autumn_harvest_sqlite::ExecutionFilter::default()
-        };
-        let listed = daemon.rt.list_executions(&filter).unwrap().executions;
-        let autumn_harvest_sqlite::Stored::Value(exec) = &listed[0].exec_id else {
-            panic!("no pass id");
-        };
-        let pass = crate::reflection::read_pass(&daemon.rt, exec).unwrap();
-        assert!(!pass.marked());
-        assert_eq!(pass.episode_ids.len(), 1, "{pass:?}");
-        assert!(pass.started.is_some());
-        assert_eq!(&pass.exec, exec);
     }
 
     /// A model that reasons: a pass reply under a cap of
@@ -4561,6 +4545,93 @@ mod tests {
         assert_eq!(facts.len(), 1, "the pass wrote its fact: {facts:?}");
     }
 
+    /// Fire the nightly schedule now, as 03:00 would, and read the pass
+    /// that it ran.
+    #[cfg(feature = "reflection")]
+    async fn run_one_pass(daemon: &mut Daemon) -> crate::reflection::Pass {
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        let filter = autumn_harvest_sqlite::ExecutionFilter {
+            workflow_name: Some(String::from(
+                autumn_harvest_agent::consolidate::CONSOLIDATE_WORKFLOW_NAME,
+            )),
+            ..autumn_harvest_sqlite::ExecutionFilter::default()
+        };
+        let listed = daemon.rt.list_executions(&filter).unwrap().executions;
+        let autumn_harvest_sqlite::Stored::Value(id) = &listed[0].exec_id else {
+            panic!("no pass id");
+        };
+        crate::reflection::read_pass(&daemon.rt, id).unwrap()
+    }
+
+    #[cfg(feature = "reflection")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_pass_names_its_instance_and_the_episodes_that_it_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        let before = Utc::now();
+        let pass = run_one_pass(&mut daemon).await;
+        assert_eq!(pass.stop, "completed");
+        assert!(pass.marked);
+        assert_eq!(pass.episodes, 1);
+        assert_eq!(pass.episode_ids.len(), 1, "{pass:?}");
+        // The fact cites the episode that the pass read.
+        assert!(pass.facts[0].contains(&pass.episode_ids[0]), "{pass:?}");
+        assert_ne!(pass.exec, "");
+        let started = pass.started.expect("a start time");
+        assert!(started >= before - chrono::Duration::seconds(1));
+        let text = crate::reflection::prompt(std::slice::from_ref(&pass)).unwrap();
+        assert!(text.contains(&format!("- pass {}, started ", pass.exec)));
+        assert!(text.contains(&format!("({}) and marked them", pass.episode_ids[0])));
+        // The next op reads the block again, so it already holds the fact.
+        let recall = daemon.handle_request(UID, request("r-2", "recall")).await;
+        // The assertion prints no reply, so a failure logs no conversation.
+        assert!(reply_text(&recall).contains(&pass.facts[0]));
+    }
+
+    #[cfg(feature = "reflection")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pass_that_ended_without_a_mark_reads_the_same_episodes_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config(),
+            Arc::new(BadPassModel::default()),
+            UID,
+            false,
+        )
+        .unwrap();
+        daemon
+            .handle_request(UID, request("r-1", "I like tea"))
+            .await;
+        let first = run_one_pass(&mut daemon).await;
+        assert_eq!(first.stop, "invalid_reply");
+        assert!(!first.marked);
+        assert_eq!(first.facts, Vec::<String>::new());
+        assert_eq!(first.episode_ids.len(), 1, "{first:?}");
+        // The episode stays pending, so a second pass reads the same id.
+        let second = run_one_pass(&mut daemon).await;
+        assert_ne!(second.exec, first.exec, "another pass instance");
+        assert_eq!(second.episode_ids, first.episode_ids);
+    }
+
     #[cfg(all(feature = "reflection", any(feature = "discord", feature = "sandbox")))]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_consolidation_pass_wakes_one_reflection_then_the_timer_stops() {
@@ -4611,7 +4682,7 @@ mod tests {
         // It says what the pass sent, not only that it ran, and never
         // that the block changed.
         assert!(last.text.contains("read 1 episode ("));
-        assert!(last.text.contains("and sent 1 fact:"));
+        assert!(last.text.contains("and sent 1 fact to your memory store:"));
         assert!(!last.text.contains("added"));
         assert!(last.text.contains("mark likes tea"));
         // The memory block of the reflection op holds the fact already: the
@@ -5673,7 +5744,7 @@ mod tests {
             .await;
         assert_eq!(said(&proposed), r#"log: {"goal":1,"status":"proposed"}"#);
 
-        let Response::Plans { goals, ideas } = daemon.handle_request(UID, Request::Plans).await
+        let Response::Plans { goals, ideas, .. } = daemon.handle_request(UID, Request::Plans).await
         else {
             panic!("no plans");
         };
@@ -5693,7 +5764,7 @@ mod tests {
                 Response::Error { message } if message == "only the owner of the daemon may do that"
             ));
         }
-        let Response::Plans { goals, ideas } = daemon.handle_request(UID, accept.clone()).await
+        let Response::Plans { goals, ideas, .. } = daemon.handle_request(UID, accept.clone()).await
         else {
             panic!("the accept failed");
         };
@@ -5718,9 +5789,90 @@ mod tests {
             daemon.handle_request(UID, Request::Plans).await,
             Response::Plans {
                 goals: Vec::new(),
-                ideas: Vec::new()
+                ideas: Vec::new(),
+                answered: Vec::new(),
             }
         );
+    }
+
+    #[cfg(feature = "plans")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_answered_idea_leaves_the_open_list_until_the_owner_reopens_it() {
+        use crate::protocol::PlanDecision;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("lg.db");
+        let mut daemon =
+            Daemon::open(&db, &config(), Arc::new(MemoryModel::default()), UID, false).unwrap();
+        for (id, text) in [
+            (
+                "p-1",
+                r#"use add_idea {"title": "Docs links", "body": "Do they rot?"}"#,
+            ),
+            (
+                "p-2",
+                r#"use add_idea {"title": "Other", "body": "Still open."}"#,
+            ),
+        ] {
+            daemon.handle_request(UID, request(id, text)).await;
+        }
+        let concluded = daemon
+            .handle_request(
+                UID,
+                request(
+                    "p-3",
+                    r#"use conclude_idea {"idea": 1, "note": "No: all links resolve."}"#,
+                ),
+            )
+            .await;
+        assert_eq!(
+            reply_text(&concluded),
+            r#"log: {"idea":1,"status":"answered"}"#
+        );
+
+        // The assistant's listing names it, and carries no body or notes.
+        let listed = daemon
+            .handle_request(UID, request("p-4", "use list_plans {}"))
+            .await;
+        let listing: serde_json::Value =
+            serde_json::from_str(reply_text(&listed).trim_start_matches("log: ")).unwrap();
+        assert_eq!(listing["ideas"].as_array().unwrap().len(), 1);
+        assert_eq!(listing["ideas"][0]["id"], 2);
+        assert_eq!(
+            listing["answered_ideas"],
+            serde_json::json!([{"id": 1, "title": "Docs links"}])
+        );
+
+        // The owner sees it, with its closing note.
+        let Response::Plans {
+            ideas, answered, ..
+        } = daemon.handle_request(UID, Request::Plans).await
+        else {
+            panic!("no plans");
+        };
+        assert_eq!(ideas.iter().map(|idea| idea.id).collect::<Vec<_>>(), [2]);
+        assert_eq!(answered[0].id, 1);
+        assert_eq!(answered[0].notes[0].text, "No: all links resolve.");
+
+        let reopen = |id| Request::Decide {
+            decision: PlanDecision::ReopenIdea,
+            id,
+        };
+        assert!(matches!(
+            daemon.handle_request(UID + 1, reopen(1)).await,
+            Response::Error { message } if message == "only the owner of the daemon may do that"
+        ));
+        assert!(matches!(
+            daemon.handle_request(UID, reopen(2)).await,
+            Response::Error { message } if message == "2 is not an answered idea"
+        ));
+        let Response::Plans {
+            ideas, answered, ..
+        } = daemon.handle_request(UID, reopen(1)).await
+        else {
+            panic!("the reopen failed");
+        };
+        assert_eq!(ideas.iter().map(|idea| idea.id).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(answered, []);
     }
 
     /// A model whose council members vote `accept`, and that answers the
@@ -5985,6 +6137,87 @@ mod tests {
             .await;
         assert!(reply_text(&kept).starts_with("log: "));
         assert_eq!(drafts(daemon.handle_request(UID, Request::Skills).await), 1);
+    }
+
+    #[cfg(feature = "skills")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_waiting_draft_reads_in_full_by_id_and_lists_without_its_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut with_refine = config();
+        with_refine.refine = Some(littleguy_core::RefineConfig::default());
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &with_refine,
+            Arc::new(MemoryModel::default()),
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_skills_dir(dir.path().join("skills"));
+        let drafted = daemon
+            .handle_request(
+                UID,
+                request(
+                    "r-1",
+                    r#"use propose_skill {"name": "weekly-digest", "description": "Write the Friday digest.", "body": "1. Read the week.\n2. Sum it up."}"#,
+                ),
+            )
+            .await;
+        let drafted: serde_json::Value =
+            serde_json::from_str(reply_text(&drafted).strip_prefix("log: ").unwrap()).unwrap();
+        let id = drafted["skill_draft"].as_i64().unwrap();
+
+        // The listing renders, holds the draft, and leaves its body out.
+        let listed = daemon
+            .handle_request(UID, request("r-2", "use list_plans {}"))
+            .await;
+        let listed: serde_json::Value =
+            serde_json::from_str(reply_text(&listed).strip_prefix("log: ").unwrap()).unwrap();
+        let drafts = listed["skill_drafts"].as_array().unwrap();
+        assert_eq!(drafts.len(), 1, "the seeded draft is listed");
+        assert_eq!(drafts[0]["id"], id);
+        assert!(drafts[0].get("body").is_none(), "the listing has no body");
+
+        // read_skill_draft returns the whole draft.
+        let read = daemon
+            .handle_request(
+                UID,
+                request("r-3", &format!(r#"use read_skill_draft {{"id": {id}}}"#)),
+            )
+            .await;
+        let read: serde_json::Value =
+            serde_json::from_str(reply_text(&read).strip_prefix("log: ").unwrap()).unwrap();
+        assert_eq!(read["skill_draft"], id);
+        assert_eq!(read["name"], "weekly-digest");
+        assert_eq!(read["description"], "Write the Friday digest.");
+        assert_eq!(read["body"], "1. Read the week.\n2. Sum it up.");
+
+        // An id that does not wait is refused, and the reply says where to look.
+        let missing = daemon
+            .handle_request(
+                UID,
+                request(
+                    "r-4",
+                    &format!(r#"use read_skill_draft {{"id": {}}}"#, id + 1),
+                ),
+            )
+            .await;
+        assert!(reply_text(&missing).contains("list_plans lists the waiting drafts"));
+
+        // A declined draft no longer reads.
+        assert!(matches!(
+            daemon
+                .handle_request(UID, Request::DeclineSkill { draft: id })
+                .await,
+            Response::Skills { .. }
+        ));
+        let declined = daemon
+            .handle_request(
+                UID,
+                request("r-5", &format!(r#"use read_skill_draft {{"id": {id}}}"#)),
+            )
+            .await;
+        assert!(reply_text(&declined).contains(&format!("no skill draft {id} waits")));
     }
 
     #[cfg(feature = "skills")]

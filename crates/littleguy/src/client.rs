@@ -163,7 +163,11 @@ pub fn render(response: &Response) -> (String, bool) {
         } => (render_conversations(entries, *keep_days, *partial), true),
         Response::Conversation { turns, .. } => (render_past(turns), true),
         Response::Workspace { files } => (render_workspace(files), true),
-        Response::Plans { goals, ideas } => (render_plans(goals, ideas), true),
+        Response::Plans {
+            goals,
+            ideas,
+            answered,
+        } => (render_plans(goals, ideas, answered), true),
         Response::Notes { notes } => (
             if notes.is_empty() {
                 String::from("no notes")
@@ -220,7 +224,7 @@ fn render_skills(
 }
 
 /// One line per goal and per idea, with its number.
-fn render_plans(goals: &[GoalEntry], ideas: &[IdeaEntry]) -> String {
+fn render_plans(goals: &[GoalEntry], ideas: &[IdeaEntry], answered: &[IdeaEntry]) -> String {
     let mut lines = Vec::new();
     for goal in goals {
         lines.push(format!(
@@ -230,6 +234,9 @@ fn render_plans(goals: &[GoalEntry], ideas: &[IdeaEntry]) -> String {
     }
     for idea in ideas {
         lines.push(format!("idea {}: {}", idea.id, idea.title));
+    }
+    for idea in answered {
+        lines.push(format!("idea {} (answered): {}", idea.id, idea.title));
     }
     if lines.is_empty() {
         return String::from("no goals and no ideas yet");

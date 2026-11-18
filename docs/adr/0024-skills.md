@@ -47,6 +47,11 @@ assistant read must not be able to plant one.
   writes the `SKILL.md` with `author: littleguy`, or declines it. A draft
   with the name of a skill revises it. At most 20 drafts wait, a bound on
   the agent, not on the owner. No tool can accept a draft.
+- **littleguy reads a draft before it revises it.** A revision replaces
+  the whole draft, so `read_skill_draft` (`ReadOnly`, untrusted) returns
+  one waiting draft by id, body included. `list_plans` lists the drafts
+  without their bodies, since it runs every tick. `load_skill` reads the
+  folder only, and a draft has no file there.
 - **Nothing is deleted.** Retiring a skill, or replacing one, moves its
   folder to `<dir>/.retired/<name>-<time>/`.
 - **Refine cannot change skills.** A refine proposal keeps the active

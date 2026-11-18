@@ -91,7 +91,7 @@ followups = ["littleguy-stores/followups"]
 # ideas and drafts skills from what the pass learned.
 reflection = ["plans"]
 # `[skills]`: SKILL.md files that reach the assistant through its profile
-# overlay, `propose_skill`, and the Skills tab.
+# overlay, `propose_skill`, `read_skill_draft`, and the Skills tab.
 skills = ["refine", "littleguy-stores/skills"]
 # `recent_runs`, `failed_attempts`, `model_usage` and `recent_wakes`: the
 # assistant reads its own run log and tick log to debug itself.

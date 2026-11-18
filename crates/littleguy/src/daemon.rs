@@ -1548,9 +1548,12 @@ impl Daemon {
             stores.mark_sent(&key)?;
             // A pass that cannot be read counts as one that wrote nothing.
             let done = crate::reflection::read_pass(&self.rt, &id).unwrap_or_default();
-            if done.facts.is_empty() {
+            if !done.marked && done.episodes > 0 {
                 tracing::warn!(pass = %id, stop = %done.stop, episodes = done.episodes,
-                    "a consolidation pass wrote no facts, so no reflection follows");
+                    "a consolidation pass ended without a mark, so its episodes wait for the next pass");
+            } else if done.facts.is_empty() {
+                tracing::warn!(pass = %id, stop = %done.stop, episodes = done.episodes,
+                    "a consolidation pass sent no facts, so no reflection follows");
             }
             passes.push(done);
             // The listing is newest first. One reflection covers them all.
@@ -1566,10 +1569,7 @@ impl Daemon {
                 kind: String::from("reflection"),
                 due_ms: now.timestamp_millis(),
                 seen_ms: now.timestamp_millis(),
-                outcome: format!(
-                    "skipped: the consolidation pass wrote no facts ({}); no model call",
-                    passes.first().map_or("unknown", |pass| pass.stop.as_str())
-                ),
+                outcome: crate::reflection::skipped(&passes),
             })?;
             return Ok(());
         };
@@ -3815,6 +3815,9 @@ mod tests {
     struct MemoryModel {
         calls: std::sync::atomic::AtomicU64,
         passes: std::sync::atomic::AtomicU64,
+        /// The system prompt of the last call that offered tools: the
+        /// memory snapshot that the assistant saw.
+        seen: std::sync::Mutex<String>,
     }
 
     impl MemoryModel {
@@ -3982,6 +3985,11 @@ mod tests {
                 let content = Self::reply(request);
                 if request.tools.is_empty() {
                     self.passes.fetch_add(1, Ordering::SeqCst);
+                } else if let Some(system) = request.messages.first() {
+                    *self
+                        .seen
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Self::text(system);
                 }
                 let stop_reason =
                     if matches!(content, autumn_harvest_agent::ContentPart::ToolCall { .. }) {
@@ -4489,7 +4497,8 @@ mod tests {
         assert_eq!(row.kind, "reflection");
         assert_eq!(
             row.outcome,
-            "skipped: the consolidation pass wrote no facts (invalid_reply); no model call"
+            "skipped: the consolidation pass sent no facts (invalid_reply) and ended without \
+             a mark, so 1 episode waits for the next pass; no model call"
         );
     }
 
@@ -4684,9 +4693,19 @@ mod tests {
             last.text
                 .starts_with("ok: Your memory was just consolidated")
         );
-        // It says what the pass added, not only that it ran.
-        assert!(last.text.contains("added 1 fact to your memory block"));
+        // It says what the pass sent, not only that it ran, and never
+        // that the block changed.
+        assert!(last.text.contains("read 1 episode ("));
+        assert!(last.text.contains("and sent 1 fact to your memory store:"));
+        assert!(!last.text.contains("added"));
         assert!(last.text.contains("mark likes tea"));
+        // The memory block of the reflection op holds the fact already: the
+        // op reads its snapshot when it starts, after the pass ended.
+        let seen = model.seen.lock().unwrap().clone();
+        assert!(
+            seen.contains("mark likes tea"),
+            "the snapshot holds the fact"
+        );
 
         // The pass counts once, and nothing else is planned: the timer stops.
         let after = model.calls.load(Ordering::SeqCst);

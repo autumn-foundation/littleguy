@@ -11,6 +11,10 @@
 //! episodes pending, so the next pass reads them again. With the ids in the
 //! prompt, the assistant can tell a repeat of one batch from a backlog that
 //! drains.
+//!
+//! The prompt counts what the passes sent, not what changed (goal #11). The
+//! memory store skips a fact that its block holds already, and the engine
+//! still counts it as written. So no count here can say which facts are new.
 
 use std::fmt::Write as _;
 use std::str::FromStr;
@@ -33,9 +37,15 @@ const WRITE_ACTIVITY: &str = "agent_consolidate_write";
 /// starts after the pass, so its block already holds the new facts. An
 /// assistant that does not know this reads them as old facts that the pass
 /// derived again (idea #25).
+///
+/// The store skips a fact that the block held before, and the engine
+/// counts it as written all the same. So the note never says that every
+/// fact is new (goal #11).
 pub const MEMORY_NOTE: &str = "The Memory section of your instructions was read when \
-     this reflection started, after the passes. So it already holds the facts above. \
-     They are new from these passes, not facts that you held before them.";
+     this reflection started, after the passes. So it already holds each fact above that \
+     the store kept. The count is what the passes sent, not what changed: the store skips \
+     a fact that the block held before, and refuses one that does not fit. So a fact \
+     above is new from these passes unless the block held it before.";
 
 /// What one pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -54,6 +64,8 @@ pub struct Pass {
     /// The facts that the memory store refused. Their source episodes stay
     /// pending.
     pub refused: u64,
+    /// The reason of each refused fact, such as a full block.
+    pub refusals: Vec<String>,
     /// The facts that it wrote, as the memory block holds them.
     pub facts: Vec<String>,
     /// Why it stopped, as the engine names it, such as `invalid_reply`.
@@ -83,6 +95,7 @@ pub fn read_pass(rt: &SqliteRuntime, exec: &str) -> anyhow::Result<Pass> {
         // the episodes pending.
         marked: report.stop == ConsolidationStop::Completed,
         refused: report.facts_refused,
+        refusals: report.refusals,
         stop: output["stop"].as_str().unwrap_or("unknown").to_owned(),
         ..Pass::default()
     };
@@ -159,11 +172,12 @@ fn pass_line(pass: &Pass) -> String {
         line.push_str(" and marked none, so the next pass reads them again.");
     }
     if pass.refused > 0 {
-        let _ = write!(
-            line,
-            " The store refused {}, so their source episodes stay pending.",
-            count(pass.refused, "fact")
-        );
+        let _ = write!(line, " The store refused {}", count(pass.refused, "fact"));
+        if !pass.refusals.is_empty() {
+            let reasons: Vec<String> = pass.refusals.iter().map(|why| one_line(why)).collect();
+            let _ = write!(line, " ({})", reasons.join("; "));
+        }
+        line.push_str(", so their source episodes stay pending.");
     }
     line
 }
@@ -177,12 +191,15 @@ pub fn prompt(passes: &[Pass]) -> Option<String> {
         return None;
     }
     let episodes: u64 = passes.iter().map(|pass| pass.episodes).sum();
+    // The count is what the passes sent. The store skips a fact that the
+    // block holds already, so the prompt never says the block changed.
     let mut text = format!(
-        "Your memory was just consolidated. The pass read {episodes} episodes and added \
-         {} to your memory block:\n",
+        "Your memory was just consolidated. The passes read {} and sent {} to your \
+         memory store:\n",
+        count(episodes, "episode"),
         count(facts.len() as u64, "fact")
     );
-    // Every fact, whole: the reflection judges what the pass wrote.
+    // Every fact, whole: the reflection judges what the passes sent.
     for fact in &facts {
         text.push_str("- ");
         text.push_str(&one_line(fact));
@@ -200,6 +217,33 @@ pub fn prompt(passes: &[Pass]) -> Option<String> {
     Some(text)
 }
 
+/// The tick log row of `passes` when they sent no fact, so no reflection
+/// runs. A pass that ended without a mark says so, because its episodes
+/// wait for the next pass, which can fail the same way. Only the tick log
+/// of `self-debug` reads it.
+#[cfg(feature = "self-debug")]
+#[must_use]
+pub fn skipped(passes: &[Pass]) -> String {
+    let Some(first) = passes.first() else {
+        return String::from("skipped: no consolidation pass; no model call");
+    };
+    if first.marked || first.episodes == 0 {
+        return format!(
+            "skipped: the consolidation pass sent no facts ({}); no model call",
+            first.stop
+        );
+    }
+    let waiting = match first.episodes {
+        1 => String::from("1 episode waits"),
+        n => format!("{n} episodes wait"),
+    };
+    format!(
+        "skipped: the consolidation pass sent no facts ({}) and ended without a mark, so \
+         {waiting} for the next pass; no model call",
+        first.stop,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +256,7 @@ mod tests {
             episode_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
             marked: stop == "completed",
             refused: 0,
+            refusals: Vec::new(),
             facts: facts.iter().map(|fact| (*fact).to_owned()).collect(),
             stop: stop.to_owned(),
         }
@@ -248,7 +293,9 @@ mod tests {
             )
         };
         let text = prompt(&[one, two]).unwrap();
-        assert!(text.contains("read 12 episodes and added 2 facts"));
+        assert!(
+            text.contains("The passes read 12 episodes and sent 2 facts to your memory store:\n")
+        );
         assert!(text.contains("- mark likes green tea [episodes: e1]\n"));
         assert!(
             text.contains("- mark works on littleguy [episodes: e9]\n"),
@@ -345,6 +392,63 @@ mod tests {
         assert_eq!(
             pass_line(&idle),
             "- pass pass-c, ended nothing_to_do: it read 0 episodes."
+        );
+    }
+
+    #[test]
+    fn the_prompt_counts_what_was_sent_and_never_claims_the_block_changed() {
+        // A drain of facts that the block holds already: the store keeps
+        // none of them, so the prompt must not say it added them.
+        let drain = pass(
+            "pass-a",
+            &["r:s0"],
+            &["a [episodes: r:s0]"; 12],
+            "completed",
+        );
+        let text = prompt(&[drain]).unwrap();
+        assert!(text.contains("sent 12 facts to your memory store:"));
+        assert!(!text.contains("added"), "no claim of a change: {text}");
+        assert!(!text.contains("not facts that you held before"));
+        assert!(text.contains("unless the block held it before"));
+    }
+
+    #[test]
+    fn a_refused_fact_is_named_with_its_reason() {
+        let full = Pass {
+            refused: 1,
+            refusals: vec![String::from("the block \"memory\" is\nfull")],
+            ..pass("pass-a", &["r:s0"], &["f1", "f2"], "completed")
+        };
+        let text = prompt(&[full]).unwrap();
+        assert!(
+            text.contains(
+                " The store refused 1 fact (the block \"memory\" is full), so their source \
+                 episodes stay pending."
+            ),
+            "{text}"
+        );
+    }
+
+    #[cfg(feature = "self-debug")]
+    #[test]
+    fn a_skipped_reflection_says_when_the_episodes_wait() {
+        let stuck = Pass {
+            episodes: 20,
+            ..pass("p1", &[], &[], "invalid_reply")
+        };
+        assert_eq!(
+            skipped(&[stuck]),
+            "skipped: the consolidation pass sent no facts (invalid_reply) and ended without \
+             a mark, so 20 episodes wait for the next pass; no model call"
+        );
+        let idle = pass("p2", &[], &[], "nothing_to_do");
+        assert_eq!(
+            skipped(&[idle]),
+            "skipped: the consolidation pass sent no facts (nothing_to_do); no model call"
+        );
+        assert_eq!(
+            skipped(&[]),
+            "skipped: no consolidation pass; no model call"
         );
     }
 }

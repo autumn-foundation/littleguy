@@ -296,10 +296,9 @@ mod tests {
 
     fn full() -> Config {
         Config::parse(&format!(
-            "owner = \"mark\"\nsystem = \"Private prompt text.\"\n\
+            "owner = \"mark\"\nsystem = \"Private prompt text.\"\nmax_request_bytes = 600000\n\
              [discord]\nallowed = [\"123456789012345678\"]\n\
              [approvals]\napprover = \"876543210987654321\"\n\
-             max_request_bytes = 600000\n\
              [compaction]\nmax_resets = 4\n\
              [heartbeat]\nevery_minutes = 45\nquiet = \"22:00-08:00\"\n\
              [hooks]\ntoken_env = \"LG_TEST_HOOK_TOKEN_NAME\"\n\

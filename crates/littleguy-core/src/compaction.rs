@@ -40,21 +40,19 @@ pub const fn engine_percent(percent: u8) -> u8 {
     // mirror-end engine_percent
 }
 
-/// Whether a save turn fits under `cap`: the smallest request that reaches
-/// `percent` of `cap`, with `notice` bytes of notice and `notes` bytes of
-/// notes, stays within `cap`. A cap of zero is no cap, so no reset is ever
-/// due, and no save turn fits.
+/// Whether a save turn fits under `cap`.
 ///
+/// The smallest request that reaches `percent` of `cap`, with `notice`
+/// bytes of notice and `notes` bytes of notes, must stay within `cap`. A
+/// cap of zero is no cap, so no reset is ever due, and no save turn fits.
 /// The sum runs in `u128`, so it never overflows.
 #[must_use]
-#[expect(
-    clippy::cast_lossless,
-    reason = "u128::from is not const, and Verus proves these casts"
-)]
 pub const fn save_turn_fits(cap: u64, percent: u8, notes: u32, notice: u32) -> bool {
     // mirror-begin save_turn_fits
     let p = engine_percent(percent);
-    let due = (cap as u128 * p as u128 + 99) / 100;
+    let share = cap as u128 * p as u128;
+    let down = share / 100;
+    let due = if down * 100 < share { down + 1 } else { down };
     cap > 0 && due + notes as u128 + notice as u128 <= cap as u128
     // mirror-end save_turn_fits
 }

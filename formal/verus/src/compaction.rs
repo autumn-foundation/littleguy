@@ -40,15 +40,25 @@ pub open spec fn fits(cap: int, p: int, notes: int, notice: int) -> bool {
         <= cap
 }
 
-/// `(cap * p + 99) / 100` is the one smallest request that reaches `p`
-/// percent of `cap`.
+/// The smallest request that reaches `p` percent of `cap`: the share
+/// `cap * p` over 100, rounded up.
+pub open spec fn due_of(cap: int, p: int) -> int {
+    if (cap * p) / 100 * 100 < cap * p {
+        (cap * p) / 100 + 1
+    } else {
+        (cap * p) / 100
+    }
+}
+
+/// [`due_of`] is the one smallest request that reaches `p` percent of
+/// `cap`.
 proof fn lemma_due(cap: int, p: int)
     requires
         0 <= cap,
         1 <= p <= 100,
     ensures
-        smallest_due((cap * p + 99) / 100, cap, p),
-        forall|due: int| #[trigger] smallest_due(due, cap, p) ==> due == (cap * p + 99) / 100,
+        smallest_due(due_of(cap, p), cap, p),
+        forall|due: int| #[trigger] smallest_due(due, cap, p) ==> due == due_of(cap, p),
 {
     let x = cap * p;
     assert(x >= 0) by (nonlinear_arith)
@@ -57,11 +67,15 @@ proof fn lemma_due(cap: int, p: int)
             1 <= p,
             x == cap * p,
     ;
-    let d = (x + 99) / 100;
-    lemma_fundamental_div_mod(x + 99, 100);
-    lemma_mod_pos_bound(x + 99, 100);
+    let q = x / 100;
+    lemma_fundamental_div_mod(x, 100);
+    lemma_mod_pos_bound(x, 100);
+    // x == 100 * q + r with 0 <= r < 100.
+    assert(x == 100 * q + x % 100);
+    assert(q * 100 == 100 * q);
+    let d = due_of(cap, p);
     // So x <= 100 * d <= x + 99.
-    assert(x + 99 == 100 * d + (x + 99) % 100);
+    assert(x <= 100 * d && 100 * d <= x + 99);
     assert(reaches(d, cap, p));
     assert(!reaches(d - 1, cap, p));
     assert forall|due: int| #[trigger] smallest_due(due, cap, p) implies due == d by {
@@ -100,7 +114,9 @@ pub fn save_turn_fits(cap: u64, percent: u8, notes: u32, notice: u32) -> (r: boo
     }
     // mirror-begin save_turn_fits
     let p = engine_percent(percent);
-    let due = (cap as u128 * p as u128 + 99) / 100;
+    let share = cap as u128 * p as u128;
+    let down = share / 100;
+    let due = if down * 100 < share { down + 1 } else { down };
     cap > 0 && due + notes as u128 + notice as u128 <= cap as u128
     // mirror-end save_turn_fits
 }

@@ -1136,9 +1136,21 @@ struct RawCompaction {
     notes_bytes: Option<u32>,
 }
 
-/// Checks the compaction section against the request cap `cap`. Only a
+/// Checks the request cap and the compaction section under it. Only a
 /// value that cannot work is refused (ADR 0034).
-fn compaction(raw: RawCompaction, cap: u64) -> Result<CompactionConfig, ConfigError> {
+fn request_cap(
+    max_request_bytes: Option<u64>,
+    section: Option<&RawCompaction>,
+) -> Result<Option<CompactionConfig>, ConfigError> {
+    if max_request_bytes == Some(0) {
+        return Err(ConfigError::MaxRequestBytes);
+    }
+    let cap = max_request_bytes.unwrap_or(crate::compaction::DEFAULT_REQUEST_CAP);
+    section.map(|raw| compaction(raw, cap)).transpose()
+}
+
+/// Checks the compaction section against the request cap `cap`.
+fn compaction(raw: &RawCompaction, cap: u64) -> Result<CompactionConfig, ConfigError> {
     let defaults = CompactionConfig::default();
     let at_percent = raw.at_percent.unwrap_or(defaults.at_percent);
     if !(1..=100).contains(&at_percent) {
@@ -2214,18 +2226,7 @@ impl Config {
             return Err(ConfigError::MaxSteps);
         }
         let max_request_bytes = raw.max_request_bytes;
-        if max_request_bytes == Some(0) {
-            return Err(ConfigError::MaxRequestBytes);
-        }
-        let compaction_section = raw
-            .compaction
-            .map(|raw| {
-                compaction(
-                    raw,
-                    max_request_bytes.unwrap_or(crate::compaction::DEFAULT_REQUEST_CAP),
-                )
-            })
-            .transpose()?;
+        let compaction_section = request_cap(max_request_bytes, raw.compaction.as_ref())?;
         let allowed = raw
             .discord
             .allowed

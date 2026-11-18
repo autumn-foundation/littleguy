@@ -182,10 +182,13 @@ async fn without_compaction_the_same_op_stops_at_the_cap() {
     .unwrap();
 
     let response = daemon.handle_request(UID, request("m-1", "dig")).await;
-    let Response::NoAnswer { reason } = &response else {
-        panic!("the op stops early: {response:?}");
-    };
-    assert!(reason.contains("too long"), "{reason}");
+    // The messages name no part of the response, so no reply text reaches
+    // the test log.
+    let stopped_at_the_cap = matches!(
+        &response,
+        Response::NoAnswer { reason } if reason.contains("too long")
+    );
+    assert!(stopped_at_the_cap, "the op stops early at the cap");
     assert_eq!(worker.notices.load(Ordering::SeqCst), 0);
     assert!(
         worker

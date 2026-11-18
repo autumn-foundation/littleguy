@@ -278,6 +278,9 @@ pub enum ConfigError {
     /// The api section is not valid.
     #[error("the api section is not valid: {0}")]
     Api(String),
+    /// The patches section is not valid.
+    #[error("the patches section is not valid: {0}")]
+    Patches(String),
     /// The ui section is not valid.
     #[error("the ui section is not valid: {0}")]
     Ui(String),
@@ -1130,8 +1133,14 @@ struct RawApi {
 }
 
 /// Checks the api section against the San Mateo integrations. With no
-/// list, the tools call every integration.
-fn api(raw: RawApi, san_mateo: Option<&SanMateoConfig>) -> Result<ApiConfig, ConfigError> {
+/// list, the tools call every integration but `reserved`, the integration
+/// of `[patches]`. Its token opens PRs, and only the daemon may use it
+/// (ADR 0042).
+fn api(
+    raw: RawApi,
+    san_mateo: Option<&SanMateoConfig>,
+    reserved: Option<&str>,
+) -> Result<ApiConfig, ConfigError> {
     let Some(san_mateo) = san_mateo else {
         return Err(ConfigError::Api(String::from(
             "it needs a [san_mateo] section with an integration",
@@ -1149,9 +1158,19 @@ fn api(raw: RawApi, san_mateo: Option<&SanMateoConfig>) -> Result<ApiConfig, Con
                     "integration `{unknown}` is not a [[san_mateo.integration]]"
                 )));
             }
+            if let Some(kept) = named.iter().find(|key| Some(key.as_str()) == reserved) {
+                return Err(ConfigError::Api(format!(
+                    "integration `{kept}` is the integration of [patches]. Only the daemon \
+                     may call it, so the API tools cannot name it"
+                )));
+            }
             named
         }
-        None => known.iter().map(|key| (*key).to_owned()).collect(),
+        None => known
+            .iter()
+            .filter(|key| Some(**key) != reserved)
+            .map(|key| (*key).to_owned())
+            .collect(),
     };
     if integrations.is_empty() {
         return Err(ConfigError::Api(String::from(
@@ -1168,6 +1187,86 @@ fn api(raw: RawApi, san_mateo: Option<&SanMateoConfig>) -> Result<ApiConfig, Con
     Ok(ApiConfig {
         integrations,
         max_chars,
+    })
+}
+
+/// The patches that the assistant proposes and the owner opens as draft
+/// PRs (ADR 0042).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchesConfig {
+    /// The San Mateo integration that holds the GitHub token. Only the
+    /// daemon calls it.
+    pub integration: String,
+    /// The repository, `owner/name`.
+    pub repo: String,
+    /// The branch that each PR targets.
+    pub base: String,
+}
+
+/// The branch that a PR targets when `[patches]` names none.
+pub const DEFAULT_PATCH_BASE: &str = "main";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPatches {
+    integration: String,
+    repo: String,
+    base: Option<String>,
+}
+
+/// Whether `segment` holds only the characters of a GitHub owner, a
+/// repository name or a part of a branch name: letters, digits, `-`, `_`
+/// and `.`, and not `.` or `..` alone.
+#[must_use]
+pub fn is_name(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment != "."
+        && segment != ".."
+        && segment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+/// Whether `repo` reads `owner/name`.
+#[must_use]
+pub fn is_repo(repo: &str) -> bool {
+    repo.split_once('/')
+        .is_some_and(|(owner, name)| is_name(owner) && is_name(name))
+}
+
+/// Checks the patches section against the San Mateo integrations.
+fn patches(
+    raw: RawPatches,
+    san_mateo: Option<&SanMateoConfig>,
+) -> Result<PatchesConfig, ConfigError> {
+    let known = san_mateo.is_some_and(|section| {
+        section
+            .integrations
+            .iter()
+            .any(|integration| integration.key == raw.integration)
+    });
+    if !known {
+        return Err(ConfigError::Patches(format!(
+            "integration `{}` is not a [[san_mateo.integration]]",
+            raw.integration
+        )));
+    }
+    if !is_repo(&raw.repo) {
+        return Err(ConfigError::Patches(format!(
+            "repo `{}` does not read `owner/name`",
+            raw.repo
+        )));
+    }
+    let base = raw.base.unwrap_or_else(|| String::from(DEFAULT_PATCH_BASE));
+    if !base.split('/').all(is_name) {
+        return Err(ConfigError::Patches(format!(
+            "base `{base}` is not a branch name"
+        )));
+    }
+    Ok(PatchesConfig {
+        integration: raw.integration,
+        repo: raw.repo,
+        base,
     })
 }
 
@@ -1595,6 +1694,7 @@ struct Raw {
     san_mateo: Option<RawSanMateo>,
     google: Option<RawGoogle>,
     api: Option<RawApi>,
+    patches: Option<RawPatches>,
     #[serde(default)]
     memory: RawMemory,
     brief: Option<RawBrief>,
@@ -1894,6 +1994,8 @@ pub struct Config {
     pub google: Option<GoogleConfig>,
     /// The API tools, when the config has the section.
     pub api: Option<ApiConfig>,
+    /// The patches of the assistant, when the config has the section.
+    pub patches: Option<PatchesConfig>,
     /// The memory settings.
     pub memory: MemoryConfig,
     /// The morning brief, when the config has the section.
@@ -1942,6 +2044,7 @@ impl Config {
             san_mateo: None,
             google: None,
             api: None,
+            patches: None,
             memory: MemoryConfig::default(),
             brief: None,
             heartbeat: None,
@@ -1997,9 +2100,19 @@ impl Config {
             .google
             .map(|raw| google(raw, san_mateo_section.as_ref()))
             .transpose()?;
+        let patches_section = raw
+            .patches
+            .map(|raw| patches(raw, san_mateo_section.as_ref()))
+            .transpose()?;
         let api_section = raw
             .api
-            .map(|raw| api(raw, san_mateo_section.as_ref()))
+            .map(|raw| {
+                api(
+                    raw,
+                    san_mateo_section.as_ref(),
+                    patches_section.as_ref().map(|p| p.integration.as_str()),
+                )
+            })
             .transpose()?;
         let brief = raw
             .brief
@@ -2026,6 +2139,7 @@ impl Config {
             san_mateo: san_mateo_section,
             google: google_section,
             api: api_section,
+            patches: patches_section,
             memory,
             brief,
             heartbeat,
@@ -2679,9 +2793,9 @@ mod tests {
         assert!(all.sandbox.is_some() && !all.mcp.is_empty());
         assert!(
             all.san_mateo
-                .is_some_and(|s| s.integrations.len() == 2 && s.catalog.is_some())
+                .is_some_and(|s| s.integrations.len() == 3 && s.catalog.is_some())
         );
-        assert!(all.google.is_some() && all.api.is_some());
+        assert!(all.google.is_some() && all.api.is_some() && all.patches.is_some());
         assert!(!all.camel.is_empty() && all.hooks.is_some());
     }
 
@@ -2765,6 +2879,50 @@ mod tests {
         let alone = Config::parse("owner = \"m\"\n[api]\n");
         assert!(matches!(alone, Err(ConfigError::Api(why)) if why.contains("[san_mateo]")));
         assert_eq!(Config::parse("owner = \"m\"").unwrap().api, None);
+    }
+
+    #[test]
+    fn the_patches_section_keeps_its_integration_from_the_api_tools() {
+        let san = "[[san_mateo.integration]]\nkey = \"gh\"\nprovider = \"github\"\n\
+                   [[san_mateo.integration]]\nkey = \"pr\"\nprovider = \"github-pat\"\n";
+        let parse = |rest: &str| Config::parse(&format!("owner = \"m\"\n{rest}\n{san}"));
+        let config =
+            parse("[patches]\nintegration = \"pr\"\nrepo = \"autumn-foundation/littleguy\"\n[api]")
+                .unwrap();
+        assert_eq!(
+            config.patches,
+            Some(PatchesConfig {
+                integration: String::from("pr"),
+                repo: String::from("autumn-foundation/littleguy"),
+                base: String::from("main"),
+            })
+        );
+        // The API tools take every integration but the one of [patches].
+        assert_eq!(
+            config.api.map(|api| api.integrations),
+            Some(vec![String::from("gh")])
+        );
+        let named = parse(
+            "[patches]\nintegration = \"pr\"\nrepo = \"a/b\"\n[api]\nintegrations = [\"pr\"]",
+        );
+        assert!(matches!(named, Err(ConfigError::Api(why)) if why.contains("[patches]")));
+        let dev =
+            parse("[patches]\nintegration = \"pr\"\nrepo = \"a/b\"\nbase = \"dev/next\"").unwrap();
+        assert_eq!(dev.patches.map(|p| p.base).as_deref(), Some("dev/next"));
+        let bad = |section: &str| match parse(section) {
+            Err(ConfigError::Patches(why)) => why,
+            other => panic!("{section}: {other:?}"),
+        };
+        assert!(bad("[patches]\nintegration = \"x\"\nrepo = \"a/b\"").contains("`x`"));
+        for repo in ["a", "a/b/c", "../b", "a b/c"] {
+            let why = bad(&format!(
+                "[patches]\nintegration = \"pr\"\nrepo = \"{repo}\""
+            ));
+            assert!(why.contains("owner/name"), "{why}");
+        }
+        let why = bad("[patches]\nintegration = \"pr\"\nrepo = \"a/b\"\nbase = \"a..b/../c\"");
+        assert!(why.contains("branch"), "{why}");
+        assert_eq!(Config::parse("owner = \"m\"").unwrap().patches, None);
     }
 
     #[test]

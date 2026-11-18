@@ -28,8 +28,8 @@ use super::decisions::Poll;
 use crate::client::render;
 use crate::daemon::live::Piece;
 use crate::protocol::{
-    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, PastTurn, Request, Response as Answer,
-    Speaker, Turn,
+    ApprovalEntry, ConnectionEntry, OverlayEntry, PairEntry, PastTurn, PatchEntry, Request,
+    Response as Answer, Speaker, Turn,
 };
 
 /// The session key that marks the owner.
@@ -81,6 +81,7 @@ pub fn routes() -> Vec<autumn_web::Route> {
         past,
         decide_plan,
         decide_skill,
+        decide_patch,
         login,
         logout,
         chat,
@@ -327,6 +328,8 @@ enum Tab {
     Notes,
     /// The skills, and the drafts that wait.
     Skills,
+    /// The patches of the assistant (ADR 0042).
+    Patches,
 }
 
 impl Tab {
@@ -337,6 +340,7 @@ impl Tab {
             Some("ideas") => Self::Ideas,
             Some("notes") => Self::Notes,
             Some("skills") => Self::Skills,
+            Some("patches") => Self::Patches,
             _ => Self::Files,
         }
     }
@@ -349,6 +353,7 @@ impl Tab {
             Self::Ideas => "ideas",
             Self::Notes => "notes",
             Self::Skills => "skills",
+            Self::Patches => "patches",
         };
         id.map_or_else(
             || format!("/workspace?tab={tab}"),
@@ -378,10 +383,30 @@ fn skill_url(name: &str) -> String {
     url
 }
 
-/// The tabs of the workspace page, with `current` marked. The goals and
-/// skills tabs count what waits for the owner. With `oob`, an htmx answer
-/// swaps the tabs too, so the counts stay right after a decision.
-fn tabs(current: Tab, plans: &Answer, skills: &Answer, oob: bool) -> Markup {
+/// The answers that the tabs count from.
+struct Counts {
+    plans: Answer,
+    skills: Answer,
+    patches: Answer,
+}
+
+impl Counts {
+    /// Asks the daemon for each listing.
+    async fn of(web: &Web) -> Self {
+        Self {
+            plans: ask(web, Request::Plans).await,
+            skills: ask(web, Request::Skills).await,
+            patches: ask(web, Request::Patches).await,
+        }
+    }
+}
+
+/// The tabs of the workspace page, with `current` marked. The goals,
+/// skills and patches tabs count what waits for the owner. With `oob`, an
+/// htmx answer swaps the tabs too, so the counts stay right after a
+/// decision. The patches tab shows only when patches are on.
+fn tabs(current: Tab, counts: &Counts, oob: bool) -> Markup {
+    let (plans, skills) = (&counts.plans, &counts.skills);
     let waiting = match plans {
         Answer::Plans { goals, .. } => goals.iter().filter(|g| g.status == "proposed").count(),
         _ => 0,
@@ -389,6 +414,12 @@ fn tabs(current: Tab, plans: &Answer, skills: &Answer, oob: bool) -> Markup {
     let drafts = match skills {
         Answer::Skills { drafts, .. } => drafts.len(),
         _ => 0,
+    };
+    let patches = match &counts.patches {
+        Answer::Patches { patches, .. } => {
+            Some(patches.iter().filter(|p| p.status == "waiting").count())
+        }
+        _ => None,
     };
     let mark = |tab: Tab| (tab == current).then_some("page");
     html! {
@@ -403,6 +434,12 @@ fn tabs(current: Tab, plans: &Answer, skills: &Answer, oob: bool) -> Markup {
             a href=(Tab::Skills.url(None)) aria-current=[mark(Tab::Skills)] {
                 "Skills"
                 @if drafts > 0 { span.count title="drafts wait for you" { (drafts) " waiting" } }
+            }
+            @if let Some(waiting) = patches {
+                a href=(Tab::Patches.url(None)) aria-current=[mark(Tab::Patches)] {
+                    "Patches"
+                    @if waiting > 0 { span.count title="patches wait for you" { (waiting) " waiting" } }
+                }
             }
         }
     }
@@ -426,18 +463,18 @@ async fn workspace(
         return broken();
     };
     let tab = Tab::parse(open.tab.as_deref());
-    let plans = ask(&web, Request::Plans).await;
-    let skills = ask(&web, Request::Skills).await;
+    let counts = Counts::of(&web).await;
     let view = match tab {
         Tab::Files => files_view(&web, open.path.as_deref()).await,
-        Tab::Goals | Tab::Ideas => plans_view(tab, &plans, open.id, None),
+        Tab::Goals | Tab::Ideas => plans_view(tab, &counts.plans, open.id, None),
         Tab::Notes => notes_view(&ask(&web, Request::Notes).await, open.name.as_deref()),
-        Tab::Skills => skills_view(&skills, open.id, open.name.as_deref(), None),
+        Tab::Skills => skills_view(&counts.skills, open.id, open.name.as_deref(), None),
+        Tab::Patches => patches_view(&counts.patches, open.id, None),
     };
     let body = html! {
         (bar(csrf.token(), "/workspace"))
         main.workspace {
-            (tabs(tab, &plans, &skills, false))
+            (tabs(tab, &counts, false))
             (view)
         }
     };
@@ -868,8 +905,11 @@ async fn decide_plan(
     };
     // An accepted goal stays open. A gone item opens the first one.
     let view = plans_view(tab, &plans, Some(id), notice);
-    let skills = ask(&web, Request::Skills).await;
-    html! { (view) (tabs(tab, &plans, &skills, true)) }.into_response()
+    let counts = Counts {
+        plans,
+        ..Counts::of(&web).await
+    };
+    html! { (view) (tabs(tab, &counts, true)) }.into_response()
 }
 
 /// One skill, a draft or a file that does not load, as a document.
@@ -1065,9 +1105,133 @@ async fn decide_skill(
     } else {
         (ask(&web, Request::Skills).await, Some(note(&answer)))
     };
-    let plans = ask(&web, Request::Plans).await;
     let view = skills_view(&skills, None, accepted.as_deref(), notice);
-    html! { (view) (tabs(Tab::Skills, &plans, &skills, true)) }.into_response()
+    let counts = Counts {
+        skills,
+        ..Counts::of(&web).await
+    };
+    html! { (view) (tabs(Tab::Skills, &counts, true)) }.into_response()
+}
+
+/// The document of one patch: its title, status, warnings, body and diff,
+/// and Open and Decline while it waits. The Open button carries the digest
+/// of the diff on the page, so the daemon opens exactly what the owner read.
+fn patch_doc(patch: &PatchEntry) -> Markup {
+    let waiting = patch.status == "waiting";
+    let open_url = format!("/patches/open/{}/{}", patch.id, patch.digest);
+    let decline_url = format!("/patches/decline/{}/{}", patch.id, patch.digest);
+    html! {
+        article.doc {
+            header {
+                h2 { (patch.title) }
+                @if waiting {
+                    div.actions {
+                        button hx-post=(open_url) hx-target="#plan-view" hx-swap="outerHTML" {
+                            "Open draft PR"
+                        }
+                        button hx-post=(decline_url) hx-target="#plan-view" hx-swap="outerHTML" {
+                            "Decline"
+                        }
+                    }
+                }
+            }
+            p.meta {
+                @if waiting { span.tag { "waiting for you" } } @else { span.tag.active { (patch.status) } }
+                " · proposed by littleguy " (when(patch.created_ms))
+                " · base " code { (patch.base.chars().take(12).collect::<String>()) }
+                @if let Some(revised) = patch.revises { " · revises patch " (revised) }
+                @if let Some(url) = &patch.pr_url { " · " a href=(url) { "PR #" (patch.pr.unwrap_or_default()) } }
+            }
+            @if let Some(reason) = &patch.reason { p.note { "Declined: " (reason) } }
+            @for warning in &patch.warnings { p.error { "Read with care: " (warning) "." } }
+            h3 { "Description" }
+            (markdown(&patch.body))
+            h3 { "Diff" }
+            pre.diff { code { (patch.diff) } }
+        }
+    }
+}
+
+/// The patches tab: the patches, and the one that is open, or the first.
+fn patches_view(patches: &Answer, id: Option<i64>, notice: Option<Markup>) -> Markup {
+    let Answer::Patches { repo, patches } = patches else {
+        return html! {
+            div #plan-view.split {
+                section #file.wide { @if let Some(notice) = notice { (notice) } (note(patches)) }
+            }
+        };
+    };
+    let open = patches
+        .iter()
+        .position(|patch| Some(patch.id) == id)
+        .or_else(|| (!patches.is_empty()).then_some(0));
+    html! {
+        div #plan-view.split {
+            nav.files aria-label="Patches" {
+                @if patches.is_empty() {
+                    p.note { "No patches for " (repo) " yet. littleguy proposes one with propose_patch." }
+                }
+                ul {
+                    @for (index, patch) in patches.iter().enumerate() {
+                        @let url = Tab::Patches.url(Some(patch.id));
+                        @let current = (open == Some(index)).then_some("page");
+                        li {
+                            a href=(url) aria-current=[current]
+                                hx-get=(url) hx-select="#plan-view" hx-target="#plan-view"
+                                hx-swap="outerHTML" hx-push-url="true" {
+                                span.path { (patch.title) }
+                                @if patch.status == "waiting" {
+                                    span.dot title="waiting for you" {}
+                                } @else {
+                                    span.size { (patch.status) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            section #file {
+                @if let Some(notice) = notice { (notice) }
+                @match open.and_then(|index| patches.get(index)) {
+                    Some(patch) => (patch_doc(patch)),
+                    None => p.note { "Nothing to open." },
+                }
+            }
+        }
+    }
+}
+
+/// The owner opens or declines a patch. The digest in the path is the one
+/// on the page that the owner read. Answers with the patches tab, and the
+/// tabs out of band.
+#[post("/patches/{action}/{id}/{digest}")]
+async fn decide_patch(
+    State(state): State<AppState>,
+    session: Session,
+    Path((action, id, digest)): Path<(String, i64, String)>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let request = match action.as_str() {
+        "open" => Request::OpenPatch { id, digest },
+        "decline" => Request::DeclinePatch { id, reason: None },
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let answer = ask(&web, request).await;
+    let notice = match &answer {
+        Answer::PatchOpened { pr, url, .. } => Some(html! {
+            p.note { "Opened draft PR " a href=(url) { "#" (pr) } "." }
+        }),
+        Answer::Patches { .. } => None,
+        _ => Some(note(&answer)),
+    };
+    let counts = Counts::of(&web).await;
+    let view = patches_view(&counts.patches, Some(id), notice);
+    html! { (view) (tabs(Tab::Patches, &counts, true)) }.into_response()
 }
 
 /// Whether `path` names a Markdown file, in any case.

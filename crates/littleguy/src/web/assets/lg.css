@@ -725,3 +725,8 @@ details.call pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.workspace #file pre.diff {
+  white-space: pre;
+  overflow-x: auto;
+}

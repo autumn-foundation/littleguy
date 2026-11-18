@@ -213,6 +213,18 @@ bind = "127.0.0.1:3004"
 # integrations = ["github"]
 # max_chars = 20000   # unset, an answer comes whole
 
+## Patches that the assistant proposes and you open as draft PRs (ADR 0042).
+## The integration holds a fine-grained GitHub token. The API tools never
+## get it. The catalog lists the github-pat provider, as the README shows.
+# [[san_mateo.integration]]
+# key = "littleguy-pr"
+# provider = "github-pat"
+
+# [patches]
+# integration = "littleguy-pr"
+# repo = "autumn-foundation/littleguy"
+# base = "main"
+
 ## Apache Camel routes that feed the assistant.
 # [[camel.route]]
 # id = "inbox"

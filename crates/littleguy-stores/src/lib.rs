@@ -44,6 +44,8 @@ pub mod conversations;
 pub mod council;
 #[cfg(feature = "notes")]
 pub mod notes;
+#[cfg(feature = "patches")]
+pub mod patches;
 #[cfg(feature = "plans")]
 pub mod plans;
 #[cfg(feature = "self-debug")]
@@ -61,7 +63,7 @@ pub use approvals::{ApprovalRecord, Claim, Verdict};
 pub use runlog::RunLog;
 
 /// The schema version that [`SqliteStores::open`] writes.
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 /// The most edit keys that one memory scope keeps. A retry comes soon after
 /// its first attempt, so the oldest key is safe to forget. The engine keeps
@@ -172,6 +174,26 @@ CREATE TABLE IF NOT EXISTS notes (
     text       TEXT NOT NULL,
     updated_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS patches (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    base       TEXT NOT NULL,
+    edits      TEXT NOT NULL,
+    diff       TEXT NOT NULL,
+    digest     TEXT NOT NULL,
+    revises    INTEGER,
+    for_goal   INTEGER,
+    for_idea   INTEGER,
+    status     TEXT NOT NULL DEFAULT 'waiting',
+    reason     TEXT,
+    branch     TEXT,
+    commit_sha TEXT,
+    pr         INTEGER,
+    created_ms INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL,
+    key        TEXT UNIQUE
+);
 CREATE TABLE IF NOT EXISTS wakes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     at_ms      INTEGER NOT NULL,
@@ -197,7 +219,7 @@ pub enum StoreError {
 }
 
 /// The tables of the stores, in the order an import copies them.
-const TABLES: [&str; 16] = [
+const TABLES: [&str; 17] = [
     "memory_scopes",
     "memory_edits",
     "episode_logs",
@@ -214,6 +236,7 @@ const TABLES: [&str; 16] = [
     "council_marks",
     "council_log",
     "notes",
+    "patches",
 ];
 
 /// Where the stores get a connection.

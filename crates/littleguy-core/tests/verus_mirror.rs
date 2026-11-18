@@ -79,3 +79,11 @@ fn the_house_key_proof_covers_the_shipped_kernels() -> TestResult {
         "formal/verus/src/house_keys.rs",
     )
 }
+
+#[test]
+fn the_patch_path_proof_covers_the_shipped_kernel() -> TestResult {
+    mirrors(
+        "crates/littleguy-core/src/patch_path.rs",
+        "formal/verus/src/patch_path.rs",
+    )
+}

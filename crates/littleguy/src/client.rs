@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use std::fmt::Write as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -13,7 +14,7 @@ use crate::protocol::{
     Response, Speaker, Turn, WorkspaceEntry,
 };
 use crate::protocol::{ConversationEntry, PastTurn};
-use crate::protocol::{InvalidSkill, SkillDraftEntry, SkillEntry};
+use crate::protocol::{InvalidSkill, PatchEntry, SkillDraftEntry, SkillEntry};
 
 /// The prefix of each message id of the web and the CLI. The history shows
 /// only the turns whose key starts with it.
@@ -185,6 +186,10 @@ pub fn render(response: &Response) -> (String, bool) {
             invalid,
             drafts,
         } => (render_skills(skills, invalid, drafts), true),
+        Response::Patches { repo, patches } => (render_patches(repo, patches), true),
+        Response::PatchOpened { id, pr, url } => {
+            (format!("patch {id} is draft PR #{pr}: {url}"), true)
+        }
         Response::WorkspaceFile { path, bytes, text } => (
             text.clone()
                 .unwrap_or_else(|| format!("{path}: {bytes} bytes, not text or too large to show")),
@@ -221,6 +226,51 @@ fn render_skills(
         return String::from("no skills yet");
     }
     lines.join("\n")
+}
+
+/// One line per patch, with its status and PR.
+fn render_patches(repo: &str, patches: &[PatchEntry]) -> String {
+    if patches.is_empty() {
+        return format!("no patches for {repo}");
+    }
+    patches
+        .iter()
+        .map(|patch| {
+            let status = match (&patch.status[..], &patch.pr_url) {
+                ("waiting", _) => String::from("waits for you"),
+                (status, Some(url)) => format!("{status} {url}"),
+                (status, None) => status.to_owned(),
+            };
+            let revises = patch
+                .revises
+                .map(|id| format!(" (revises patch {id})"))
+                .unwrap_or_default();
+            format!("patch {}: {}{revises}, {status}", patch.id, patch.title)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One patch whole, for `lg patch show` and `lg patch open`: the title,
+/// the status, the warnings, the body and the diff.
+#[must_use]
+pub fn render_patch(patch: &PatchEntry) -> String {
+    let mut text = format!(
+        "patch {}: {}\nstatus: {}",
+        patch.id, patch.title, patch.status
+    );
+    if let Some(url) = &patch.pr_url {
+        let _ = write!(text, "\nPR: {url}");
+    }
+    if let Some(revised) = patch.revises {
+        let _ = write!(text, "\nrevises patch {revised}");
+    }
+    let _ = write!(text, "\nbase: {}", patch.base);
+    for warning in &patch.warnings {
+        let _ = write!(text, "\nread with care: {warning}");
+    }
+    let _ = write!(text, "\n\n{}\n\n{}", patch.body.trim(), patch.diff);
+    text
 }
 
 /// One line per goal and per idea, with its number.

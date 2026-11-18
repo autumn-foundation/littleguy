@@ -44,6 +44,8 @@ pub struct View {
     pub(super) skills_dir: Option<PathBuf>,
     #[cfg(feature = "oauth")]
     pub(super) connections: Option<crate::oauth::Lister>,
+    #[cfg(feature = "patches")]
+    pub(super) patches: Option<Arc<crate::patches::Patches>>,
 }
 
 impl std::fmt::Debug for View {
@@ -165,6 +167,10 @@ impl View {
             Request::Connections => Ok(Response::Off {
                 message: crate::features::missing("an OAuth connection", "oauth"),
             }),
+            #[cfg(feature = "patches")]
+            Request::Patches => super::patches::listing_of(self.patches.as_deref()),
+            #[cfg(not(feature = "patches"))]
+            Request::Patches => Ok(super::patches::off(request)),
             Request::Pairs => Ok(self.pairs.clone()),
             _ => return None,
         })

@@ -48,6 +48,8 @@ mod notes;
 #[cfg(feature = "oauth")]
 mod oauth;
 mod pairs;
+#[cfg(feature = "patches")]
+mod patches;
 mod paths;
 mod plans;
 mod protocol;
@@ -85,7 +87,7 @@ use littleguy_models::OfflineModel;
 use littleguy_models::{OpenAiModel, Provider};
 
 use crate::paths::Env;
-use crate::protocol::Request;
+use crate::protocol::{Request, Response};
 
 /// An always-on personal agent on autumn-harvest.
 #[derive(Debug, Parser)]
@@ -158,6 +160,11 @@ enum Command {
     Reload,
     /// Start a new conversation. Memory, notes and the workspace stay.
     New,
+    /// List the patches that the assistant proposed, and their PRs.
+    Patches,
+    /// Show, open or decline one patch of the assistant.
+    #[command(subcommand)]
+    Patch(PatchCommand),
     /// Propose, list and activate profile overlays of the assistant.
     #[command(subcommand)]
     Refine(RefineCommand),
@@ -250,6 +257,74 @@ impl RefineCommand {
             Self::Activate { version } => Request::OverlayActivate { version },
             Self::Rollback => Request::OverlayRollback,
         })
+    }
+}
+
+/// One patch of the assistant (ADR 0042).
+#[derive(Debug, Subcommand)]
+enum PatchCommand {
+    /// Print the patch whole: its body and its diff.
+    Show {
+        /// The patch id, from `lg patches`.
+        id: i64,
+    },
+    /// Print the diff, ask, and open the patch as a draft PR.
+    Open {
+        /// The patch id, from `lg patches`.
+        id: i64,
+    },
+    /// Decline the patch.
+    Decline {
+        /// The patch id, from `lg patches`.
+        id: i64,
+        /// Why, for the assistant.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+/// Runs one `lg patch` command. An open prints the diff and opens only on
+/// a `y`, with the digest of the diff that it printed.
+async fn patch(socket: &Path, command: PatchCommand) -> Result<bool> {
+    let id = match &command {
+        PatchCommand::Show { id }
+        | PatchCommand::Open { id }
+        | PatchCommand::Decline { id, .. } => *id,
+    };
+    let listing = client::send(socket, &Request::Patches).await?;
+    let Response::Patches { patches, .. } = &listing else {
+        let (text, _) = client::render(&listing);
+        println!("{text}");
+        return Ok(false);
+    };
+    let Some(found) = patches.iter().find(|patch| patch.id == id) else {
+        println!("error: there is no patch {id}. Run `lg patches`");
+        return Ok(false);
+    };
+    match command {
+        PatchCommand::Show { .. } => {
+            println!("{}", client::render_patch(found));
+            Ok(true)
+        }
+        PatchCommand::Open { .. } => {
+            println!("{}", client::render_patch(found));
+            print!("Open patch {id} as a draft PR? [y/N] ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if !line.trim().eq_ignore_ascii_case("y") {
+                println!("patch {id} still waits");
+                return Ok(false);
+            }
+            let request = Request::OpenPatch {
+                id,
+                digest: found.digest.clone(),
+            };
+            ask(socket, &request).await
+        }
+        PatchCommand::Decline { reason, .. } => {
+            ask(socket, &Request::DeclinePatch { id, reason }).await
+        }
     }
 }
 
@@ -863,6 +938,8 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Approve { id } => ask(&socket, &Request::Approve { id }).await,
         Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
         Command::Refine(command) => ask(&socket, &command.request()?).await,
+        Command::Patches => ask(&socket, &Request::Patches).await,
+        Command::Patch(command) => patch(&socket, command).await,
         Command::Ui => ask(&socket, &Request::UiLink).await,
         Command::Reload => ask(&socket, &Request::Reload).await,
         Command::New => ask(&socket, &Request::NewConversation).await,

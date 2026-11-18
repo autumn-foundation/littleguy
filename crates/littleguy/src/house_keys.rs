@@ -256,6 +256,21 @@ pub fn config_names(config: &littleguy_core::Config) -> Vec<String> {
     names
 }
 
+/// The value of each house key that this daemon may hold: the known
+/// names, the names of `config`, each sealed name and the ring itself. A
+/// patch scans for them, so a secret never reaches a public PR (ADR 0042).
+#[must_use]
+#[cfg(feature = "patches")]
+pub fn values(keys: &HouseKeys, config: &littleguy_core::Config) -> Vec<String> {
+    let mut names: Vec<String> = KNOWN.iter().map(|name| (*name).to_owned()).collect();
+    names.extend(config_names(config));
+    names.extend(keys.sealed_names().into_iter().map(str::to_owned));
+    names.push(String::from(KEY_VAR));
+    names.sort();
+    names.dedup();
+    names.iter().filter_map(|name| keys.get(name)).collect()
+}
+
 #[cfg(test)]
 #[cfg(feature = "sealed-keys")]
 mod tests;

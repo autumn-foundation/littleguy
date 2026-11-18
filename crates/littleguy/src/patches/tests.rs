@@ -272,7 +272,7 @@ async fn a_revision_waits_when_its_branch_moved() {
 #[tokio::test]
 async fn a_secret_or_a_ci_path_never_becomes_a_patch() {
     let rig = rig();
-    let secret = rig
+    let refused = rig
         .call(
             "propose_patch",
             json!({
@@ -283,7 +283,11 @@ async fn a_secret_or_a_ci_path_never_becomes_a_patch() {
         )
         .await
         .unwrap_err();
-    assert!(secret.to_string().contains("house key"), "{secret}");
+    // The message stays out of the assert, so a test log never shows a key.
+    assert!(
+        refused.to_string().contains("house key"),
+        "a patch that holds a house key is refused"
+    );
     let ci = rig
         .call(
             "propose_patch",

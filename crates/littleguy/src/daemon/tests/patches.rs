@@ -54,7 +54,7 @@ async fn the_assistant_proposes_and_the_owner_opens_a_draft_pr() {
     let proposed = daemon.handle_request(UID, request("p-1", PROPOSE)).await;
     assert!(
         reply_text(&proposed).contains(r#""status":"waits for the owner""#),
-        "{proposed:?}"
+        "the patch waits for the owner"
     );
     assert!(github.repo().pulls.is_empty(), "nothing opens unasked");
 

@@ -659,6 +659,8 @@ impl Daemon {
             google: extras.google,
             #[cfg(feature = "api")]
             api: extras.api,
+            #[cfg(feature = "patches")]
+            patches: None,
             tenant: extras.tenant,
             keys: extras.keys,
             services,
@@ -773,6 +775,8 @@ impl Daemon {
             skills_dir: self.skills_dir(),
             #[cfg(feature = "oauth")]
             connections: self.connections.as_ref().map(Connections::lister),
+            #[cfg(feature = "patches")]
+            patches: self.kit.patches.clone(),
         }
     }
 
@@ -858,6 +862,10 @@ impl Daemon {
     }
 
     /// Handles one request from the local socket, sent by `uid`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per request kind, and each arm calls one handler"
+    )]
     pub async fn handle_request(&mut self, uid: u32, request: Request) -> Response {
         let result = match request {
             // The socket server streams `chat_stream`. Here it is a chat.
@@ -909,6 +917,9 @@ impl Daemon {
             | Request::AcceptSkill { .. }
             | Request::DeclineSkill { .. }
             | Request::RetireSkill { .. }) => Box::pin(self.skills_request(request)).await,
+            request @ (Request::Patches
+            | Request::OpenPatch { .. }
+            | Request::DeclinePatch { .. }) => self.patches_request(request).await,
             #[cfg(feature = "plans")]
             Request::Decide { decision, id } => self.decide_plan(decision, id),
             #[cfg(not(feature = "plans"))]
@@ -2390,6 +2401,7 @@ mod gate;
 mod history;
 pub mod live;
 pub use reads::Reads;
+mod patches;
 #[cfg(feature = "plans")]
 mod plans;
 mod reads;
@@ -3836,6 +3848,8 @@ mod tests {
                 "skills",
                 "ticks",
                 "build",
+                "patch",
+                "patches",
             ]
             .iter()
             .any(|key| result.get(key).is_some())
@@ -6384,6 +6398,8 @@ mod tests {
     mod flow;
     #[cfg(feature = "google")]
     mod google;
+    #[cfg(feature = "patches")]
+    mod patches;
     #[cfg(feature = "sandbox")]
     mod sandboxed;
 }

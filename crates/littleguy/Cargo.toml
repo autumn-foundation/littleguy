@@ -43,6 +43,8 @@ san-mateo = { version = "0.1", optional = true }
 san-mateo-sqlite = { version = "0.1", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { version = "0.11", optional = true }
+similar = { version = "2", optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -53,7 +55,7 @@ autumn-plugin-markstream = "0.3"
 [features]
 default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "search-notes", "grep-files", "notes", "history", "sealed-keys"]
 # Every integration.
-full = ["default", "camel", "google", "api", "fleet"]
+full = ["default", "camel", "google", "api", "patches", "fleet"]
 # Discord direct messages over the gateway.
 discord = ["littleguy-channels/discord"]
 # Slack direct messages over Socket Mode, or over the Events API as a hook.
@@ -127,6 +129,10 @@ google = ["oauth", "littleguy-tools/google"]
 # `[api]`: `api_get` and `api_send` on any San Mateo integration (ADR 0031).
 # Needs `oauth`.
 api = ["oauth", "littleguy-tools/api"]
+# `[patches]`: `propose_patch` and the Patches tab. littleguy proposes a
+# change to its repository, and the owner opens it as a draft PR (ADR 0042).
+# Needs `api`.
+patches = ["api", "littleguy-stores/patches", "dep:sha2", "dep:similar"]
 # `[fleet]`: the memory, the episodes and the approvals in a tenant database,
 # replicated to a directory or an S3-compatible store by autumn-web. The
 # replication of autumn-web needs a database backend, so it takes `postgres`.
@@ -135,6 +141,7 @@ fleet = ["autumn-web/postgres", "autumn-web/http-client", "dep:tokio-util"]
 [dev-dependencies]
 autumn-web = { version = "0.10", default-features = false, features = ["maud", "htmx", "test-support"] }
 base64 = "0.23"
+proptest = { workspace = true }
 reqwest = { version = "0.12", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
 littleguy-channels = { workspace = true, features = ["testing"] }

@@ -787,6 +787,63 @@ token and no call can carry one elsewhere.
 [ADR 0031](docs/adr/0031-api-calls-through-san-mateo.md) explains the
 design.
 
+## Patches that littleguy proposes
+
+With `[patches]`, littleguy proposes changes to its own repository, and you
+open each one as a draft PR. It works on a tick too. Nothing is pushed
+until you open a patch, and nothing merges unless you merge it.
+
+1. Make a fine-grained personal access token on GitHub. Give it one
+   repository, and only these permissions: Contents read and write, Pull
+   requests read and write, Metadata read. Do not give it Workflows.
+2. Add a provider for the token to your San Mateo catalog
+   (`[san_mateo] catalog`):
+
+   ```yaml
+   github-pat:
+       display_name: GitHub (fine-grained token)
+       auth_mode: API_KEY
+       proxy:
+           base_url: https://api.github.com
+           headers:
+               accept: application/vnd.github+json
+               authorization: Bearer ${apiKey}
+           retry:
+               at: [x-ratelimit-reset]
+               remaining: x-ratelimit-remaining
+               error_code: ['403', '429']
+           verification:
+               method: GET
+               endpoints: [/user]
+   ```
+
+3. Add the integration and the section, then run `lg connect littleguy-pr`
+   and paste the token on the page that opens:
+
+   ```toml
+   [[san_mateo.integration]]
+   key = "littleguy-pr"
+   provider = "github-pat"
+
+   [patches]
+   integration = "littleguy-pr"
+   repo = "autumn-foundation/littleguy"
+   # base = "main"   # the branch that each PR targets
+   ```
+
+4. On GitHub, add a ruleset on the base branch that requires your review,
+   so the token cannot merge either.
+
+littleguy calls `propose_patch` with exact edits against a commit. The
+Patches tab of the workspace page shows each patch as a diff, with Open
+draft PR and Decline. `lg patches` lists them, `lg patch show <id>` prints
+one, and `lg patch open <id>` prints the diff and asks first. An open
+pushes one commit to `littleguy/patch-<id>-<title>` and opens a draft PR,
+and CI runs on it. A patch never writes under `.github/`, and a patch that
+holds the value of a house key is refused. The API tools never get the
+patch integration. [ADR 0042](docs/adr/0042-littleguy-proposes-patches.md)
+explains the design.
+
 ## Web pages
 
 `lg serve` is an autumn-web app. The home page is the chat: the

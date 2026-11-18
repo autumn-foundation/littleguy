@@ -51,6 +51,9 @@ pub(super) struct Kit {
     /// The API of the providers.
     #[cfg(feature = "api")]
     pub(super) api: Option<crate::tools::ApiLink>,
+    /// The patches of `[patches]`, rebuilt at each assembly (ADR 0042).
+    #[cfg(feature = "patches")]
+    pub(super) patches: Option<Arc<crate::patches::Patches>>,
     /// The tenant database of a fleet, which holds the stores.
     pub(super) tenant: Option<PathBuf>,
     /// The secrets by variable name, opened at start (ADR 0040).
@@ -128,6 +131,13 @@ impl Kit {
                 &self.skills_dir,
             ));
         }
+        #[cfg(feature = "patches")]
+        {
+            self.patches = self.patches_of(config)?;
+            if let Some(patches) = &self.patches {
+                tools = tools.with(crate::patches::tools(patches));
+            }
+        }
         // Notes are memory, and the file switch covers them too. A daemon
         // with memory off opens no memory file for them.
         #[cfg(feature = "notes")]
@@ -135,6 +145,34 @@ impl Kit {
             tools = tools.with(crate::notes::tools(&self.stores()?));
         }
         Ok(tools)
+    }
+
+    /// The patches of `config` on the San Mateo proxy, when it has a
+    /// `[patches]` section.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the memory store does not open.
+    #[cfg(feature = "patches")]
+    fn patches_of(&mut self, config: &Config) -> Result<Option<Arc<crate::patches::Patches>>> {
+        let Some(section) = &config.patches else {
+            return Ok(None);
+        };
+        let Some((api, _)) = &self.api else {
+            tracing::warn!("the patch tools are off: San Mateo did not start");
+            return Ok(None);
+        };
+        let secrets = crate::patches::scannable(crate::house_keys::values(&self.keys, config));
+        Ok(Some(Arc::new(crate::patches::Patches {
+            github: crate::patches::github::Github::new(
+                Arc::clone(api),
+                &section.integration,
+                &section.repo,
+            ),
+            base_branch: section.base.clone(),
+            stores: self.stores()?,
+            secrets: Arc::new(secrets),
+        })))
     }
 
     /// The tools of the integrations that `config` turns on: Google and

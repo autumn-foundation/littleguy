@@ -149,6 +149,25 @@ pub enum Request {
         /// The skill.
         name: String,
     },
+    /// The patches of the assistant (ADR 0042). Only the owner may.
+    Patches,
+    /// Open the waiting patch `id` as a draft PR, when its digest is
+    /// `digest`: the digest of the diff that the owner read. Only the owner
+    /// may.
+    OpenPatch {
+        /// The patch.
+        id: i64,
+        /// The digest of the patch that the owner read.
+        digest: String,
+    },
+    /// Decline the waiting patch `id`. Only the owner may.
+    DeclinePatch {
+        /// The patch.
+        id: i64,
+        /// Why, for the assistant.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// Accept a proposed goal, or decline it, drop an active goal, drop an
     /// open or answered idea, or reopen an answered idea. Only the owner
     /// may.
@@ -199,6 +218,39 @@ pub struct SkillDraftEntry {
     pub created_ms: i64,
     /// Whether a skill of that name exists, so that accepting replaces it.
     pub revises: bool,
+}
+
+/// One patch of the assistant (ADR 0042).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchEntry {
+    /// Its number.
+    pub id: i64,
+    /// The PR title.
+    pub title: String,
+    /// The PR body.
+    pub body: String,
+    /// `waiting`, `opened`, `merged`, `closed`, `declined` or `withdrawn`.
+    pub status: String,
+    /// The commit that the edits are written against.
+    pub base: String,
+    /// The unified diff that opening pushes.
+    pub diff: String,
+    /// The digest of the title, the body, the base and the diff. Opening
+    /// sends it back.
+    pub digest: String,
+    /// The patch whose PR this one revises.
+    pub revises: Option<i64>,
+    /// The PR, once open.
+    pub pr: Option<i64>,
+    /// The URL of the PR, once open.
+    pub pr_url: Option<String>,
+    /// Why the owner declined it.
+    pub reason: Option<String>,
+    /// What the owner reads with care: an edit of a manifest, a lock
+    /// file, a build script or the automation.
+    pub warnings: Vec<String>,
+    /// When the assistant proposed it, in epoch milliseconds.
+    pub created_ms: i64,
 }
 
 /// What the owner decides about a goal or an idea.
@@ -623,6 +675,23 @@ pub enum Response {
         /// The drafts of the assistant, oldest first.
         drafts: Vec<SkillDraftEntry>,
     },
+    /// The patches of the assistant: the waiting ones and the open PRs
+    /// first, then the newest that ended.
+    Patches {
+        /// The repository, `owner/name`.
+        repo: String,
+        /// Each patch.
+        patches: Vec<PatchEntry>,
+    },
+    /// The owner opened a patch as a draft PR.
+    PatchOpened {
+        /// The patch.
+        id: i64,
+        /// The PR number.
+        pr: i64,
+        /// The URL of the PR.
+        url: String,
+    },
     /// What a listing asked for is not set up in this daemon: a section is
     /// missing, or this build lacks the feature. It is not a failure. The
     /// message says how to turn it on.
@@ -753,6 +822,15 @@ mod tests {
             Request::Deny {
                 id: 3,
                 reason: Some(String::from("no")),
+            },
+            Request::Patches,
+            Request::OpenPatch {
+                id: 4,
+                digest: String::from("ab12"),
+            },
+            Request::DeclinePatch {
+                id: 4,
+                reason: None,
             },
         ] {
             let line = serde_json::to_string(&request).unwrap();

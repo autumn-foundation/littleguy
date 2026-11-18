@@ -9,6 +9,7 @@ use vstd::prelude::*;
 pub mod addr;
 pub mod house_keys;
 pub mod pairing;
+pub mod patch_path;
 pub mod route;
 
 verus! {

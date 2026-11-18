@@ -24,6 +24,9 @@ council = ["plans", "skills"]
 history = []
 # The notes of the assistant (`notes`, ADR 0029).
 notes = []
+# The patches that the assistant proposes and the owner opens as draft PRs
+# (`patches`, ADR 0042).
+patches = []
 
 [dependencies]
 autumn-harvest-agent = { version = "0.10.0", default-features = false }

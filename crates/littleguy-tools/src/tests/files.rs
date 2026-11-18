@@ -173,6 +173,19 @@ async fn search_notes_finds_a_forgotten_note_by_its_words() {
     assert_eq!(handle.snapshot().files().len(), 4);
 }
 
+/// Issue #35: the trigger of `search_notes` once said "a note", and a run
+/// picked it for the notes of `memory.db`. It reads only the workspace, so
+/// its description names files and says that it reads no note.
+#[cfg(feature = "search-notes")]
+#[test]
+fn search_notes_says_it_searches_files_and_not_notes() {
+    let search = crate::search_notes_tool();
+    let said = search.description();
+    assert!(said.contains("a file of your workspace"), "{said}");
+    assert!(!said.contains("remember a note"), "{said}");
+    assert!(said.contains("does not read your notes"), "{said}");
+}
+
 #[cfg(feature = "search-notes")]
 #[tokio::test]
 async fn search_notes_refuses_an_empty_query_and_no_workspace() {

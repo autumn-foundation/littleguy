@@ -7,7 +7,7 @@
 //! - [`file_tools`] read and write the files of the persistent workspace of
 //!   the agent.
 //! - [`search_notes_tool`] finds the files of the workspace that hold some
-//!   words, so the agent can recall a note whose path it forgot.
+//!   words, so the agent can find a file whose path it forgot.
 //! - [`grep_files_tool`] finds the lines of the workspace that match a
 //!   pattern, with their paths and line numbers, as `rg` does.
 //! - [`mcp::connect`] turns the tools of each MCP server in the config into
@@ -19,7 +19,7 @@
 //!
 //! Feature `web` builds the fetch and search tools, feature `mcp` the MCP
 //! tools, feature `google` the Google tools, feature `api` the API tools,
-//! feature `search-notes` the note search and feature `grep-files` the line
+//! feature `search-notes` the word search and feature `grep-files` the line
 //! search. All but `api` are on by default. The file tools are always on.
 //!
 //! The web tools read only, and label their results as untrusted input,

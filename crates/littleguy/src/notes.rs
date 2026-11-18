@@ -1,8 +1,8 @@
 //! The note tools of the assistant (ADR 0029).
 //!
 //! A note is text under a name in `memory.db`, beside the ideas and goals.
-//! The workspace is read-only on a tick, so a note there cannot be fixed
-//! unattended. These notes can: `write_note` and `delete_note` are
+//! A tick is refused `write_file` and `delete_file`, so a note in the
+//! workspace cannot be fixed unattended. These notes can: `write_note` and `delete_note` are
 //! `Internal`, as `add_idea` is, and they persist on a tick. `read_note`
 //! and `list_notes` only read. A note can hold what a page said, so both
 //! carry the `untrusted_input` label, as `list_plans` does.
@@ -92,8 +92,8 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
         FnTool::new(
             "write_note",
             "Write a note: what you learned and will need again. It replaces a note of the \
-             same name. Notes are your own, so this works on a heartbeat too, where the \
-             workspace files are read-only. Fix a note as soon as you learn it is wrong.",
+             same name. Notes are your own, so this works on a heartbeat too, where \
+             write_file and delete_file are refused. Fix a note as soon as you learn it is wrong.",
             name_schema(Some(("text", "The whole note, in markdown."))),
             move |input| {
                 let stores = Arc::clone(&write);
@@ -169,6 +169,20 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #35: the workspace is not read-only on a tick. A tick is
+    /// refused the file tools that change it, which are `Write`.
+    #[test]
+    fn write_note_names_the_refusal_and_not_a_read_only_workspace() {
+        let stores = Arc::new(SqliteStores::open_in_memory().unwrap());
+        let write = tools(&stores)
+            .into_iter()
+            .find(|tool| tool.name() == "write_note")
+            .unwrap();
+        let said = write.description();
+        assert!(!said.contains("read-only"), "{said}");
+        assert!(said.contains("write_file"), "{said}");
+    }
 
     #[tokio::test]
     async fn notes_are_written_found_read_and_deleted_and_safe_on_a_tick() {

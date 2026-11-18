@@ -219,10 +219,14 @@ resizes the blocks at once, and a smaller size never drops an entry: a
 block keeps at least what it holds.
 
 After each pass that learned something, littleguy reflects once: the
-reflection hears the facts that the pass added, and files
-[ideas](#goals-and-ideas) for anything worth planning or researching. A
-pass that added no fact wakes no reflection, and `recent_wakes` says why.
-`pass_episodes = 8` under `[memory]` sets how many episodes one pass reads
+reflection hears the facts that the pass sent to the store, the episodes it
+read and any fact the store refused, and files
+[ideas](#goals-and-ideas) for anything worth planning or researching. The
+store skips a fact that the block holds already, so the prompt counts what
+was sent, not what changed. A pass that ended without a mark says so, since
+its episodes wait for the next pass. A pass that sent no fact wakes no
+reflection, and `recent_wakes` says why. `pass_episodes = 8` under
+`[memory]` sets how many episodes one pass reads
 ([ADR 0030](docs/adr/0030-a-reflection-hears-what-the-pass-did.md)), and
 `pass_tokens` can cap the output of its model call. By default a pass has
 no cap of its own, so the limit of the provider applies. The engine fixes

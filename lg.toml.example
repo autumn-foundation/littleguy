@@ -41,6 +41,12 @@ window = 40
 ## no bound, a message runs until the model answers.
 # max_steps = 50
 
+## The most bytes of one model request. With no value the engine cap of
+## 2 MiB applies. Set it under the context window of your model, so that
+## compaction runs before the provider refuses a request. The engine also
+## cuts each tool result to about a sixth of it.
+# max_request_bytes = 600000
+
 ## ------------------------------------------------------------------ runs
 
 [runs]
@@ -138,6 +144,16 @@ bind = "127.0.0.1:3004"
 # timezone = "UTC"
 # research = true
 # deliver = "web"
+
+## Compaction: near the request cap, the assistant saves progress notes,
+## and the window resets to the task and the notes, so a long message goes
+## on instead of stopping. A reset is due at `at_percent` of
+## max_request_bytes. `max_resets` bounds the resets of one message; no
+## bound by default. The notes keep at most `notes_bytes`.
+# [compaction]
+# at_percent = 80
+# max_resets = 20
+# notes_bytes = 8192
 
 ## Where SKILL.md files live. The default is a skills folder next to this
 ## file.

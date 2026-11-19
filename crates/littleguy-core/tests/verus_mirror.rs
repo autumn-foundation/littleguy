@@ -87,3 +87,11 @@ fn the_patch_path_proof_covers_the_shipped_kernel() -> TestResult {
         "formal/verus/src/patch_path.rs",
     )
 }
+
+#[test]
+fn the_compaction_proof_covers_the_shipped_kernel() -> TestResult {
+    mirrors(
+        "crates/littleguy-core/src/compaction.rs",
+        "formal/verus/src/compaction.rs",
+    )
+}

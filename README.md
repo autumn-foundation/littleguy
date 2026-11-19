@@ -980,6 +980,10 @@ owner = "mark"
 system = "You are littleguy, a small and helpful personal assistant."
 window = 40
 # max_steps = 50                      # tool rounds per message or tick; no bound by default
+# max_request_bytes = 600000          # bytes of one model request; the engine cap of 2 MiB by default
+
+# [compaction]                        # save notes and reset the window near the cap (ADR 0043)
+# at_percent = 80
 
 [discord]
 pairing = true                        # strangers get a code; false drops them
@@ -995,6 +999,22 @@ tool rounds it takes. Set `max_steps` to bound it: an op that needs more
 rounds stops and says so. Each round is a model call. A tool result is cut
 only by the tool's own setting, such as `fetch_max_chars`, not by the
 engine ([ADR 0034](docs/adr/0034-no-arbitrary-caps-on-model-work.md)).
+
+A long op can grow its window until a request passes the request cap,
+`max_request_bytes`. The engine then does not send it, and the op stops:
+"the conversation got too long". With a `[compaction]` section, the
+assistant gets a `save_progress` tool. When a request reaches
+`at_percent` of the cap, the assistant saves its progress notes, and the
+engine resets the window to the system prompt, the task and the notes.
+The op then goes on. `max_resets` bounds the resets of one op, with no
+bound by default, and `notes_bytes` bounds the notes (8192 by default).
+The notes stay for later messages until the assistant saves new ones. Set
+`max_request_bytes` under the context window of your model, or the
+provider refuses a request before a reset is due. The config refuses a
+setting with no room for the save turn, such as `at_percent = 100`. A
+heartbeat tick or a booked wake is read-only, so the engine gives it no
+reset. The `compaction` feature builds it.
+[ADR 0043](docs/adr/0043-compaction.md) explains the design.
 
 Each message ends the run of the assistant, and the next message starts a
 new one, so a change to the config reaches the next message. A run that
@@ -1081,7 +1101,8 @@ refine policy and the run retention apply at once. `owner`, `san_mateo`, `google
 `mcp`, `ui`, `hooks` and `fleet` wait for the next start. A file that does
 not parse, or a route that does not build, changes nothing.
 
-`system`, `window`, `max_steps` and `tools` apply from the next message.
+`system`, `window`, `max_steps`, `max_request_bytes`, `compaction` and
+`tools` apply from the next message.
 autumn-harvest reads them once per run (autumn-harvest #2658), so the
 assistant ends its run after each message, and after a reload or a start
 (ADR 0035).

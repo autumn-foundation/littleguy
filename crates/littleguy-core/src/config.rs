@@ -4,6 +4,12 @@
 //! owner = "mark"
 //! system = "You are littleguy, a helpful assistant."
 //! window = 40
+//! max_request_bytes = 600000
+//!
+//! [compaction]
+//! at_percent = 80
+//! max_resets = 20
+//! notes_bytes = 8192
 //!
 //! [discord]
 //! pairing = true
@@ -120,6 +126,16 @@
 //! `deliver` says where a tick that has news speaks: `web`, the chat of the
 //! web pages, for now.
 //!
+//! `max_request_bytes` caps one model request, in bytes. With no value the
+//! engine cap of 2 MiB applies. Set it under the context window of the
+//! model, so that the engine stops an op before the provider refuses it.
+//!
+//! The `[compaction]` section turns on compaction (ADR 0043). When a request
+//! reaches `at_percent` of the request cap, the assistant saves progress
+//! notes of at most `notes_bytes` bytes. Then the engine resets the window
+//! to the task and the notes. `max_resets` bounds the resets of one op. It
+//! has no bound by default.
+//!
 //! The `[skills]` section names the folder of the `SKILL.md` files, as
 //! Claude Code and Codex keep them. By default it is `skills/` next to the
 //! config file. The skills reach the assistant through the refine overlay,
@@ -207,6 +223,33 @@ pub enum ConfigError {
     /// The tool rounds of an op are zero.
     #[error("max_steps must be at least 1")]
     MaxSteps,
+    /// The request cap is zero.
+    #[error("max_request_bytes must be at least 1")]
+    MaxRequestBytes,
+    /// The compaction percent is not from 1 to 100.
+    #[error("compaction.at_percent must be from 1 to 100, not {0}")]
+    CompactionPercent(u8),
+    /// The compaction allows no reset.
+    #[error("compaction.max_resets must be at least 1. Remove [compaction] to turn it off")]
+    CompactionResets,
+    /// The notes bound is zero.
+    #[error("compaction.notes_bytes must be at least 1")]
+    CompactionNotes,
+    /// A save turn does not fit under the request cap, so the assistant
+    /// could never save its notes before a reset.
+    #[error(
+        "compaction has no room to save: a reset is due at {due} of {cap} bytes, and the \
+         notice and the notes need {need} more. Lower at_percent or notes_bytes, or raise \
+         max_request_bytes"
+    )]
+    CompactionRoom {
+        /// The request cap, in bytes.
+        cap: u64,
+        /// The bytes of a request that makes a reset due.
+        due: u64,
+        /// The bytes of the notice and the notes.
+        need: u64,
+    },
     /// A Discord user id is not a snowflake.
     #[error("`{0}` is not a Discord user id")]
     DiscordUser(String),
@@ -1046,6 +1089,95 @@ fn heartbeat(raw: RawHeartbeat, memory_timezone: &str) -> Result<HeartbeatConfig
     })
 }
 
+/// The default percent of the request cap at which a reset is due.
+pub const DEFAULT_COMPACTION_PERCENT: u8 = 80;
+
+/// The settings of compaction (ADR 0043). autumn-harvest runs it as a
+/// context reset (issue #2453).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionConfig {
+    /// A request that reaches this percent of the request cap makes a reset
+    /// due. From 1 to 100.
+    pub at_percent: u8,
+    /// The most resets of one op. `None` sets no bound (ADR 0034).
+    pub max_resets: Option<u32>,
+    /// The bound on the progress notes, in bytes.
+    pub notes_bytes: u32,
+}
+
+impl CompactionConfig {
+    /// The engine setting of this section.
+    #[must_use]
+    pub const fn context_reset(&self) -> autumn_harvest_agent::ContextReset {
+        let max_resets = match self.max_resets {
+            Some(max) => max,
+            None => u32::MAX,
+        };
+        autumn_harvest_agent::ContextReset::new(max_resets, self.at_percent)
+            .max_notes_bytes(self.notes_bytes)
+    }
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            at_percent: DEFAULT_COMPACTION_PERCENT,
+            max_resets: None,
+            notes_bytes: autumn_harvest_agent::context_reset::DEFAULT_MAX_NOTES_BYTES,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCompaction {
+    at_percent: Option<u8>,
+    max_resets: Option<u32>,
+    notes_bytes: Option<u32>,
+}
+
+/// Checks the request cap and the compaction section under it. Only a
+/// value that cannot work is refused (ADR 0034).
+fn request_cap(
+    max_request_bytes: Option<u64>,
+    section: Option<&RawCompaction>,
+) -> Result<Option<CompactionConfig>, ConfigError> {
+    if max_request_bytes == Some(0) {
+        return Err(ConfigError::MaxRequestBytes);
+    }
+    let cap = max_request_bytes.unwrap_or(crate::compaction::DEFAULT_REQUEST_CAP);
+    section.map(|raw| compaction(raw, cap)).transpose()
+}
+
+/// Checks the compaction section against the request cap `cap`.
+fn compaction(raw: &RawCompaction, cap: u64) -> Result<CompactionConfig, ConfigError> {
+    let defaults = CompactionConfig::default();
+    let at_percent = raw.at_percent.unwrap_or(defaults.at_percent);
+    if !(1..=100).contains(&at_percent) {
+        return Err(ConfigError::CompactionPercent(at_percent));
+    }
+    if raw.max_resets == Some(0) {
+        return Err(ConfigError::CompactionResets);
+    }
+    let notes_bytes = raw.notes_bytes.unwrap_or(defaults.notes_bytes);
+    if notes_bytes == 0 {
+        return Err(ConfigError::CompactionNotes);
+    }
+    let notice = crate::compaction::notice_bytes();
+    if !crate::compaction::save_turn_fits(cap, at_percent, notes_bytes, notice) {
+        return Err(ConfigError::CompactionRoom {
+            cap,
+            due: crate::compaction::due_bytes(cap, at_percent),
+            need: u64::from(notes_bytes) + u64::from(notice),
+        });
+    }
+    Ok(CompactionConfig {
+        at_percent,
+        max_resets: raw.max_resets,
+        notes_bytes,
+    })
+}
+
 /// Where the skills of the assistant live (ADR 0024).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SkillsConfig {
@@ -1685,6 +1817,8 @@ struct Raw {
     system: Option<String>,
     window: Option<u32>,
     max_steps: Option<u32>,
+    max_request_bytes: Option<u64>,
+    compaction: Option<RawCompaction>,
     #[serde(default)]
     discord: RawDiscord,
     #[serde(default)]
@@ -1982,6 +2116,12 @@ pub struct Config {
     /// needs more stops and says so. `None` sets no bound: the op runs
     /// until the model answers (ADR 0034).
     pub max_steps: Option<u32>,
+    /// The cap of one model request, in bytes. `None` keeps the engine cap
+    /// of 2 MiB ([`crate::compaction::DEFAULT_REQUEST_CAP`]). A request
+    /// over the cap is not sent, and the op stops.
+    pub max_request_bytes: Option<u64>,
+    /// Compaction, when the config has the section (ADR 0043).
+    pub compaction: Option<CompactionConfig>,
     /// The Discord settings.
     pub discord: DiscordConfig,
     /// The Slack settings.
@@ -2038,6 +2178,8 @@ impl Config {
             system: String::from(DEFAULT_SYSTEM),
             window: DEFAULT_WINDOW,
             max_steps: None,
+            max_request_bytes: None,
+            compaction: None,
             discord: DiscordConfig::default(),
             slack: SlackConfig::default(),
             camel: Vec::new(),
@@ -2069,7 +2211,8 @@ impl Config {
     ///
     /// Returns an error when the text is not valid TOML, names an unknown
     /// key, holds a bad owner name or Discord user id, sets a zero window,
-    /// or holds a bad camel route, memory or San Mateo setting.
+    /// holds a compaction setting that cannot save before a reset, or holds
+    /// a bad camel route, memory or San Mateo setting.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: Raw = toml::from_str(text)?;
         let window = raw.window.unwrap_or(DEFAULT_WINDOW);
@@ -2082,6 +2225,8 @@ impl Config {
         if max_steps == Some(0) {
             return Err(ConfigError::MaxSteps);
         }
+        let max_request_bytes = raw.max_request_bytes;
+        let compaction_section = request_cap(max_request_bytes, raw.compaction.as_ref())?;
         let allowed = raw
             .discord
             .allowed
@@ -2127,6 +2272,8 @@ impl Config {
             system: raw.system.unwrap_or_else(|| String::from(DEFAULT_SYSTEM)),
             window,
             max_steps,
+            max_request_bytes,
+            compaction: compaction_section,
             discord: DiscordConfig {
                 pairing: raw.discord.pairing.unwrap_or(true),
                 allowed,
@@ -2797,6 +2944,8 @@ mod tests {
         );
         assert!(all.google.is_some() && all.api.is_some() && all.patches.is_some());
         assert!(!all.camel.is_empty() && all.hooks.is_some());
+        assert_eq!(all.max_request_bytes, Some(600_000));
+        assert!(all.compaction.is_some_and(|c| c.max_resets == Some(20)));
     }
 
     #[test]
@@ -2949,6 +3098,93 @@ mod tests {
             Config::parse("owner = \"m\"\nmax_steps = 0"),
             Err(ConfigError::MaxSteps)
         ));
+    }
+
+    #[test]
+    fn the_request_cap_is_the_owners_call() {
+        let bare = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(bare.max_request_bytes, None, "the engine cap by default");
+        let set = Config::parse("owner = \"mark\"\nmax_request_bytes = 600000").unwrap();
+        assert_eq!(set.max_request_bytes, Some(600_000));
+        assert!(matches!(
+            Config::parse("owner = \"mark\"\nmax_request_bytes = 0"),
+            Err(ConfigError::MaxRequestBytes)
+        ));
+    }
+
+    #[test]
+    fn compaction_is_off_without_its_section() {
+        let config = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(config.compaction, None);
+    }
+
+    #[test]
+    fn the_compaction_section_is_read_with_its_defaults() {
+        let bare = Config::parse("owner = \"mark\"\n[compaction]").unwrap();
+        let section = bare.compaction.unwrap();
+        assert_eq!(section, CompactionConfig::default());
+        assert_eq!(section.at_percent, 80);
+        assert_eq!(section.max_resets, None, "no bound by default (ADR 0034)");
+        assert_eq!(section.notes_bytes, 8_192, "the engine default");
+        let engine = section.context_reset();
+        assert_eq!(engine.max_resets, u32::MAX);
+        assert_eq!(engine.reset_at_percent, 80);
+        assert_eq!(engine.max_notes_bytes, 8_192);
+
+        let set = Config::parse(
+            "owner = \"mark\"\nmax_request_bytes = 600000\n[compaction]\nat_percent = 70\nmax_resets = 3\nnotes_bytes = 4000",
+        )
+        .unwrap();
+        let section = set.compaction.unwrap();
+        assert_eq!(
+            section,
+            CompactionConfig {
+                at_percent: 70,
+                max_resets: Some(3),
+                notes_bytes: 4_000,
+            }
+        );
+        assert_eq!(
+            section.context_reset(),
+            autumn_harvest_agent::ContextReset::new(3, 70).max_notes_bytes(4_000)
+        );
+    }
+
+    #[test]
+    fn a_compaction_setting_that_cannot_work_is_refused() {
+        let parse = |text: &str| Config::parse(&format!("owner = \"mark\"\n{text}"));
+        for percent in [0, 101, 255] {
+            assert!(
+                matches!(
+                    parse(&format!("[compaction]\nat_percent = {percent}")),
+                    Err(ConfigError::CompactionPercent(p)) if p == percent
+                ),
+                "{percent}"
+            );
+        }
+        assert!(matches!(
+            parse("[compaction]\nmax_resets = 0"),
+            Err(ConfigError::CompactionResets)
+        ));
+        assert!(matches!(
+            parse("[compaction]\nnotes_bytes = 0"),
+            Err(ConfigError::CompactionNotes)
+        ));
+        assert!(parse("[compaction]\nevery = 3").is_err(), "an unknown key");
+        // At 100% a save turn never fits: the reset would drop the work.
+        let full = parse("[compaction]\nat_percent = 100").unwrap_err();
+        assert!(matches!(full, ConfigError::CompactionRoom { .. }), "{full}");
+        assert!(full.to_string().contains("Lower at_percent"), "{full}");
+        // Notes as large as the room under a small cap leave no room.
+        let small =
+            parse("max_request_bytes = 10000\n[compaction]\nnotes_bytes = 8192").unwrap_err();
+        let ConfigError::CompactionRoom { cap, due, need } = small else {
+            panic!("no room: {small}");
+        };
+        assert_eq!((cap, due), (10_000, 8_000));
+        assert!(need > 8_192, "the notice counts too: {need}");
+        // The same notes fit under a cap with room.
+        parse("max_request_bytes = 100000\n[compaction]\nnotes_bytes = 8192").unwrap();
     }
 
     #[test]

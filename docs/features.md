@@ -46,6 +46,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `auto-approve` | yes | `[sandbox] approve = "auto"`: a reviewer model decides each call that waits, and asks the owner only when it is unsure (ADR 0037). | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `camel` | no | `[[camel.route]]`: Apache Camel routes that feed the assistant. | `autumn-harvest-plugin`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `harvest-camel` |
 | `claude` | yes | `--model claude`: Claude over the Messages API. | `reqwest`, `rustls`, `sha2` |
+| `compaction` | yes | `[compaction]`: near the request cap, the assistant saves progress notes, and the engine resets the window to the task and the notes (ADR 0043). It adds no crate. | none |
 | `council` | yes | `[council]`: model calls that decide clean proposals of goals and skills for the owner (ADR 0027). | none |
 | `discord` | yes | Discord direct messages over the gateway. | `autumn-plugin-discord`, `reqwest`, `rustls` |
 | `fleet` | no | `[fleet]`: the memory, the episodes and the approvals in a tenant database, replicated to a directory or an S3-compatible store by autumn-web. The replication of autumn-web needs a database backend, so it takes `postgres`. | `tokio-util`, `autumn-web/http-client`, `autumn-web/postgres` |

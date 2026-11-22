@@ -11,6 +11,12 @@
 //! max_resets = 20
 //! notes_bytes = 8192
 //!
+//! [research]
+//! max_tokens_per_call = 1280000
+//! max_tokens_per_item = 32000
+//! max_steps_per_item = 4
+//! concurrency = 8
+//!
 //! [discord]
 //! pairing = true
 //! allowed = ["123456789012345678"]
@@ -136,6 +142,15 @@
 //! to the task and the notes. `max_resets` bounds the resets of one op. It
 //! has no bound by default.
 //!
+//! The `[research]` section gives the assistant the `sweep` tool (ADR
+//! 0044). One call reads many sources, each in its own read-only `research`
+//! run, and returns one short row per source. No bound has a default of its
+//! own (ADR 0034). `max_tokens_per_call` is the token ceiling of one call.
+//! With no value, the call has no ceiling. `max_tokens_per_item` and
+//! `max_steps_per_item` bound each source run. `concurrency`
+//! runs that many sources at the same time, 1 by default. `max_items`
+//! bounds the sources of one call.
+//!
 //! The `[skills]` section names the folder of the `SKILL.md` files, as
 //! Claude Code and Codex keep them. By default it is `skills/` next to the
 //! config file. The skills reach the assistant through the refine overlay,
@@ -249,6 +264,25 @@ pub enum ConfigError {
         due: u64,
         /// The bytes of the notice and the notes.
         need: u64,
+    },
+    /// A research bound is zero.
+    #[error("research.{0} must be at least 1")]
+    ResearchZero(&'static str),
+    /// The research concurrency is over the engine bound.
+    #[error("research.concurrency must be at most {max}, not {got}")]
+    ResearchConcurrency {
+        /// The value of the config.
+        got: u32,
+        /// The engine bound.
+        max: u32,
+    },
+    /// The research item bound is over the engine bound.
+    #[error("research.max_items must be at most {max}, not {got}")]
+    ResearchItems {
+        /// The value of the config.
+        got: u32,
+        /// The engine bound.
+        max: u32,
     },
     /// A Discord user id is not a snowflake.
     #[error("`{0}` is not a Discord user id")]
@@ -1178,6 +1212,72 @@ fn compaction(raw: &RawCompaction, cap: u64) -> Result<CompactionConfig, ConfigE
     })
 }
 
+/// The settings of the research tool (ADR 0044). Every bound is the
+/// owner's, and no bound has a default of its own (ADR 0034).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResearchConfig {
+    /// The token ceiling of one `sweep` call, over every source it reads.
+    /// `None` sets no ceiling.
+    pub max_tokens_per_call: Option<std::num::NonZeroU32>,
+    /// The token cap of one source run. `None` sets no cap of its own.
+    pub max_tokens_per_item: Option<std::num::NonZeroU32>,
+    /// The most tool rounds of one source run. `None` sets no bound.
+    pub max_steps_per_item: Option<std::num::NonZeroU32>,
+    /// The source runs at the same time. 1 by default, as in the engine.
+    pub concurrency: std::num::NonZeroU32,
+    /// The most sources of one call. `None` keeps the engine bound.
+    pub max_items: Option<std::num::NonZeroU32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResearch {
+    max_tokens_per_call: Option<u32>,
+    max_tokens_per_item: Option<u32>,
+    max_steps_per_item: Option<u32>,
+    concurrency: Option<u32>,
+    max_items: Option<u32>,
+}
+
+/// A bound that is unset, or at least 1.
+fn at_least_one(
+    value: Option<u32>,
+    key: &'static str,
+) -> Result<Option<std::num::NonZeroU32>, ConfigError> {
+    value
+        .map(|n| std::num::NonZeroU32::new(n).ok_or(ConfigError::ResearchZero(key)))
+        .transpose()
+}
+
+/// Checks the research section. Only a value that cannot work is refused.
+fn research(raw: &RawResearch) -> Result<ResearchConfig, ConfigError> {
+    let max_tokens_per_call = at_least_one(raw.max_tokens_per_call, "max_tokens_per_call")?;
+    let concurrency =
+        at_least_one(raw.concurrency, "concurrency")?.unwrap_or(std::num::NonZeroU32::MIN);
+    let max = autumn_harvest_agent::MAX_PARALLEL_CHILDREN;
+    if concurrency.get() > max {
+        return Err(ConfigError::ResearchConcurrency {
+            got: concurrency.get(),
+            max,
+        });
+    }
+    let max_items = at_least_one(raw.max_items, "max_items")?;
+    let bound = autumn_harvest_agent::sampling::MAX_SWEEP_ITEMS;
+    if let Some(got) = max_items.filter(|n| n.get() > bound) {
+        return Err(ConfigError::ResearchItems {
+            got: got.get(),
+            max: bound,
+        });
+    }
+    Ok(ResearchConfig {
+        max_tokens_per_call,
+        max_tokens_per_item: at_least_one(raw.max_tokens_per_item, "max_tokens_per_item")?,
+        max_steps_per_item: at_least_one(raw.max_steps_per_item, "max_steps_per_item")?,
+        concurrency,
+        max_items,
+    })
+}
+
 /// Where the skills of the assistant live (ADR 0024).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SkillsConfig {
@@ -1819,6 +1919,7 @@ struct Raw {
     max_steps: Option<u32>,
     max_request_bytes: Option<u64>,
     compaction: Option<RawCompaction>,
+    research: Option<RawResearch>,
     #[serde(default)]
     discord: RawDiscord,
     #[serde(default)]
@@ -2122,6 +2223,8 @@ pub struct Config {
     pub max_request_bytes: Option<u64>,
     /// Compaction, when the config has the section (ADR 0043).
     pub compaction: Option<CompactionConfig>,
+    /// The research tool, when the config has the section (ADR 0044).
+    pub research: Option<ResearchConfig>,
     /// The Discord settings.
     pub discord: DiscordConfig,
     /// The Slack settings.
@@ -2180,6 +2283,7 @@ impl Config {
             max_steps: None,
             max_request_bytes: None,
             compaction: None,
+            research: None,
             discord: DiscordConfig::default(),
             slack: SlackConfig::default(),
             camel: Vec::new(),
@@ -2227,6 +2331,7 @@ impl Config {
         }
         let max_request_bytes = raw.max_request_bytes;
         let compaction_section = request_cap(max_request_bytes, raw.compaction.as_ref())?;
+        let research_section = raw.research.as_ref().map(research).transpose()?;
         let allowed = raw
             .discord
             .allowed
@@ -2274,6 +2379,7 @@ impl Config {
             max_steps,
             max_request_bytes,
             compaction: compaction_section,
+            research: research_section,
             discord: DiscordConfig {
                 pairing: raw.discord.pairing.unwrap_or(true),
                 allowed,
@@ -2946,6 +3052,12 @@ mod tests {
         assert!(!all.camel.is_empty() && all.hooks.is_some());
         assert_eq!(all.max_request_bytes, Some(600_000));
         assert!(all.compaction.is_some_and(|c| c.max_resets == Some(20)));
+        assert!(
+            all.research
+                .is_some_and(|r| r.max_tokens_per_call.map(std::num::NonZeroU32::get)
+                    == Some(1_280_000)
+                    && r.concurrency.get() == 8)
+        );
     }
 
     #[test]
@@ -3110,6 +3222,87 @@ mod tests {
             Config::parse("owner = \"mark\"\nmax_request_bytes = 0"),
             Err(ConfigError::MaxRequestBytes)
         ));
+    }
+
+    #[test]
+    fn research_is_off_without_its_section() {
+        let config = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(config.research, None);
+    }
+
+    #[test]
+    fn the_research_section_has_no_bound_of_its_own() {
+        let set = Config::parse("owner = \"mark\"\n[research]")
+            .unwrap()
+            .research
+            .unwrap();
+        assert_eq!(set.max_tokens_per_call, None, "no invented ceiling");
+        assert_eq!(set.max_tokens_per_item, None, "no invented cap");
+        assert_eq!(set.max_steps_per_item, None, "no invented cap");
+        assert_eq!(
+            set.concurrency.get(),
+            1,
+            "one source at a time, as in the engine"
+        );
+        assert_eq!(set.max_items, None, "the engine bound");
+    }
+
+    #[test]
+    fn the_research_section_reads_each_bound() {
+        let set = Config::parse(
+            "owner = \"mark\"\n[research]\nmax_tokens_per_call = 640000\n\
+             max_tokens_per_item = 32000\nmax_steps_per_item = 4\nconcurrency = 8\nmax_items = 40",
+        )
+        .unwrap()
+        .research
+        .unwrap();
+        assert_eq!(
+            set.max_tokens_per_call.map(std::num::NonZeroU32::get),
+            Some(640_000)
+        );
+        assert_eq!(
+            set.max_tokens_per_item.map(std::num::NonZeroU32::get),
+            Some(32_000)
+        );
+        assert_eq!(
+            set.max_steps_per_item.map(std::num::NonZeroU32::get),
+            Some(4)
+        );
+        assert_eq!(set.concurrency.get(), 8);
+        assert_eq!(set.max_items.map(std::num::NonZeroU32::get), Some(40));
+    }
+
+    #[test]
+    fn a_research_bound_that_cannot_work_is_refused() {
+        let parse = |section: &str| {
+            Config::parse(&format!(
+                "owner = \"mark\"\n[research]\nmax_tokens_per_call = 1000\n{section}"
+            ))
+        };
+        for key in [
+            "max_tokens_per_item",
+            "max_steps_per_item",
+            "concurrency",
+            "max_items",
+        ] {
+            assert!(
+                matches!(parse(&format!("{key} = 0")), Err(ConfigError::ResearchZero(k)) if k == key),
+                "{key} = 0"
+            );
+        }
+        assert!(matches!(
+            Config::parse("owner = \"mark\"\n[research]\nmax_tokens_per_call = 0"),
+            Err(ConfigError::ResearchZero("max_tokens_per_call"))
+        ));
+        assert!(matches!(
+            parse("concurrency = 17"),
+            Err(ConfigError::ResearchConcurrency { got: 17, max: 16 })
+        ));
+        assert!(matches!(
+            parse("max_items = 1001"),
+            Err(ConfigError::ResearchItems { got: 1001, .. })
+        ));
+        assert!(parse("strategy = \"vote\"").is_err(), "an unknown key");
     }
 
     #[test]

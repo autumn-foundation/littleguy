@@ -58,6 +58,8 @@ mod protocol;
 mod refine;
 #[cfg(feature = "reflection")]
 mod reflection;
+#[cfg(feature = "research")]
+mod research;
 #[cfg(feature = "self-debug")]
 mod runlog;
 mod sandbox;

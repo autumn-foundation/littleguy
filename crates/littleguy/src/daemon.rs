@@ -212,6 +212,12 @@ pub fn harness(
     // `fetch_max_chars`. The engine cuts no result again (ADR 0034).
     let harness = AgentHarness::new(model).tool_output_limit(usize::MAX);
     let (mut harness, mut profile) = tools.apply(harness, profile);
+    // The `sweep` tool reads many sources in read-only runs of their own
+    // (ADR 0044).
+    #[cfg(feature = "research")]
+    if let Some(section) = &config.research {
+        (harness, profile) = crate::research::apply(harness, profile, section);
+    }
     if let Some(guard) = guard {
         (harness, profile) = guard.apply(harness, profile);
     } else {
@@ -1073,7 +1079,7 @@ impl Daemon {
         });
         // The answer stands even when the ledger cannot be read. A tick
         // that ran after the op in the same drive counts in it too.
-        let usage = usage::since(&self.rt, &id, mark)
+        let usage = usage::since(&self.rt, mark)
             .inspect_err(|error| tracing::warn!(%error, "the usage of an op is not known"))
             .ok();
         if !alone {
@@ -6431,6 +6437,8 @@ mod tests {
     mod google;
     #[cfg(feature = "patches")]
     mod patches;
+    #[cfg(feature = "research")]
+    mod research;
     #[cfg(feature = "sandbox")]
     mod sandboxed;
 }

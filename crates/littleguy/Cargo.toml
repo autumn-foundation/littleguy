@@ -53,7 +53,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.4"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "compaction", "search-notes", "grep-files", "notes", "history", "sealed-keys"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "compaction", "research", "search-notes", "grep-files", "notes", "history", "sealed-keys"]
 # Every integration.
 full = ["default", "camel", "google", "api", "patches", "fleet"]
 # Discord direct messages over the gateway.
@@ -108,6 +108,9 @@ council = ["plans", "skills", "littleguy-stores/council"]
 # and the engine resets the window to the task and the notes (ADR 0043).
 # It adds no crate.
 compaction = []
+# `[research]`: the `sweep` tool reads many sources in read-only `research`
+# runs and returns one short row per source (ADR 0044). It adds no crate.
+research = []
 # `[refine]` and `lg refine`: profile overlays that the model proposes and
 # the owner activates. It adds no crate.
 refine = []

@@ -985,6 +985,9 @@ window = 40
 # [compaction]                        # save notes and reset the window near the cap (ADR 0043)
 # at_percent = 80
 
+# [research]                          # the sweep tool: many sources, one row each (ADR 0044)
+# max_tokens_per_call = 1280000       # the token ceiling of one call; none by default
+
 [discord]
 pairing = true                        # strangers get a code; false drops them
 allowed = ["123456789012345678"]      # Discord user ids allowed from the start
@@ -1015,6 +1018,25 @@ setting with no room for the save turn, such as `at_percent = 100`. A
 heartbeat tick or a booked wake is read-only, so the engine gives it no
 reset. The `compaction` feature builds it.
 [ADR 0043](docs/adr/0043-compaction.md) explains the design.
+
+A `[research]` section gives the assistant the `sweep` tool. One call
+takes an instruction and a list of `{label, source}` items. The engine
+reads each source in a read-only `research` run of its own and gives back
+one short row per label (`ok`, `status`, `tokens`), the joined answers
+and the spend of the call. The transcript of each source run stays out
+of the window of the assistant, so it grows by the rows only. A heartbeat
+tick can call it too. No bound has a default of its own
+([ADR 0034](docs/adr/0034-no-arbitrary-caps-on-model-work.md)).
+`max_tokens_per_call` is the token ceiling of one call over every
+source, and the sources that it does not reach come back `not_run`.
+`max_tokens_per_item` and `max_steps_per_item` bound each source run,
+`concurrency` runs that many sources at the same time (1 by default), and
+`max_items` bounds the sources of one call. With no bound at all, a call
+runs each source until it answers. Each result marks the run with `untrusted_input`, as a web fetch
+does. The usage of a message and `model_usage` count the source runs.
+The `research` feature builds it.
+[ADR 0044](docs/adr/0044-a-research-tool-sweeps-sources.md) explains the
+design.
 
 Each message ends the run of the assistant, and the next message starts a
 new one, so a change to the config reaches the next message. A run that

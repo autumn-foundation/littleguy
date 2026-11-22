@@ -277,6 +277,10 @@ impl Kit {
         if config.compaction.is_some() {
             anyhow::bail!(crate::features::missing("[compaction]", "compaction"));
         }
+        #[cfg(not(feature = "research"))]
+        if config.research.is_some() {
+            anyhow::bail!(crate::features::missing("[research]", "research"));
+        }
         // A heartbeat tick asks first whether a goal is due or an idea waits.
         #[cfg(feature = "heartbeat")]
         let precheck = config.heartbeat.as_ref().map(|beat| Due {

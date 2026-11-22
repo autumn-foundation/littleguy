@@ -69,6 +69,12 @@ its own output.
 - The pass wrapper is a workaround. Remove it when the engine takes the
   cap as a setting, and map `pass_tokens` to that setting.
 
+## Update, 2026-11-22
+
+autumn-harvest-agent 0.11 takes the cap as a setting,
+`EpisodeSettings::max_pass_output_tokens`, and sends no cap by default.
+The wrapper is gone. `pass_tokens` sets that field.
+
 ## Second decision: the caps of stores, tools and prompts
 
 A sweep found more invented bounds. Each one dropped or refused work, or

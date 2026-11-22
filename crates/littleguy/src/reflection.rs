@@ -103,7 +103,8 @@ pub fn read_pass(rt: &SqliteRuntime, exec: &str) -> anyhow::Result<Pass> {
     for event in rt.load_history(id)? {
         match event {
             WorkflowEvent::WorkflowStarted { timestamp, .. } => {
-                pass.started.get_or_insert(timestamp);
+                pass.started
+                    .get_or_insert_with(|| crate::instant::from_engine(timestamp));
             }
             WorkflowEvent::ActivityScheduled {
                 activity_id, name, ..

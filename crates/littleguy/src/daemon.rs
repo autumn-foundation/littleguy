@@ -741,7 +741,8 @@ impl Daemon {
     fn with_clock(mut self, clock: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) -> Self {
         let clock: Clock = Arc::new(clock);
         let runtime = Arc::clone(&clock);
-        self.rt.set_clock(move || runtime());
+        self.rt
+            .set_clock(move || crate::instant::to_engine(runtime()));
         self.clock = clock;
         self
     }
@@ -1540,7 +1541,7 @@ impl Daemon {
                 autumn_harvest_agent::consolidate::CONSOLIDATE_WORKFLOW_NAME,
             )),
             states: vec![String::from("COMPLETED")],
-            started_after: Some(now - PASS_LOOK_BACK),
+            started_after: Some(crate::instant::to_engine(now - PASS_LOOK_BACK)),
             limit: Some(10),
             ..autumn_harvest_sqlite::ExecutionFilter::default()
         };
@@ -4506,14 +4507,16 @@ mod tests {
         assert_eq!(row.kind, "reflection");
         assert_eq!(
             row.outcome,
-            "skipped: the consolidation pass sent no facts (invalid_reply) and ended without \
+            "skipped: the consolidation pass sent no facts (output_capped) and ended without \
              a mark, so 1 episode waits for the next pass; no model call"
         );
     }
 
+    /// The fixed pass cap of autumn-harvest-agent 0.10.
+    const OLD_PASS_CAP: u32 = 2048;
+
     /// A model that reasons: a pass reply under a cap of
-    /// [`autumn_harvest_agent::consolidate::PASS_OUTPUT_TOKENS`] is cut
-    /// off, as the reasoning fills it. With more room it answers as
+    /// [`OLD_PASS_CAP`] is cut off, as the reasoning fills it. With more room it answers as
     /// [`MemoryModel`] does.
     #[derive(Debug, Default)]
     struct ReasoningModel {
@@ -4529,9 +4532,7 @@ mod tests {
             'a,
             Result<autumn_harvest_agent::ChatResponse, autumn_harvest_agent::AgentError>,
         > {
-            let cramped = request
-                .max_tokens
-                .is_some_and(|cap| cap <= autumn_harvest_agent::consolidate::PASS_OUTPUT_TOKENS);
+            let cramped = request.max_tokens.is_some_and(|cap| cap <= OLD_PASS_CAP);
             if cramped {
                 self.cut.chat(request)
             } else {
@@ -4645,7 +4646,7 @@ mod tests {
             .handle_request(UID, request("r-1", "I like tea"))
             .await;
         let first = run_one_pass(&mut daemon).await;
-        assert_eq!(first.stop, "invalid_reply");
+        assert_eq!(first.stop, "output_capped");
         assert!(!first.marked);
         assert_eq!(first.facts, Vec::<String>::new());
         assert_eq!(first.episode_ids.len(), 1, "{first:?}");

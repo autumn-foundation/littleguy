@@ -7,10 +7,12 @@
 //! assistant, the last event with a model call and the newest run. After
 //! the drive, the usage sums the rows of that run past the mark. Each op
 //! ends its run (ADR 0035), so the drive starts new runs too. The usage
-//! adds every row of each run of the assistant that is newer than the mark.
+//! adds every row of each run that is newer than the mark, in any
+//! workflow. So a `sweep` call counts too: each source is a child run with
+//! its own ledger rows (ADR 0044).
 
 use anyhow::Result;
-use autumn_harvest_agent::{AGENT_WORKFLOW_NAME, AgentId, sqlite};
+use autumn_harvest_agent::{AgentId, sqlite};
 use autumn_harvest_sqlite::{ExecutionFilter, ExecutionId, LlmLedgerRow, SqliteRuntime};
 
 use crate::protocol::Usage;
@@ -22,7 +24,7 @@ pub(super) struct Mark {
     run: Option<ExecutionId>,
     /// The last event of that run with a model call, if any.
     seq: Option<i64>,
-    /// The newest run of the assistant in any state, if any.
+    /// The newest run of any workflow in any state, if any.
     newest: Option<ExecutionId>,
 }
 
@@ -38,8 +40,10 @@ pub(super) fn mark(rt: &SqliteRuntime, id: &AgentId) -> Result<Mark> {
         Some(exec) => rt.llm_ledger(exec)?.iter().map(|row| row.event_seq).max(),
         None => None,
     };
-    let mut filter = runs_of(id);
-    filter.limit = Some(1);
+    let filter = ExecutionFilter {
+        limit: Some(1),
+        ..ExecutionFilter::new()
+    };
     let newest = rt
         .list_executions(&filter)?
         .executions
@@ -54,7 +58,7 @@ pub(super) fn mark(rt: &SqliteRuntime, id: &AgentId) -> Result<Mark> {
 ///
 /// Returns an error when the runtime cannot list the runs or read the
 /// ledger.
-pub(super) fn since(rt: &SqliteRuntime, id: &AgentId, mark: Mark) -> Result<Usage> {
+pub(super) fn since(rt: &SqliteRuntime, mark: Mark) -> Result<Usage> {
     let mut usage = Usage::default();
     if let Some(exec) = mark.run {
         for row in rt.llm_ledger(exec)? {
@@ -63,7 +67,7 @@ pub(super) fn since(rt: &SqliteRuntime, id: &AgentId, mark: Mark) -> Result<Usag
             }
         }
     }
-    for exec in newer_than(rt, id, mark.newest)? {
+    for exec in newer_than(rt, mark.newest)? {
         if Some(exec) != mark.run {
             for row in rt.llm_ledger(exec)? {
                 add(&mut usage, &row);
@@ -73,22 +77,10 @@ pub(super) fn since(rt: &SqliteRuntime, id: &AgentId, mark: Mark) -> Result<Usag
     Ok(usage)
 }
 
-/// The filter of every run of the assistant `id`, in any state. A list
-/// reads the newest run first.
-fn runs_of(id: &AgentId) -> ExecutionFilter {
-    ExecutionFilter::new()
-        .workflow_name(AGENT_WORKFLOW_NAME)
-        .workflow_id(id.as_str())
-}
-
-/// The runs of the assistant `id` that are newer than `newest`. With no
-/// `newest`, every run is newer.
-fn newer_than(
-    rt: &SqliteRuntime,
-    id: &AgentId,
-    newest: Option<ExecutionId>,
-) -> Result<Vec<ExecutionId>> {
-    let mut filter = runs_of(id);
+/// The runs of any workflow that are newer than `newest`. A list reads the
+/// newest run first. With no `newest`, every run is newer.
+fn newer_than(rt: &SqliteRuntime, newest: Option<ExecutionId>) -> Result<Vec<ExecutionId>> {
+    let mut filter = ExecutionFilter::new();
     let mut runs = Vec::new();
     loop {
         let page = rt.list_executions(&filter)?;

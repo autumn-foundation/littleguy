@@ -164,6 +164,15 @@ pub fn summary(config: &Config, boot: &Boot) -> Value {
             "max_resets": section.max_resets,
             "notes_bytes": section.notes_bytes,
         })),
+        // A null bound is no bound of its own: the ceiling of the call
+        // applies (ADR 0044).
+        "research": config.research.map(|section| json!({
+            "max_tokens_per_call": section.max_tokens_per_call.map(std::num::NonZeroU32::get),
+            "max_tokens_per_item": section.max_tokens_per_item.map(std::num::NonZeroU32::get),
+            "max_steps_per_item": section.max_steps_per_item.map(std::num::NonZeroU32::get),
+            "concurrency": section.concurrency.get(),
+            "max_items": section.max_items.map(std::num::NonZeroU32::get),
+        })),
         "refine": config.refine.as_ref().map(|refine| json!({"messages": refine.messages})),
         "skills": {
             // Skills reach the assistant through the refine overlay, so
@@ -300,6 +309,7 @@ mod tests {
              [discord]\nallowed = [\"123456789012345678\"]\n\
              [approvals]\napprover = \"876543210987654321\"\n\
              [compaction]\nmax_resets = 4\n\
+             [research]\nmax_tokens_per_call = 640000\nconcurrency = 8\n\
              [heartbeat]\nevery_minutes = 45\nquiet = \"22:00-08:00\"\n\
              [hooks]\ntoken_env = \"LG_TEST_HOOK_TOKEN_NAME\"\n\
              [[mcp.server]]\nid = \"docs\"\nurl = \"{SECRET_URL}\"\n\
@@ -336,6 +346,9 @@ mod tests {
         assert_eq!(value["compaction"]["at_percent"], 80);
         assert_eq!(value["compaction"]["max_resets"], 4);
         assert_eq!(value["compaction"]["notes_bytes"], 8_192);
+        assert_eq!(value["research"]["max_tokens_per_call"], 640_000);
+        assert_eq!(value["research"]["concurrency"], 8);
+        assert_eq!(value["research"]["max_tokens_per_item"], Value::Null);
     }
 
     #[test]
@@ -345,6 +358,7 @@ mod tests {
         assert_eq!(value["heartbeat"], Value::Null, "no [heartbeat] section");
         assert_eq!(value["refine"], Value::Null);
         assert_eq!(value["compaction"], Value::Null, "no [compaction] section");
+        assert_eq!(value["research"], Value::Null, "no [research] section");
         assert_eq!(value["agent"]["max_request_bytes"], Value::Null);
         assert_eq!(value["skills"]["off_without_refine"], true);
         let off = Config::parse("owner = \"mark\"\n[tools]\nfiles = false").unwrap();

@@ -64,6 +64,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `plans` | yes | Goals and ideas: the tools that file, research and propose them, the Goals and Ideas tabs, and the heartbeat precheck that looks at them. | none |
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
 | `reflection` | yes | The reflection after a memory consolidation pass: the assistant files ideas and drafts skills from what the pass learned. | none |
+| `research` | yes | `[research]`: the `sweep` tool reads many sources in read-only `research` runs and returns one short row per source (ADR 0044). It adds no crate. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `sealed-keys` | yes | `lg keys`: the house keys sealed with the key ring of LG_SAN_MATEO_KEY in house-keys.json, so the environment holds one secret (ADR 0040). | `san-mateo` |
 | `search-notes` | yes | `search_notes`: the assistant finds a file of its workspace by its words. | none |

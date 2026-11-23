@@ -155,6 +155,17 @@ bind = "127.0.0.1:3004"
 # max_resets = 20
 # notes_bytes = 8192
 
+## The `sweep` tool: one call reads many sources, each in its own read-only
+## run, and gives back one short row per source (ADR 0044). No bound has a
+## default: with none, a call runs each source until it answers. The
+## values below are one choice: a ceiling that fits 40 sources of up to
+## 32k tokens each, 8 at a time.
+# [research]
+# max_tokens_per_call = 1280000
+# max_tokens_per_item = 32000
+# max_steps_per_item = 4
+# concurrency = 8
+
 ## Where SKILL.md files live. The default is a skills folder next to this
 ## file.
 # [skills]

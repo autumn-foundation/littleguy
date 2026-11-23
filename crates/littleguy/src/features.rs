@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 28] = [
+pub const ALL: [Feature; 29] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -95,6 +95,10 @@ pub const ALL: [Feature; 28] = [
     Feature {
         name: "compaction",
         on: cfg!(feature = "compaction"),
+    },
+    Feature {
+        name: "research",
+        on: cfg!(feature = "research"),
     },
     Feature {
         name: "search-notes",
@@ -177,6 +181,7 @@ pub fn check(config: &Config) -> Result<()> {
         (config.skills.dir.is_some(), "[skills]", "skills"),
         (config.council.is_some(), "[council]", "council"),
         (config.compaction.is_some(), "[compaction]", "compaction"),
+        (config.research.is_some(), "[research]", "research"),
         (config.fleet.is_some(), "[fleet]", "fleet"),
     ];
     let problems: Vec<String> = needs
@@ -282,6 +287,11 @@ mod tests {
                 "owner = \"mark\"\n[compaction]",
                 "[compaction]",
                 "compaction",
+            ),
+            (
+                "owner = \"mark\"\n[research]\nmax_tokens_per_call = 1000",
+                "[research]",
+                "research",
             ),
             (
                 "owner = \"mark\"\n[[camel.route]]\nid = \"inbox\"\nfrom = \"file:/tmp/in\"",

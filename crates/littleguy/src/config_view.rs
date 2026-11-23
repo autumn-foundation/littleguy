@@ -21,7 +21,7 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, OnceLock};
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use jiff::Timestamp;
 
 use autumn_harvest_agent::{FnTool, Tool, ToolEffect};
 use littleguy_core::{Config, HeartbeatDelivery, McpTransport, Replica, SandboxBackend};
@@ -43,10 +43,12 @@ impl BootId {
 
     /// A fresh id from the operating system's randomness. Without
     /// randomness the clock fills it, so two boots still differ.
-    fn fresh(at: DateTime<Utc>) -> Self {
+    fn fresh(at: Timestamp) -> Self {
         let mut bytes = [0_u8; 8];
         if getrandom::fill(&mut bytes).is_err() {
-            bytes = at.timestamp_nanos_opt().unwrap_or_default().to_le_bytes();
+            bytes = i64::try_from(at.as_nanosecond())
+                .unwrap_or_default()
+                .to_le_bytes();
         }
         Self(bytes.iter().fold(String::new(), |mut hex, byte| {
             // Writing to a String cannot fail.
@@ -60,7 +62,7 @@ impl BootId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boot {
     /// The instant that the process captured at its start.
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     /// The id of this boot.
     pub id: BootId,
 }
@@ -73,7 +75,7 @@ impl Boot {
     pub fn this_process() -> &'static Self {
         static BOOT: OnceLock<Boot> = OnceLock::new();
         BOOT.get_or_init(|| {
-            let started_at = Utc::now();
+            let started_at = Timestamp::now();
             Self {
                 started_at,
                 id: BootId::fresh(started_at),
@@ -117,7 +119,7 @@ pub fn summary(config: &Config, boot: &Boot) -> Value {
                  `boot` is this process: a restart changes its id and start, a reload does not. \
                  `build.version` is the version of this binary.",
         "boot": {
-            "started_at": boot.started_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "started_at": boot.started_at.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
             "id": boot.id.as_str(),
         },
         "build": {"version": VERSION, "features": features, "left_out_of_build": left_out},
@@ -294,9 +296,7 @@ mod tests {
 
     fn boot() -> Boot {
         Boot {
-            started_at: DateTime::parse_from_rfc3339("2026-11-17T03:00:00.250Z")
-                .unwrap()
-                .with_timezone(&Utc),
+            started_at: "2026-11-17T03:00:00.250Z".parse::<Timestamp>().unwrap(),
             id: BootId(String::from("00112233aabbccdd")),
         }
     }
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn two_fresh_boot_ids_differ() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         assert_ne!(BootId::fresh(now), BootId::fresh(now));
     }
 }

@@ -39,9 +39,9 @@ use autumn_harvest_agent::agent::MIN_CUSTOM_HEARTBEAT_SECS;
 use autumn_harvest_agent::{AgentHeartbeat, AgentOp, Control, HeartbeatSetting};
 #[cfg(feature = "heartbeat")]
 use autumn_harvest_agent::{BoxFuture, HeartbeatTask, Precheck};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
-use crate::instant::next_fire_after;
+use autumn_harvest::schedule_plan::next_fire_after;
 #[cfg(feature = "heartbeat")]
 use littleguy_core::QuietHours;
 use littleguy_core::{BriefConfig, HeartbeatConfig};
@@ -110,7 +110,7 @@ pub const OFF_KEY: &str = "wake-off:";
 /// The time after a wake that the daemon waits for its tick. A tick that
 /// has not run by then never comes, for example on a paused agent. The
 /// daemon then arms the next wake.
-pub const GRACE: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+pub const GRACE: jiff::SignedDuration = jiff::SignedDuration::from_hours(1);
 
 /// Whether `text` is the prompt of a tick, not a message of a person.
 #[must_use]
@@ -142,9 +142,9 @@ pub struct Arm {
 
 /// The op that turns the engine timer off, keyed by `now`.
 #[must_use]
-pub fn off(now: DateTime<Utc>) -> Arm {
+pub fn off(now: Timestamp) -> Arm {
     Arm {
-        key: format!("{OFF_KEY}{}", now.to_rfc3339()),
+        key: format!("{OFF_KEY}{}", crate::stamp::rfc3339(now)),
         op: AgentOp::Control(Control::SetHeartbeat {
             setting: HeartbeatSetting::Off,
         }),
@@ -218,7 +218,7 @@ impl Verdict {
 /// The wake that the engine timer aims at, and the tick count at the arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Armed {
-    at: DateTime<Utc>,
+    at: Timestamp,
     kind: Kind,
     ticks: u64,
 }
@@ -246,7 +246,7 @@ impl Quiet {
 
     /// `at`, or the end of the quiet window that holds it. A time is quiet
     /// when the window ends before it starts again.
-    fn after(&self, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn after(&self, at: Timestamp) -> Option<Timestamp> {
         let end = next_fire_after(&self.end, at)?;
         let start = next_fire_after(&self.start, at)?;
         Some(if end < start { end } else { at })
@@ -257,14 +257,14 @@ impl Quiet {
 #[cfg(feature = "heartbeat")]
 #[derive(Debug, Clone)]
 struct Beat {
-    every: chrono::TimeDelta,
+    every: jiff::SignedDuration,
     quiet: Option<Quiet>,
     prompt: String,
 }
 
 #[cfg(feature = "heartbeat")]
 impl Beat {
-    fn next(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn next(&self, now: Timestamp) -> Option<Timestamp> {
         let at = now + self.every;
         self.quiet
             .as_ref()
@@ -291,7 +291,7 @@ pub struct Wake {
     reflect: Option<(String, String)>,
     /// The next wake that the assistant booked.
     #[cfg(feature = "followups")]
-    followup: Option<DateTime<Utc>>,
+    followup: Option<Timestamp>,
     armed: Option<Armed>,
     /// Whether a brief is armed now. The brief delivery reads it, so a
     /// heartbeat answer never goes out as a brief.
@@ -310,7 +310,7 @@ impl Wake {
         brief: Option<&BriefConfig>,
         beat: Option<&HeartbeatConfig>,
         brief_armed: Arc<AtomicBool>,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> Result<Option<Self>> {
         let brief = brief
             .map(|config| {
@@ -351,7 +351,7 @@ impl Wake {
                     );
                 }
                 Ok(Beat {
-                    every: chrono::TimeDelta::minutes(i64::from(config.every_minutes)),
+                    every: jiff::SignedDuration::from_mins(i64::from(config.every_minutes)),
                     quiet,
                     prompt: marked(HEARTBEAT_MARK, &config.prompt),
                 })
@@ -399,7 +399,7 @@ impl Wake {
     /// wake replaces the arm that waits, and so does a change to the
     /// follow-up that is armed.
     #[cfg(feature = "followups")]
-    pub fn set_followup(&mut self, next: Option<DateTime<Utc>>, now: DateTime<Utc>) {
+    pub fn set_followup(&mut self, next: Option<Timestamp>, now: Timestamp) {
         if next == self.followup {
             return;
         }
@@ -416,7 +416,7 @@ impl Wake {
     /// tick count moved since the arm.
     #[cfg(any(feature = "followups", feature = "self-debug"))]
     #[must_use]
-    pub fn ran(&self, now: DateTime<Utc>, ticks: u64) -> Option<(DateTime<Utc>, Kind)> {
+    pub fn ran(&self, now: Timestamp, ticks: u64) -> Option<(Timestamp, Kind)> {
         self.armed
             .filter(|armed| armed.at <= now && ticks > armed.ticks)
             .map(|armed| (armed.at, armed.kind))
@@ -442,14 +442,14 @@ impl Wake {
     /// The wake that the engine timer aims at, once armed.
     #[cfg(test)]
     #[must_use]
-    pub fn armed_at(&self) -> Option<(DateTime<Utc>, Kind)> {
+    pub fn armed_at(&self) -> Option<(Timestamp, Kind)> {
         self.armed.map(|armed| (armed.at, armed.kind))
     }
 
     /// Whether the daemon must read the tick count before the next
     /// [`arm`](Self::arm): the armed wake has passed.
     #[must_use]
-    pub fn waits_for_tick(&self, now: DateTime<Utc>) -> bool {
+    pub fn waits_for_tick(&self, now: Timestamp) -> bool {
         self.armed.is_some_and(|armed| armed.at <= now)
     }
 
@@ -463,7 +463,7 @@ impl Wake {
     ///   still runs one tick, not one per missed wake.
     ///
     /// A brief slot wins a tie with a heartbeat.
-    pub fn arm(&mut self, now: DateTime<Utc>, ticks: u64) -> Option<Arm> {
+    pub fn arm(&mut self, now: Timestamp, ticks: u64) -> Option<Arm> {
         if let Some(armed) = self.armed {
             let ran = ticks > armed.ticks;
             if now < armed.at || (!ran && now < armed.at + GRACE) {
@@ -473,7 +473,8 @@ impl Wake {
         // A reflection comes as soon as the engine allows. Its arm names that
         // time, so the daemon reads no state before the tick can run.
         #[cfg(any(feature = "reflection", feature = "followups"))]
-        let soonest = now + chrono::TimeDelta::seconds(MIN_CUSTOM_HEARTBEAT_SECS.cast_signed());
+        let soonest =
+            now + jiff::SignedDuration::from_secs(MIN_CUSTOM_HEARTBEAT_SECS.cast_signed());
         #[cfg(feature = "reflection")]
         let reflect = self.reflect.as_ref().map(|_| (soonest, Kind::Reflection));
         #[cfg(not(feature = "reflection"))]
@@ -513,7 +514,7 @@ impl Wake {
                     .as_ref()
                     .map_or("", |brief| brief.prompt.as_str());
                 (
-                    format!("{BRIEF_KEY}{}", at.to_rfc3339()),
+                    format!("{BRIEF_KEY}{}", crate::stamp::rfc3339(at)),
                     heartbeat(prompt, every),
                 )
             }
@@ -521,13 +522,13 @@ impl Wake {
             Kind::Heartbeat => {
                 let prompt = self.beat.as_ref().map_or("", |beat| beat.prompt.as_str());
                 (
-                    format!("{HEARTBEAT_KEY}{}", at.to_rfc3339()),
+                    format!("{HEARTBEAT_KEY}{}", crate::stamp::rfc3339(at)),
                     heartbeat(prompt, every).precheck(),
                 )
             }
             #[cfg(feature = "followups")]
             Kind::Followup => (
-                format!("{FOLLOWUP_KEY}{}", at.to_rfc3339()),
+                format!("{FOLLOWUP_KEY}{}", crate::stamp::rfc3339(at)),
                 heartbeat(&marked(FOLLOWUP_MARK, FOLLOWUP_PROMPT), every),
             ),
             #[cfg(feature = "reflection")]
@@ -551,8 +552,8 @@ impl Wake {
 /// The time from `now` to `at`, in whole seconds, rounded up. The engine
 /// refuses an interval under [`MIN_CUSTOM_HEARTBEAT_SECS`], so a wake that
 /// close runs that much late.
-fn interval(now: DateTime<Utc>, at: DateTime<Utc>) -> Duration {
-    let millis = u64::try_from((at - now).num_milliseconds()).unwrap_or(0);
+fn interval(now: Timestamp, at: Timestamp) -> Duration {
+    let millis = u64::try_from(at.duration_since(now).as_millis()).unwrap_or(0);
     Duration::from_secs(millis.div_ceil(1_000).max(MIN_CUSTOM_HEARTBEAT_SECS))
 }
 
@@ -590,7 +591,7 @@ impl Precheck for Due {
             if !task.prompt.starts_with(HEARTBEAT_MARK) {
                 return true;
             }
-            let run = self.worth_it(Utc::now().timestamp_millis());
+            let run = self.worth_it(Timestamp::now().as_millisecond());
             self.verdict.set(run);
             run
         })
@@ -626,17 +627,11 @@ mod tests {
         }
     }
 
-    fn at(text: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(text)
-            .unwrap()
-            .with_timezone(&Utc)
+    fn at(text: &str) -> Timestamp {
+        text.parse::<Timestamp>().unwrap()
     }
 
-    fn plan(
-        brief: Option<&BriefConfig>,
-        beat: Option<&HeartbeatConfig>,
-        now: DateTime<Utc>,
-    ) -> Wake {
+    fn plan(brief: Option<&BriefConfig>, beat: Option<&HeartbeatConfig>, now: Timestamp) -> Wake {
         Wake::new(brief, beat, Arc::new(AtomicBool::new(false)), now)
             .unwrap()
             .unwrap()
@@ -654,7 +649,11 @@ mod tests {
     #[test]
     fn nothing_to_plan_is_no_plan() {
         let flag = Arc::new(AtomicBool::new(false));
-        assert!(Wake::new(None, None, flag, Utc::now()).unwrap().is_none());
+        assert!(
+            Wake::new(None, None, flag, Timestamp::now())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

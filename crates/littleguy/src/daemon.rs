@@ -31,7 +31,7 @@ use autumn_harvest_agent::{
     AgentHarness, AgentId, AgentModel, AgentOp, AgentProfile, Control, sqlite,
 };
 use autumn_harvest_sqlite::SqliteRuntime;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use littleguy_channels::{DmMessage, Service};
 use littleguy_core::{
     ASSISTANT_KIND, ChannelId, ChannelRule, Config, Inbound, MessageId, PairingCode, Pending,
@@ -433,21 +433,21 @@ fn tick_outcome(
 
 /// The time of the first pending wake in `stores`.
 #[cfg(feature = "followups")]
-fn next_wake(stores: &SqliteStores) -> Result<Option<DateTime<Utc>>> {
+fn next_wake(stores: &SqliteStores) -> Result<Option<Timestamp>> {
     Ok(stores
         .pending_wakes()?
         .first()
-        .and_then(|wake| DateTime::from_timestamp_millis(wake.at_ms)))
+        .and_then(|wake| crate::stamp::from_millis(wake.at_ms)))
 }
 
 /// How often the daemon looks for consolidation passes to reflect on.
 #[cfg(feature = "reflection")]
-const PASS_LOOK_EVERY: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
+const PASS_LOOK_EVERY: jiff::SignedDuration = jiff::SignedDuration::from_mins(1);
 
 /// How far back the daemon looks for a pass. A pass from before stays
 /// without a reflection.
 #[cfg(feature = "reflection")]
-const PASS_LOOK_BACK: chrono::TimeDelta = chrono::TimeDelta::days(2);
+const PASS_LOOK_BACK: jiff::SignedDuration = jiff::SignedDuration::from_hours(24 * 2);
 
 /// The seconds since the Unix epoch.
 fn now_secs() -> u64 {
@@ -552,7 +552,7 @@ pub struct Daemon {
     disarm: bool,
     /// When the daemon last looked for consolidation passes to reflect on.
     #[cfg(feature = "reflection")]
-    passes_seen: Option<DateTime<Utc>>,
+    passes_seen: Option<Timestamp>,
     /// The skills folder of a config with no `[skills] dir`.
     #[cfg(feature = "skills")]
     skills_default: Option<std::path::PathBuf>,
@@ -587,14 +587,14 @@ pub struct Daemon {
     /// The ends that this daemon asked for, for their idempotency keys.
     rolls: u64,
     /// When the last purge of the ended runs finished.
-    purged_at: Option<DateTime<Utc>>,
+    purged_at: Option<Timestamp>,
     /// The reads that answer beside the loop.
     reads: Arc<Reads>,
 }
 
 /// The wall clock of the daemon. Tests set one clock for the daemon and its
 /// runtime.
-type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
+type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
 impl std::fmt::Debug for Daemon {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -723,7 +723,7 @@ impl Daemon {
             #[cfg(feature = "skills")]
             skills_stamp: None,
             chats,
-            clock: Arc::new(Utc::now),
+            clock: Arc::new(Timestamp::now),
             approvals: built.approvals,
             approver: built.approver,
             waiting,
@@ -744,11 +744,10 @@ impl Daemon {
 
     /// Sets the clock of the daemon and of its runtime. A test seam.
     #[cfg(all(test, any(feature = "discord", feature = "sandbox")))]
-    fn with_clock(mut self, clock: impl Fn() -> DateTime<Utc> + Send + Sync + 'static) -> Self {
+    fn with_clock(mut self, clock: impl Fn() -> Timestamp + Send + Sync + 'static) -> Self {
         let clock: Clock = Arc::new(clock);
         let runtime = Arc::clone(&clock);
-        self.rt
-            .set_clock(move || crate::instant::to_engine(runtime()));
+        self.rt.set_clock(move || runtime());
         self.clock = clock;
         self
     }
@@ -1021,7 +1020,7 @@ impl Daemon {
         // A person wrote, so a new chain of wakes may start.
         #[cfg(feature = "followups")]
         self.kit.wake_links.last_person_ms.store(
-            (self.clock)().timestamp_millis(),
+            (self.clock)().as_millisecond(),
             std::sync::atomic::Ordering::SeqCst,
         );
         #[cfg(feature = "council")]
@@ -1421,7 +1420,7 @@ impl Daemon {
         {
             #[cfg(feature = "followups")]
             let finished = {
-                let finished = stores.finish_wakes(due.timestamp_millis())?;
+                let finished = stores.finish_wakes(due.as_millisecond())?;
                 wake.set_followup(next_wake(stores)?, now);
                 finished
             };
@@ -1451,8 +1450,8 @@ impl Daemon {
                 });
                 stores.record_tick(&littleguy_stores::tick_log::Tick {
                     kind: kind.label().to_owned(),
-                    due_ms: due.timestamp_millis(),
-                    seen_ms: now.timestamp_millis(),
+                    due_ms: due.as_millisecond(),
+                    seen_ms: now.as_millisecond(),
                     outcome: tick_outcome(skipped, finished, trace.as_ref()),
                 })?;
             }
@@ -1475,7 +1474,7 @@ impl Daemon {
     ///
     /// Returns an error when the store cannot read.
     #[cfg(feature = "followups")]
-    fn read_wakes(&mut self, now: DateTime<Utc>) -> Result<()> {
+    fn read_wakes(&mut self, now: Timestamp) -> Result<()> {
         let links = &self.kit.wake_links;
         if !links
             .changed
@@ -1547,7 +1546,7 @@ impl Daemon {
                 autumn_harvest_agent::consolidate::CONSOLIDATE_WORKFLOW_NAME,
             )),
             states: vec![String::from("COMPLETED")],
-            started_after: Some(crate::instant::to_engine(now - PASS_LOOK_BACK)),
+            started_after: Some(now - PASS_LOOK_BACK),
             limit: Some(10),
             ..autumn_harvest_sqlite::ExecutionFilter::default()
         };
@@ -1583,8 +1582,8 @@ impl Daemon {
             #[cfg(feature = "self-debug")]
             stores.record_tick(&littleguy_stores::tick_log::Tick {
                 kind: String::from("reflection"),
-                due_ms: now.timestamp_millis(),
-                seen_ms: now.timestamp_millis(),
+                due_ms: now.as_millisecond(),
+                seen_ms: now.as_millisecond(),
                 outcome: crate::reflection::skipped(&passes),
             })?;
             return Ok(());
@@ -4154,15 +4153,19 @@ mod tests {
             let response = daemon.handle_request(UID, request(key, "hello")).await;
             assert!(matches!(response, Response::Reply { .. }));
         }
-        let now = Utc::now();
+        let now = Timestamp::now();
         // Each message ended its run. Within thirty days, every run stays.
-        let early = daemon.purge(now + chrono::TimeDelta::days(29)).unwrap();
+        let early = daemon
+            .purge(now + jiff::SignedDuration::from_hours(24 * 29))
+            .unwrap();
         assert_eq!(early.map(|report| report.removed), Some(0));
         // The purge waits a day before it looks again.
-        let soon = daemon.purge(now + chrono::TimeDelta::days(29) + chrono::TimeDelta::hours(1));
+        let soon = daemon.purge(
+            now + jiff::SignedDuration::from_hours(24 * 29) + jiff::SignedDuration::from_hours(1),
+        );
         assert!(soon.unwrap().is_none());
         let late = daemon
-            .purge(now + chrono::TimeDelta::days(31))
+            .purge(now + jiff::SignedDuration::from_hours(24 * 31))
             .unwrap()
             .unwrap();
         assert!(late.removed >= 2, "the ended runs of both messages go");
@@ -4351,7 +4354,7 @@ mod tests {
         any(feature = "heartbeat", feature = "reflection"),
         any(feature = "discord", feature = "sandbox")
     ))]
-    fn armed(daemon: &Daemon) -> Option<DateTime<Utc>> {
+    fn armed(daemon: &Daemon) -> Option<Timestamp> {
         daemon
             .wake
             .as_ref()
@@ -4363,10 +4366,8 @@ mod tests {
         any(feature = "heartbeat", feature = "reflection"),
         any(feature = "discord", feature = "sandbox")
     ))]
-    fn utc(text: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(text)
-            .unwrap()
-            .with_timezone(&Utc)
+    fn utc(text: &str) -> Timestamp {
+        text.parse::<Timestamp>().unwrap()
     }
 
     #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
@@ -4616,7 +4617,7 @@ mod tests {
         daemon
             .handle_request(UID, request("r-1", "I like tea"))
             .await;
-        let before = Utc::now();
+        let before = Timestamp::now();
         let pass = run_one_pass(&mut daemon).await;
         assert_eq!(pass.stop, "completed");
         assert!(pass.marked);
@@ -4626,7 +4627,7 @@ mod tests {
         assert!(pass.facts[0].contains(&pass.episode_ids[0]), "{pass:?}");
         assert_ne!(pass.exec, "");
         let started = pass.started.expect("a start time");
-        assert!(started >= before - chrono::Duration::seconds(1));
+        assert!(started >= before - jiff::SignedDuration::from_secs(1));
         let text = crate::reflection::prompt(std::slice::from_ref(&pass)).unwrap();
         assert!(text.contains(&format!("- pass {}, started ", pass.exec)));
         assert!(text.contains(&format!("({}) and marked them", pass.episode_ids[0])));
@@ -4745,8 +4746,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = Arc::new(MemoryModel::default());
         // The tool reads the wall clock, so the daemon clock starts there.
-        let start = Utc::now();
-        let clock = HandClock::at(&start.to_rfc3339());
+        let start = Timestamp::now();
+        let clock = HandClock::at(&crate::stamp::rfc3339(start));
         let hand = clock.clone();
         // No nightly pass: on the wall clock, one can fall in this test.
         let mut quiet = config();
@@ -4779,10 +4780,12 @@ mod tests {
         daemon.tick().await.unwrap();
         let (at, kind) = daemon.wake.as_ref().and_then(Wake::armed_at).unwrap();
         assert_eq!(kind, crate::wake::Kind::Followup);
-        assert_eq!(at.timestamp_millis(), pending[0].at_ms);
+        assert_eq!(at.as_millisecond(), pending[0].at_ms);
 
         let before = model.calls.load(Ordering::SeqCst);
-        clock.set(&(at + chrono::TimeDelta::seconds(1)).to_rfc3339());
+        clock.set(&crate::stamp::rfc3339(
+            at + jiff::SignedDuration::from_secs(1),
+        ));
         tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
         let Response::History { turns } = daemon.handle_request(UID, Request::History).await else {
             panic!("no history");
@@ -4796,7 +4799,9 @@ mod tests {
         // The wake is done, it runs once, and the timer stops.
         let after = model.calls.load(Ordering::SeqCst);
         for seconds in [30, 90, 150] {
-            clock.set(&(at + chrono::TimeDelta::seconds(seconds)).to_rfc3339());
+            clock.set(&crate::stamp::rfc3339(
+                at + jiff::SignedDuration::from_secs(seconds),
+            ));
             daemon.tick().await.unwrap();
         }
         assert_eq!(model.calls.load(Ordering::SeqCst), after);
@@ -4817,7 +4822,7 @@ mod tests {
         let db = dir.path().join("lg.db");
         let model = Arc::new(MemoryModel::default());
         // The tool reads the wall clock, so the daemon clock starts there.
-        let clock = HandClock::at(&Utc::now().to_rfc3339());
+        let clock = HandClock::at(&crate::stamp::rfc3339(Timestamp::now()));
         // No nightly pass: on the wall clock, one can fall in this test.
         let mut quiet = config();
         quiet.memory.enabled = false;
@@ -4861,14 +4866,18 @@ mod tests {
         daemon.tick().await.unwrap();
         let (at, kind) = daemon.wake.as_ref().and_then(Wake::armed_at).unwrap();
         assert_eq!(kind, crate::wake::Kind::Followup);
-        assert_eq!(at.timestamp_millis(), booked[0].at_ms);
+        assert_eq!(at.as_millisecond(), booked[0].at_ms);
 
         // At its time, it fires once.
         let before = model.calls.load(Ordering::SeqCst);
-        clock.set(&(at + chrono::TimeDelta::seconds(1)).to_rfc3339());
+        clock.set(&crate::stamp::rfc3339(
+            at + jiff::SignedDuration::from_secs(1),
+        ));
         tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
         for seconds in [30, 90] {
-            clock.set(&(at + chrono::TimeDelta::seconds(seconds)).to_rfc3339());
+            clock.set(&crate::stamp::rfc3339(
+                at + jiff::SignedDuration::from_secs(seconds),
+            ));
             daemon.tick().await.unwrap();
         }
         assert_eq!(stores.pending_wakes().unwrap(), []);
@@ -5199,15 +5208,13 @@ mod tests {
         }
 
         fn set(&self, text: &str) {
-            let millis = DateTime::parse_from_rfc3339(text)
-                .unwrap()
-                .timestamp_millis();
+            let millis = text.parse::<Timestamp>().unwrap().as_millisecond();
             self.0.store(millis, std::sync::atomic::Ordering::SeqCst);
         }
 
-        fn now(&self) -> DateTime<Utc> {
+        fn now(&self) -> Timestamp {
             let millis = self.0.load(std::sync::atomic::Ordering::SeqCst);
-            DateTime::from_timestamp_millis(millis).unwrap()
+            crate::stamp::from_millis(millis).unwrap()
         }
     }
 
@@ -5271,7 +5278,7 @@ mod tests {
             .and_then(Wake::armed_at)
             .map(|(at, _)| at);
         assert_eq!(
-            next.map(|slot| slot.to_rfc3339()).as_deref(),
+            next.map(crate::stamp::rfc3339).as_deref(),
             Some("2026-11-10T08:00:00+00:00")
         );
 

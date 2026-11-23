@@ -337,7 +337,7 @@ fn entry(stored: &StoredOverlay, active: Option<u64>) -> OverlayEntry {
     OverlayEntry {
         version,
         author: stored.provenance().to_string(),
-        created_at: crate::instant::from_engine(stored.created_at()).to_rfc3339(),
+        created_at: crate::stamp::rfc3339(stored.created_at()),
         active: active == Some(version),
         parts: parts(stored.overlay()),
     }

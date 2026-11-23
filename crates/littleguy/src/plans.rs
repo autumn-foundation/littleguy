@@ -42,15 +42,8 @@ use autumn_harvest_agent::{AgentError, ErrorKind, ToolContext};
     feature = "self-debug"
 ))]
 use autumn_harvest_agent::{FnTool, ToolEffect};
-#[cfg(any(feature = "plans", feature = "followups", feature = "self-debug"))]
-use chrono::DateTime;
-#[cfg(any(
-    feature = "plans",
-    feature = "followups",
-    feature = "skills",
-    feature = "self-debug"
-))]
-use chrono::Utc;
+#[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
+use jiff::Timestamp;
 use littleguy_stores::SqliteStores;
 #[cfg(feature = "plans")]
 use littleguy_stores::plans::{Goal, Idea, Note};
@@ -71,14 +64,14 @@ fn call_key(ctx: &ToolContext) -> String {
 
 #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]
 fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
+    Timestamp::now().as_millisecond()
 }
 
 /// An epoch millisecond as RFC 3339, in UTC.
 #[cfg(any(feature = "plans", feature = "followups", feature = "self-debug"))]
 fn time(ms: Option<i64>) -> Value {
-    ms.and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map_or(Value::Null, |at| json!(at.to_rfc3339()))
+    ms.and_then(crate::stamp::from_millis)
+        .map_or(Value::Null, |at| json!(crate::stamp::rfc3339(at)))
 }
 
 #[cfg(any(feature = "plans", feature = "followups", feature = "skills"))]

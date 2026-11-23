@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use autumn_harvest_agent::flow::labels;
 use autumn_harvest_agent::{AgentError, ErrorKind, FnTool, Tool, ToolContext, ToolEffect};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use littleguy_stores::SqliteStores;
 use littleguy_stores::patches::{NewPatch, Patch, PatchFor, PatchStatus};
 use serde_json::{Value, json};
@@ -55,11 +55,11 @@ fn refuse(message: impl Into<String>) -> AgentError {
 }
 
 fn now_ms() -> i64 {
-    Utc::now().timestamp_millis()
+    Timestamp::now().as_millisecond()
 }
 
 fn time(ms: i64) -> Value {
-    DateTime::<Utc>::from_timestamp_millis(ms).map_or(Value::Null, |at| json!(at.to_rfc3339()))
+    crate::stamp::from_millis(ms).map_or(Value::Null, |at| json!(crate::stamp::rfc3339(at)))
 }
 
 /// The values of `secrets` that are long enough to scan for.

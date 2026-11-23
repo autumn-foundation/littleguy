@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::Result;
 use autumn_harvest_agent::{AgentOp, Control, sqlite};
 use autumn_harvest_sqlite::{PurgePolicy, PurgeReport};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use super::Daemon;
 
@@ -30,7 +30,7 @@ use super::Daemon;
 pub(super) const OPS_PER_RUN: u64 = 1;
 
 /// The time between two purges.
-const PURGE_EVERY: chrono::TimeDelta = chrono::TimeDelta::days(1);
+const PURGE_EVERY: jiff::SignedDuration = jiff::SignedDuration::from_hours(24);
 
 /// The most batches of one purge call. A tick that does not finish goes on
 /// at the next tick, so one tick never holds the write lock for long.
@@ -58,7 +58,7 @@ impl Daemon {
         // With no run, the first op starts one, and it reads the profile.
         if sqlite::current_run(&self.rt, &id)?.is_some() {
             self.rolls += 1;
-            let key = format!("roll:{}:{}", (self.clock)().timestamp_micros(), self.rolls);
+            let key = format!("roll:{}:{}", (self.clock)().as_microsecond(), self.rolls);
             let op = AgentOp::Control(Control::Resume);
             sqlite::send(&mut self.rt, &id, &op, Some(&key))?;
             sqlite::drive(&mut self.rt, &id).await?;
@@ -74,15 +74,13 @@ impl Daemon {
     /// # Errors
     ///
     /// Returns an error when a read or a delete of the database fails.
-    pub(super) fn purge(&mut self, now: DateTime<Utc>) -> Result<Option<PurgeReport>> {
+    pub(super) fn purge(&mut self, now: Timestamp) -> Result<Option<PurgeReport>> {
         if self.purged_at.is_some_and(|at| now - at < PURGE_EVERY) {
             return Ok(None);
         }
         let keep = Duration::from_secs(u64::from(self.kit.config.runs.keep_days) * DAY_SECS);
         let policy = PurgePolicy::new().max_age(keep).batch_limit(PURGE_BATCHES);
-        let report = self
-            .rt
-            .purge_with_as_of(crate::instant::to_engine(now), &policy)?;
+        let report = self.rt.purge_with_as_of(now, &policy)?;
         if report.complete {
             self.purged_at = Some(now);
         }

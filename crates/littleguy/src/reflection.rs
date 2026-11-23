@@ -22,7 +22,7 @@ use std::str::FromStr;
 use autumn_harvest::{ExecutionId, WorkflowEvent};
 use autumn_harvest_agent::{ConsolidationReport, ConsolidationStop};
 use autumn_harvest_sqlite::{ExecutionOutcome, SqliteRuntime};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 /// The activity of a pass that reads its episodes. Its output holds each
 /// episode with its id.
@@ -53,7 +53,7 @@ pub struct Pass {
     /// The execution id of the pass. It names this pass instance.
     pub exec: String,
     /// When the pass started, or `None` when its history has no start.
-    pub started: Option<DateTime<Utc>>,
+    pub started: Option<Timestamp>,
     /// How many episodes it read.
     pub episodes: u64,
     /// The ids of the episodes that it read.
@@ -103,8 +103,7 @@ pub fn read_pass(rt: &SqliteRuntime, exec: &str) -> anyhow::Result<Pass> {
     for event in rt.load_history(id)? {
         match event {
             WorkflowEvent::WorkflowStarted { timestamp, .. } => {
-                pass.started
-                    .get_or_insert_with(|| crate::instant::from_engine(timestamp));
+                pass.started.get_or_insert(timestamp);
             }
             WorkflowEvent::ActivityScheduled {
                 activity_id, name, ..
@@ -154,7 +153,7 @@ fn count(n: u64, noun: &str) -> String {
 fn pass_line(pass: &Pass) -> String {
     let mut line = format!("- pass {}", pass.exec);
     if let Some(started) = pass.started {
-        let _ = write!(line, ", started {}", started.format("%Y-%m-%dT%H:%M:%SZ"));
+        let _ = write!(line, ", started {}", started.strftime("%Y-%m-%dT%H:%M:%SZ"));
     }
     let _ = write!(
         line,
@@ -325,9 +324,7 @@ mod tests {
 
     #[test]
     fn each_pass_shows_its_id_its_start_and_the_episodes_that_it_marked() {
-        let started = DateTime::parse_from_rfc3339("2026-11-17T09:00:03.250Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let started = "2026-11-17T09:00:03.250Z".parse::<Timestamp>().unwrap();
         let done = Pass {
             started: Some(started),
             ..pass(

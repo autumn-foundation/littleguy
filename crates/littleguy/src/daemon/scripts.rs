@@ -1,4 +1,4 @@
-//! The owner's side of saved scripts (ADR 0045): list them with the run
+//! The owner's side of saved scripts (ADR 0046): list them with the run
 //! log, accept or decline a draft, or retire a script.
 //!
 //! Each request touches only `memory.db` and the scripts folder. So it

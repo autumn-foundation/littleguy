@@ -1,4 +1,4 @@
-//! The name kernel of a saved script (ADR 0045): which names the assistant
+//! The name kernel of a saved script (ADR 0046): which names the assistant
 //! may give a script.
 //!
 //! The daemon writes an accepted script to `<dir>/<name>.<ext>`. So a name

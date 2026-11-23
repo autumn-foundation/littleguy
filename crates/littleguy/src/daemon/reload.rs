@@ -54,7 +54,7 @@ pub(super) struct Kit {
     /// The patches of `[patches]`, rebuilt at each assembly (ADR 0042).
     #[cfg(feature = "patches")]
     pub(super) patches: Option<Arc<crate::patches::Patches>>,
-    /// The sandbox of the saved scripts, started at start (ADR 0045).
+    /// The sandbox of the saved scripts, started at start (ADR 0046).
     #[cfg(feature = "scripts")]
     pub(super) scripts_runtime: Option<std::sync::Arc<autumn_harvest::sandbox::SandboxRuntime>>,
     /// The saved scripts of `[scripts]`, rebuilt at each assembly.

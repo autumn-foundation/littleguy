@@ -78,7 +78,7 @@ grep-files = ["littleguy-tools/grep-files"]
 # The `run_code` tool and `[sandbox]`.
 sandbox = ["autumn-harvest/sandbox-activities", "autumn-harvest-agent/sandbox"]
 # `[scripts]`: `propose_script`, `run_script` and the Scripts tab. The owner
-# accepts a script once, and a tick may run it (ADR 0045). Needs `sandbox`.
+# accepts a script once, and a tick may run it (ADR 0046). Needs `sandbox`.
 scripts = ["sandbox", "littleguy-stores/scripts", "dep:sha2", "dep:tokio-util"]
 # `[sandbox] approve = "auto"`: a reviewer model decides each call that
 # waits, and asks the owner only when it is unsure (ADR 0037).

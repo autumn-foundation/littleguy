@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted, 2026-11-14. ADR 0045 amends it: a tick changes nothing except
+Accepted, 2026-11-14. ADR 0046 amends it: a tick changes nothing except
 through a script that the owner accepted.
 
 ## Context

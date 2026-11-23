@@ -1,4 +1,4 @@
-# ADR 0045: Saved scripts that a tick can run
+# ADR 0046: Saved scripts that a tick can run
 
 ## Status
 

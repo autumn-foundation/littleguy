@@ -195,7 +195,7 @@ bind = "127.0.0.1:3004"
 # approve = "always"                ## or "untrusted": ask only after outside text (ADR 0033),
                                     ## or "auto": a reviewer model decides first (ADR 0037)
 
-## Saved scripts (ADR 0045): littleguy proposes a script, you accept it on
+## Saved scripts (ADR 0046): littleguy proposes a script, you accept it on
 ## the Scripts tab, and a heartbeat may then run it with run_script. They
 ## run on the [sandbox] backend. What a script changes stays changed.
 # [scripts]

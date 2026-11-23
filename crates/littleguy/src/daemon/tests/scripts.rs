@@ -1,4 +1,4 @@
-//! Saved scripts end to end on the daemon (ADR 0045): the assistant
+//! Saved scripts end to end on the daemon (ADR 0046): the assistant
 //! proposes, the owner accepts, and a heartbeat tick runs the script.
 
 use autumn_harvest::sandbox::SandboxBackend;

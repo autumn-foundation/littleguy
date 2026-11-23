@@ -185,7 +185,7 @@
 //! call in a new microVM. The `process` backend runs code as a host
 //! process. It shares the host kernel, so it is for development only.
 //!
-//! The `[scripts]` section gives the assistant saved scripts (ADR 0045).
+//! The `[scripts]` section gives the assistant saved scripts (ADR 0046).
 //! The assistant proposes a script with `propose_script`, and the owner
 //! accepts it on the Scripts tab. `run_script` runs an accepted script in
 //! the sandbox, on a tick too. It needs a `[sandbox]` section, whose
@@ -1634,7 +1634,7 @@ fn sandbox(raw: RawSandbox) -> Result<SandboxConfig, ConfigError> {
     })
 }
 
-/// The saved scripts of the assistant (ADR 0045). The scripts run on the
+/// The saved scripts of the assistant (ADR 0046). The scripts run on the
 /// backend of `[sandbox]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptsConfig {

@@ -1,4 +1,4 @@
-//! The name kernel of a saved script (ADR 0045): which names the assistant
+//! The name kernel of a saved script (ADR 0046): which names the assistant
 //! may give a script.
 //!
 //! Each function mirrors `littleguy-core/src/script_name.rs`. The bodies

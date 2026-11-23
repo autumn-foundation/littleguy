@@ -1,4 +1,4 @@
-//! The saved scripts of the assistant (ADR 0045).
+//! The saved scripts of the assistant (ADR 0046).
 //!
 //! The assistant drafts a script, and the draft waits for the owner. The
 //! owner accepts it, and the daemon writes the code to the scripts folder

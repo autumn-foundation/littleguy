@@ -169,7 +169,7 @@ pub enum Request {
         reason: Option<String>,
     },
     /// The saved scripts of the assistant, the drafts that wait and the run
-    /// log (ADR 0045). Only the owner may.
+    /// log (ADR 0046). Only the owner may.
     Scripts,
     /// Accept the waiting draft `id`, when its digest is `digest`: the
     /// digest of the draft that the owner read. Only the owner may.
@@ -276,7 +276,7 @@ pub struct PatchEntry {
 }
 
 /// A script that the assistant drafted, which waits for the owner
-/// (ADR 0045).
+/// (ADR 0046).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptDraftEntry {
     /// Its number.
@@ -298,7 +298,7 @@ pub struct ScriptDraftEntry {
     pub created_ms: i64,
 }
 
-/// A script that the owner accepted (ADR 0045).
+/// A script that the owner accepted (ADR 0046).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptEntry {
     /// The name that `run_script` takes.
@@ -319,7 +319,7 @@ pub struct ScriptEntry {
     pub accepted_ms: i64,
 }
 
-/// One run of a script: what ran and with what arguments (ADR 0045).
+/// One run of a script: what ran and with what arguments (ADR 0046).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScriptRunEntry {
     /// The script.

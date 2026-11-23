@@ -334,7 +334,7 @@ enum Tab {
     Skills,
     /// The patches of the assistant (ADR 0042).
     Patches,
-    /// The saved scripts and their run log (ADR 0045).
+    /// The saved scripts and their run log (ADR 0046).
     Scripts,
 }
 

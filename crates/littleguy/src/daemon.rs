@@ -513,7 +513,7 @@ pub struct Cursor {
 pub struct Extras {
     /// The runtime of the `run_code` tool.
     pub sandbox: Option<crate::sandbox::Runtime>,
-    /// The sandbox of the saved scripts (ADR 0045).
+    /// The sandbox of the saved scripts (ADR 0046).
     #[cfg(feature = "scripts")]
     pub scripts: Option<Arc<autumn_harvest::sandbox::SandboxRuntime>>,
     /// The tools of the MCP servers.

@@ -581,7 +581,7 @@ Three things to know:
   can still write `memory.db` and the scripts folder, so the hash cannot
   stop a hostile run.
 
-[ADR 0045](docs/adr/0045-saved-scripts.md) explains the design. Scripts
+[ADR 0046](docs/adr/0046-saved-scripts.md) explains the design. Scripts
 come with the `scripts` feature, which is on by default and needs
 `sandbox`.
 

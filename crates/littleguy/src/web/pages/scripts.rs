@@ -1,4 +1,4 @@
-//! The Scripts tab of the workspace page (ADR 0045).
+//! The Scripts tab of the workspace page (ADR 0046).
 //!
 //! Accepting code to run is a different promise from accepting prose, so
 //! the scripts have their own tab. It lists the drafts that wait, then the

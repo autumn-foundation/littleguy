@@ -338,7 +338,7 @@ async fn patch(socket: &Path, command: PatchCommand) -> Result<bool> {
     }
 }
 
-/// One saved script of the assistant (ADR 0045).
+/// One saved script of the assistant (ADR 0046).
 #[derive(Debug, Subcommand)]
 enum ScriptCommand {
     /// Print a draft whole: its description and its code.

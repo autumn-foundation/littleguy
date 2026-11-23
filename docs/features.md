@@ -66,7 +66,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `reflection` | yes | The reflection after a memory consolidation pass: the assistant files ideas and drafts skills from what the pass learned. | none |
 | `research` | yes | `[research]`: the `sweep` tool reads many sources in read-only `research` runs and returns one short row per source (ADR 0044). It adds no crate. | none |
 | `sandbox` | yes | The `run_code` tool and `[sandbox]`. | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
-| `scripts` | yes | `[scripts]`: `propose_script`, `run_script` and the Scripts tab. The owner accepts a script once, and a tick may run it (ADR 0045). Needs `sandbox`. | `sha2`, `tokio-util`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
+| `scripts` | yes | `[scripts]`: `propose_script`, `run_script` and the Scripts tab. The owner accepts a script once, and a tick may run it (ADR 0046). Needs `sandbox`. | `sha2`, `tokio-util`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `sealed-keys` | yes | `lg keys`: the house keys sealed with the key ring of LG_SAN_MATEO_KEY in house-keys.json, so the environment holds one secret (ADR 0040). | `san-mateo` |
 | `search-notes` | yes | `search_notes`: the assistant finds a file of its workspace by its words. | none |
 | `self-debug` | yes | `recent_runs`, `failed_attempts`, `model_usage` and `recent_wakes`: the assistant reads its own run log and tick log to debug itself. | none |
@@ -99,7 +99,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `notes` | no | The notes of the assistant (`notes`, ADR 0029). | none |
 | `patches` | no | The patches that the assistant proposes and the owner opens as draft PRs (`patches`, ADR 0042). | none |
 | `plans` | no | The goals and ideas of the assistant (`plans`). | none |
-| `scripts` | no | The saved scripts that the assistant proposes and the owner accepts, and their run log (`scripts`, ADR 0045). | none |
+| `scripts` | no | The saved scripts that the assistant proposes and the owner accepts, and their run log (`scripts`, ADR 0046). | none |
 | `self-debug` | no | The run log and the tick log that the assistant reads to debug itself (`runlog`, `tick_log`). | none |
 | `skills` | no | The skill drafts of the assistant (`skill_drafts`). | none |
 

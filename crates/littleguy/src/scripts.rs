@@ -1,5 +1,5 @@
 //! Saved scripts: programs that the owner blessed, and a tick can run
-//! (ADR 0045).
+//! (ADR 0046).
 //!
 //! A tick cannot call `run_code`, and that is correct. It also could not
 //! run a program that the owner already read, so each tick wrote the same
@@ -681,7 +681,7 @@ fn read_script(scripts: &Arc<Scripts>) -> Arc<dyn Tool> {
 }
 
 /// `run_script`: runs an accepted script in the sandbox. It is `ReadOnly`
-/// so that a tick may call it (ADR 0045). Its output may hold outside
+/// so that a tick may call it (ADR 0046). Its output may hold outside
 /// text, so it carries `untrusted_input`.
 fn run_script(scripts: &Arc<Scripts>) -> Arc<dyn Tool> {
     let run = Arc::clone(scripts);

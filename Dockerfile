@@ -27,7 +27,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 # The config folder belongs to root, so code in the sandbox, which runs as
 # lg, cannot rewrite lg.toml (ADR 0032). The daemon writes only the skills
-# and scripts folders there (ADR 0045).
+# and scripts folders there (ADR 0046).
 RUN useradd --create-home --uid 1000 lg \
     && mkdir -p /data/config/littleguy/skills /data/config/littleguy/scripts /data/share/littleguy \
     && chown -R lg:lg /data/share /data/config/littleguy/skills /data/config/littleguy/scripts

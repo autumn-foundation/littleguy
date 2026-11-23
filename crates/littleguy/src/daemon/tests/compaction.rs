@@ -235,6 +235,7 @@ fn the_profile_heartbeat_only_lets_a_tick_keep_notes() {
 }
 
 /// Whether some request in `seen[from..]` offered `save_progress`.
+#[cfg(any(feature = "discord", feature = "sandbox"))]
 fn offered_since(worker: &Worker, from: usize) -> bool {
     worker.seen.lock().unwrap()[from..]
         .iter()

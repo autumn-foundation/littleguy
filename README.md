@@ -1063,8 +1063,9 @@ The notes stay for later messages until the assistant saves new ones. Set
 `max_request_bytes` under the context window of your model, or the
 provider refuses a request before a reset is due. The config refuses a
 setting with no room for the save turn, such as `at_percent = 100`. A
-heartbeat tick or a booked wake is read-only, so the engine gives it no
-reset. The `compaction` feature builds it.
+tick (a heartbeat, a brief, a reflection or a booked wake) resets too: it
+may keep its progress notes and its memory, and it stays read-only. The
+`compaction` feature builds it.
 [ADR 0043](docs/adr/0043-compaction.md) explains the design.
 
 A `[research]` section gives the assistant the `sweep` tool. One call

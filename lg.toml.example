@@ -146,8 +146,9 @@ bind = "127.0.0.1:3004"
 # deliver = "web"
 
 ## Compaction: near the request cap, the assistant saves progress notes,
-## and the window resets to the task and the notes, so a long message goes
-## on instead of stopping. A reset is due at `at_percent` of
+## and the window resets to the task and the notes, so a long message or
+## tick goes on instead of stopping. A tick may keep its notes and stays
+## read-only. A reset is due at `at_percent` of
 ## max_request_bytes. `max_resets` bounds the resets of one message; no
 ## bound by default. The notes keep at most `notes_bytes`.
 # [compaction]

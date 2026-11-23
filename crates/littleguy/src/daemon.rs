@@ -206,7 +206,7 @@ pub fn harness(
     // engine resets the window to the task and the notes (ADR 0043).
     #[cfg(feature = "compaction")]
     if let Some(section) = &config.compaction {
-        profile = profile.context_reset(section.context_reset());
+        profile = keep_tick_notes(profile.context_reset(section.context_reset()));
     }
     // Each tool cuts its own result, by a setting of the owner such as
     // `fetch_max_chars`. The engine cuts no result again (ADR 0034).
@@ -242,6 +242,33 @@ pub fn harness(
         profile = profile.deliver();
     }
     harness.agent(profile)
+}
+
+/// `profile` with a heartbeat that only lets a tick keep its progress
+/// notes (ADR 0043).
+///
+/// The engine gives a tick a context reset only when the tick may write
+/// memory. A `Control::SetHeartbeat` keeps that flag only when the profile
+/// heartbeat sets it too (`AgentHeartbeat::narrowed`). The daemon arms each
+/// tick with such a control ([`crate::wake::heartbeat`]). So this heartbeat
+/// exists to carry the flag. It sets no action, so a tick stays read-only.
+///
+/// The engine also books this heartbeat itself until the first control
+/// arrives. A daemon with no brief and no heartbeat may never send one. So
+/// the interval is the largest that the engine takes. The booking then
+/// saturates past the last instant of any timer, and it never fires. Do not
+/// shorten it: a shorter interval runs a tick with the default prompt of
+/// the engine.
+///
+/// The interval does not stretch a control. `narrowed` takes the profile
+/// interval only as a floor, clamped to 60 seconds.
+#[cfg(feature = "compaction")]
+fn keep_tick_notes(profile: AgentProfile) -> AgentProfile {
+    let mut beat = autumn_harvest_agent::AgentHeartbeat::every(Duration::from_secs(1));
+    beat.every_secs = u64::MAX;
+    // autumn-harvest-agent 0.11 has no builder for this flag.
+    beat.allow_memory_writes = true;
+    profile.heartbeat(beat)
 }
 
 /// The most bytes of one workspace file that a request shows.

@@ -129,6 +129,10 @@ owner accepted.** The owner accepts that when they accept the script. The
 run log on the Scripts tab makes each use of the exception visible, with
 its arguments.
 
+The progress notes of ADR 0043 stay as they are. A tick may keep its own
+notes in memory. That flag grants no action outside, so it is not a
+second way to change the world.
+
 ### What the hash pin protects
 
 The pin protects against **drift** between acceptance and a later run: a

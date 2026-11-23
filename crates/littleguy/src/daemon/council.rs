@@ -14,7 +14,7 @@ use autumn_harvest_agent::flow::labels;
 use autumn_harvest_agent::{
     AgentModel, AgentState, ChatMessage, ChatRequest, ChatRole, ContentPart, DrawId,
 };
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use littleguy_core::{CouncilAccepts, CouncilConfig};
 use littleguy_stores::SqliteStores;
 use littleguy_stores::council::{Proposal, ProposalKind};
@@ -158,7 +158,7 @@ impl Daemon {
     /// Returns an error when the store cannot write.
     pub(super) fn mark_proposals(
         &self,
-        started: DateTime<Utc>,
+        started: Timestamp,
         state: Option<&AgentState>,
     ) -> Result<()> {
         let (Some(_), Some(stores)) = (self.council(), self.kit.stores.as_ref()) else {
@@ -167,7 +167,7 @@ impl Daemon {
         // With the Rule of Two off there are no flow rules, so no taint.
         let tracked = self.kit.config.flow.rule_of_two;
         let tainted = tainted(state, tracked);
-        let marked = stores.mark_proposals(started.timestamp_millis(), tainted)?;
+        let marked = stores.mark_proposals(started.as_millisecond(), tainted)?;
         if marked > 0 && !tracked {
             tracing::warn!(
                 marked,
@@ -227,14 +227,14 @@ impl Daemon {
             .collect();
         match (proposal.kind, accepted) {
             (ProposalKind::Goal, true) => {
-                stores.accept_goal(proposal.id, now.timestamp_millis())?;
+                stores.accept_goal(proposal.id, now.as_millisecond())?;
                 let note = format!("Accepted by the council: {}", reasons.join(" "));
                 stores.goal_progress(
                     &format!("council:goal:{}", proposal.id),
                     proposal.id,
                     &note,
                     false,
-                    now.timestamp_millis(),
+                    now.as_millisecond(),
                 )?;
             }
             (ProposalKind::Goal, false) => {
@@ -267,7 +267,7 @@ impl Daemon {
             proposal.id,
             accepted,
             &Value::Array(record).to_string(),
-            now.timestamp_millis(),
+            now.as_millisecond(),
         )?;
         tracing::info!(
             kind = proposal.kind.as_str(),

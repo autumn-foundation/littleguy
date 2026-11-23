@@ -333,7 +333,9 @@ pub fn retire(dir: &Path, name: &str) -> Result<bool> {
     let retired = dir.join(RETIRED);
     std::fs::create_dir_all(&retired).with_context(|| format!("creating {}", retired.display()))?;
     // Two retires in one millisecond get two names.
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3f").to_string();
+    let stamp = jiff::Timestamp::now()
+        .strftime("%Y%m%dT%H%M%S%3f")
+        .to_string();
     let base = format!("{name}-{stamp}");
     let target = std::iter::once(base.clone())
         .chain((2..=u32::MAX).map(|n| format!("{base}-{n}")))

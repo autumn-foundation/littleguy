@@ -42,7 +42,6 @@ mod features;
 mod fleet;
 mod guard;
 mod house_keys;
-mod instant;
 mod memory;
 #[cfg(feature = "notes")]
 mod notes;
@@ -65,6 +64,7 @@ mod runlog;
 mod sandbox;
 #[cfg(feature = "skills")]
 mod skills;
+mod stamp;
 mod tools;
 #[cfg(feature = "self-debug")]
 mod trace;

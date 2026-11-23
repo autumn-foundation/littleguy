@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use autumn_harvest_agent::flow::labels;
 use autumn_harvest_agent::{AgentError, ErrorKind, FnTool, Tool, ToolEffect};
-use chrono::Utc;
+use jiff::Timestamp;
 use littleguy_stores::SqliteStores;
 use serde_json::{Value, json};
 
@@ -31,10 +31,9 @@ fn text<'a>(input: &'a Value, name: &str) -> Result<&'a str, AgentError> {
 /// re-read.
 fn stamped(mut entry: Value, updated_ms: i64) -> Value {
     entry["updated_ms"] = json!(updated_ms);
-    entry["updated"] = chrono::DateTime::<Utc>::from_timestamp_millis(updated_ms)
-        .map_or(Value::Null, |at| {
-            json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        });
+    entry["updated"] = crate::stamp::from_millis(updated_ms).map_or(Value::Null, |at| {
+        json!(at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string())
+    });
     entry
 }
 
@@ -100,7 +99,7 @@ pub fn tools(stores: &Arc<SqliteStores>) -> Vec<Arc<dyn Tool>> {
                 async move {
                     let name = text(&input, "name")?;
                     let body = text(&input, "text")?;
-                    let new = stores.write_note(name, body, Utc::now().timestamp_millis())?;
+                    let new = stores.write_note(name, body, Timestamp::now().as_millisecond())?;
                     Ok(json!({"note": name.trim(), "new": new, "chars": body.chars().count()}))
                 }
             },

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use autumn_harvest_agent::{AgentHarness, AgentModel, LiveSink, sqlite};
-use chrono::Utc;
+use jiff::Timestamp;
 use littleguy_channels::Service;
 use littleguy_core::reload::{Merge, merge};
 use littleguy_core::{Config, SenderId};
@@ -214,7 +214,7 @@ impl Kit {
             config.brief.as_ref(),
             config.heartbeat.as_ref(),
             Arc::clone(&self.brief_armed),
-            Utc::now(),
+            Timestamp::now(),
         )?;
         let runtime =
             crate::sandbox::share(self.sandbox.as_ref().filter(|_| config.sandbox.is_some()));

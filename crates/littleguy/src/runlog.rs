@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use autumn_harvest_agent::flow::labels;
 use autumn_harvest_agent::{AgentError, ErrorKind, FnTool, Tool, ToolEffect};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use littleguy_stores::RunLog;
 use littleguy_stores::runlog::{Failure, Run, Usage};
 use serde_json::{Value, json};
@@ -32,8 +32,8 @@ const MAX_HOURS: u32 = 30 * 24;
 
 /// An epoch millisecond as RFC 3339, in UTC.
 fn time(ms: Option<i64>) -> Value {
-    ms.and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map_or(Value::Null, |at| json!(at.to_rfc3339()))
+    ms.and_then(crate::stamp::from_millis)
+        .map_or(Value::Null, |at| json!(crate::stamp::rfc3339(at)))
 }
 
 /// The whole number `name` of `input`, between 1 and `max`, or `default`.
@@ -179,8 +179,9 @@ pub fn tools(db: &Path) -> Vec<Arc<dyn Tool>> {
                 let log = log.clone();
                 async move {
                     let hours = bounded(&input, "hours", DEFAULT_HOURS, MAX_HOURS);
-                    let since = Utc::now() - chrono::Duration::hours(i64::from(hours));
-                    let since_ms = since.timestamp_millis();
+                    let since =
+                        Timestamp::now() - jiff::SignedDuration::from_hours(i64::from(hours));
+                    let since_ms = since.as_millisecond();
                     let rows = blocking(move || log.usage(since_ms)).await?;
                     Ok(json!({
                         "since": time(Some(since_ms)),

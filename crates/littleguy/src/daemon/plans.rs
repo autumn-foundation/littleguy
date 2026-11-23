@@ -2,7 +2,7 @@
 //! decision that the assistant cannot make itself.
 
 use anyhow::Result;
-use chrono::Utc;
+use jiff::Timestamp;
 use littleguy_stores::plans::{Goal, Idea, Note, Plans};
 
 use super::Daemon;
@@ -96,7 +96,7 @@ impl Daemon {
         };
         let (changed, what) = match decision {
             PlanDecision::Accept => (
-                stores.accept_goal(id, Utc::now().timestamp_millis())?,
+                stores.accept_goal(id, Timestamp::now().as_millisecond())?,
                 "a proposed goal",
             ),
             PlanDecision::Decline => (stores.decline_goal(id)?, "a proposed goal"),

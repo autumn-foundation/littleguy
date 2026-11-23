@@ -643,8 +643,9 @@ fn past_turn(turn: &PastTurn) -> Markup {
 
 /// An epoch millisecond as a short UTC time.
 fn when(ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
-        .map_or_else(String::new, |at| at.format("%b %-d, %H:%M UTC").to_string())
+    crate::stamp::from_millis(ms).map_or_else(String::new, |at| {
+        at.strftime("%b %-d, %H:%M UTC").to_string()
+    })
 }
 
 /// Text that the assistant wrote, rendered as markdown. Raw HTML in it

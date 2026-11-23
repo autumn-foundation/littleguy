@@ -10,6 +10,7 @@ skip the download.
 | `src/house_keys.rs` `is_sealable_bytes`, `source` | `crates/littleguy-core/src/house_keys.rs` | No variable of the key ring is ever sealed, and a sealed value wins over the environment |
 | `src/patch_path.rs` `is_patch_path_bytes` | `crates/littleguy-core/src/patch_path.rs` | A patch path is relative, never names a `.` or `..` segment, and never writes under `.github/` or a `.git` folder |
 | `src/route.rs` `decide` | `crates/littleguy-core/src/route.rs` `decide` | Only an allowed sender on an enabled channel reaches an agent |
+| `src/script_name.rs` `is_script_name_bytes` | `crates/littleguy-core/src/script_name.rs` | A saved script name is one plain file name in the scripts folder: no `/`, no `.`, no `\`, no control byte, and no leading `-` |
 
 The test `verus_mirror` in `littleguy-core` fails when a mirrored body drifts
 from its Rust source.

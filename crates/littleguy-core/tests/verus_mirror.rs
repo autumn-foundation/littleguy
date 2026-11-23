@@ -95,3 +95,11 @@ fn the_compaction_proof_covers_the_shipped_kernel() -> TestResult {
         "formal/verus/src/compaction.rs",
     )
 }
+
+#[test]
+fn the_script_name_proof_covers_the_shipped_kernel() -> TestResult {
+    mirrors(
+        "crates/littleguy-core/src/script_name.rs",
+        "formal/verus/src/script_name.rs",
+    )
+}

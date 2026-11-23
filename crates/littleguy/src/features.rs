@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 29] = [
+pub const ALL: [Feature; 30] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -51,6 +51,10 @@ pub const ALL: [Feature; 29] = [
     Feature {
         name: "sandbox",
         on: cfg!(feature = "sandbox"),
+    },
+    Feature {
+        name: "scripts",
+        on: cfg!(feature = "scripts"),
     },
     Feature {
         name: "auto-approve",
@@ -168,6 +172,7 @@ pub fn check(config: &Config) -> Result<()> {
         (config.patches.is_some(), "[patches]", "patches"),
         (!config.mcp.is_empty(), "[[mcp.server]]", "mcp"),
         (config.sandbox.is_some(), "[sandbox]", "sandbox"),
+        (config.scripts.is_some(), "[scripts]", "scripts"),
         (
             config
                 .sandbox

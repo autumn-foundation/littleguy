@@ -27,7 +27,9 @@
 //! tools may read, and they may write the assistant's own bookkeeping
 //! (`Internal`). The workspace is read-only on a tick: the engine keeps no
 //! workspace change of a read-only run, so the file tools that change it
-//! are `Write`, which the engine refuses there.
+//! are `Write`, which the engine refuses there. One tool is the exception:
+//! `run_script` is `ReadOnly`, so a script that the owner accepted keeps
+//! what it changes (ADR 0045).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

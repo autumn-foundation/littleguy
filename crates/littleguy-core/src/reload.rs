@@ -44,7 +44,7 @@ impl Merge {
 ///
 /// The restart sections start something at start. The owner names the
 /// agent and its rows. `san_mateo`, `ui` and `hooks` bind a server.
-/// `google` needs the San Mateo connections. `sandbox` starts a backend,
+/// `google` needs the San Mateo connections. `sandbox` and `scripts` start a backend,
 /// `mcp` starts the servers, and `fleet` opens the tenant database.
 #[must_use]
 pub fn merge(current: &Config, mut next: Config) -> Merge {
@@ -79,7 +79,7 @@ pub fn merge(current: &Config, mut next: Config) -> Merge {
     keep!(san_mateo, google);
     live!(memory, brief, heartbeat, skills);
     profile!(tools);
-    keep!(sandbox);
+    keep!(sandbox, scripts);
     live!(approvals, flow);
     keep!(mcp);
     live!(refine, council, runs);

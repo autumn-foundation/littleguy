@@ -11,7 +11,7 @@
 //! It also checks that code in the sandbox cannot reach the daemon (ADR
 //! 0032): a daemon in the container answers `lg` but refuses the same call
 //! from inside the namespaces of a run, and the config is read-only to the
-//! `lg` user while the skills stay writable.
+//! `lg` user while the skills and the scripts stay writable.
 //!
 //! It runs as its own compose project, so it never touches a running
 //! littleguy, and it removes its container and volume at the end.
@@ -30,9 +30,11 @@ const DAEMON_PROBE: &str = "lg serve >/tmp/lg.log 2>&1 & \
      lg pairs >/dev/null \
      && unshare -Urn lg pairs 2>&1 | grep -q 'no request from code in a sandbox'";
 
-/// The config folder is not writable by `lg`, and the skills folder is.
-const FILES_PROBE: &str =
-    "! test -w /data/config/littleguy && test -w /data/config/littleguy/skills";
+/// The config folder is not writable by `lg`, and the skills and scripts
+/// folders are.
+const FILES_PROBE: &str = "! test -w /data/config/littleguy \
+     && test -w /data/config/littleguy/skills \
+     && test -w /data/config/littleguy/scripts";
 
 /// The probes. The first two run in the namespaces of one `run_code` call:
 /// no network, then the runtimes of the image. The last two check what code

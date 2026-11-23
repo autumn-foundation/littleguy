@@ -538,6 +538,53 @@ lg serve --model openrouter --model-name <vendor>/<model> --reviewer-model-name 
 `LG_REVIEWER_MODEL_NAME` sets it too.
 [ADR 0037](docs/adr/0037-a-reviewer-decides-first.md) explains the design.
 
+## Saved scripts
+
+A heartbeat tick is read-only, so it cannot call `run_code`. With
+`[scripts]`, littleguy can still run a program that you read once:
+
+```toml
+[sandbox]
+backend = "process"
+
+[scripts]
+dir = "~/notes/scripts"   # optional; the default is scripts/ next to lg.toml
+network = true            # optional; the default is the [sandbox] network
+```
+
+littleguy proposes a script with `propose_script` when it does the same
+work on many ticks, such as a walk of a remote repository. The draft waits
+on the **Scripts** tab of the Workspace page, with its code. Accepting it
+writes the file to the scripts folder and records its SHA-256. From then
+on, `run_script` runs it in the sandbox, in a conversation or on a tick,
+with no approval. You accept a script whole: it gets no list of what it
+may do. Retiring it moves the file to `.retired/`, and it no longer runs.
+
+```sh
+lg scripts              # the scripts, the drafts that wait and the recent runs
+lg script show 2        # one draft with its code
+lg script accept 2      # prints the code and asks first
+lg script decline 2
+lg script retire walk-repo
+```
+
+Three things to know:
+
+- **What a script changes stays changed, even on a tick.** A tick changes
+  nothing except through a script that you accepted. The Scripts tab keeps
+  a log of each run with its arguments and its stdin, so you can see it.
+- **The arguments are data.** `run_script` passes them as argv and stdin.
+  It never builds a shell command from them, so a page that littleguy read
+  cannot turn an argument into a command. Write your scripts the same way.
+- **The hash stops drift, not an attack.** A script whose file changed since
+  you accepted it does not run, and the tab marks it. Code in the sandbox
+  can still write `memory.db` and the scripts folder, so the hash cannot
+  stop a hostile run.
+
+[ADR 0045](docs/adr/0045-saved-scripts.md) explains the design. Scripts
+come with the `scripts` feature, which is on by default and needs
+`sandbox`.
+
 ## Run it in a container
 
 The `process` sandbox backend runs only on Linux. On a Mac, the container
@@ -577,14 +624,15 @@ docker compose exec lg lg chat "hi"
   tar --no-xattrs --no-mac-metadata --no-acls -C ~/.local/share/littleguy \
     --exclude lg.db.lock --exclude lg.sock -cf - . \
     | docker cp - "$(docker compose ps -aq lg)":/data/share/littleguy
-  # The skills live next to the config, so they come over too.
+  # The skills and the scripts live next to the config, so they come over
+  # too. Skip `scripts` when you have none yet.
   tar --no-xattrs --no-mac-metadata --no-acls --exclude .DS_Store \
-    -C ~/.config/littleguy -cf - skills \
+    -C ~/.config/littleguy -cf - skills scripts \
     | docker cp - "$(docker compose ps -aq lg)":/data/config/littleguy
-  # The data and the skills belong to lg. The config stays root's, so code
-  # in the sandbox cannot rewrite it (ADR 0032).
+  # The data, the skills and the scripts belong to lg. The config stays
+  # root's, so code in the sandbox cannot rewrite it (ADR 0032).
   docker compose run --rm --no-deps --user root --entrypoint sh lg -c \
-    'chown -R lg:lg /data/share /data/config/littleguy/skills; chown root:root /data/config/littleguy /data/config/littleguy/lg.toml'
+    'mkdir -p /data/config/littleguy/scripts; chown -R lg:lg /data/share /data/config/littleguy/skills /data/config/littleguy/scripts; chown root:root /data/config/littleguy /data/config/littleguy/lg.toml'
   docker compose up -d
   ```
 

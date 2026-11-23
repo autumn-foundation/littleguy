@@ -730,3 +730,41 @@ details.call pre {
   white-space: pre;
   overflow-x: auto;
 }
+
+/* The run log of the saved scripts, under the list and the open script. */
+.workspace .split > .runs {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem 1.1rem;
+  overflow: auto;
+}
+
+.workspace .runs h3 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0 0 0.4rem;
+}
+
+.workspace .runs table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.workspace .runs th,
+.workspace .runs td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.3rem 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.workspace .runs code,
+.workspace .runs pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}

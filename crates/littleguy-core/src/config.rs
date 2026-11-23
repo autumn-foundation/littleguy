@@ -185,6 +185,13 @@
 //! call in a new microVM. The `process` backend runs code as a host
 //! process. It shares the host kernel, so it is for development only.
 //!
+//! The `[scripts]` section gives the assistant saved scripts (ADR 0045).
+//! The assistant proposes a script with `propose_script`, and the owner
+//! accepts it on the Scripts tab. `run_script` runs an accepted script in
+//! the sandbox, on a tick too. It needs a `[sandbox]` section, whose
+//! backend it shares. `dir` is `scripts/` next to the config file by
+//! default. `network` is the network of the sandbox by default.
+//!
 //! The `[san_mateo]` section names the OAuth integrations that San Mateo
 //! keeps tokens for. A client secret never goes in the file: the file names
 //! the variable that holds it.
@@ -335,6 +342,9 @@ pub enum ConfigError {
     /// The sandbox section is not valid.
     #[error("the sandbox section is not valid: {0}")]
     Sandbox(String),
+    /// The scripts section is not valid.
+    #[error("the scripts section is not valid: {0}")]
+    Scripts(String),
     /// The approvals section is not valid.
     #[error("the approvals section is not valid: {0}")]
     Approvals(String),
@@ -1624,6 +1634,61 @@ fn sandbox(raw: RawSandbox) -> Result<SandboxConfig, ConfigError> {
     })
 }
 
+/// The saved scripts of the assistant (ADR 0045). The scripts run on the
+/// backend of `[sandbox]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptsConfig {
+    /// The folder of the accepted scripts. `None` is `scripts/` next to the
+    /// config file.
+    pub dir: Option<PathBuf>,
+    /// Whether a script may use the network of the backend.
+    pub network: bool,
+}
+
+impl ScriptsConfig {
+    /// The sandbox of the scripts: the backend of `sandbox`, with the
+    /// network of the scripts.
+    #[must_use]
+    pub fn sandbox(&self, sandbox: &SandboxConfig) -> SandboxConfig {
+        SandboxConfig {
+            network: self.network,
+            ..sandbox.clone()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawScripts {
+    dir: Option<String>,
+    network: Option<bool>,
+}
+
+/// Checks the sandbox section, then the scripts section against it.
+fn sandbox_and_scripts(
+    sandbox_raw: Option<RawSandbox>,
+    scripts_raw: Option<RawScripts>,
+) -> Result<(Option<SandboxConfig>, Option<ScriptsConfig>), ConfigError> {
+    let sandbox_section = sandbox_raw.map(sandbox).transpose()?;
+    let scripts_section = scripts_raw
+        .map(|raw| scripts(raw, sandbox_section.as_ref()))
+        .transpose()?;
+    Ok((sandbox_section, scripts_section))
+}
+
+/// Checks the scripts section against the sandbox section.
+fn scripts(raw: RawScripts, sandbox: Option<&SandboxConfig>) -> Result<ScriptsConfig, ConfigError> {
+    let Some(sandbox) = sandbox else {
+        return Err(ConfigError::Scripts(String::from(
+            "scripts run in the sandbox, so they need a [sandbox] section",
+        )));
+    };
+    Ok(ScriptsConfig {
+        dir: raw.dir.map(PathBuf::from),
+        network: raw.network.unwrap_or(sandbox.network),
+    })
+}
+
 /// The approval wait of a call when the config names none: one hour.
 pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 3_600;
 
@@ -1939,6 +2004,7 @@ struct Raw {
     #[serde(default)]
     tools: RawTools,
     sandbox: Option<RawSandbox>,
+    scripts: Option<RawScripts>,
     #[serde(default)]
     approvals: RawApprovals,
     #[serde(default)]
@@ -2251,6 +2317,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     /// The `run_code` tool, when the config has the section.
     pub sandbox: Option<SandboxConfig>,
+    /// The saved scripts, when the config has the section.
+    pub scripts: Option<ScriptsConfig>,
     /// Who decides a call that waits.
     pub approvals: ApprovalsConfig,
     /// The flow rules.
@@ -2297,6 +2365,7 @@ impl Config {
             skills: SkillsConfig::default(),
             tools: ToolsConfig::default(),
             sandbox: None,
+            scripts: None,
             approvals: ApprovalsConfig::default(),
             flow: FlowConfig::default(),
             mcp: Vec::new(),
@@ -2372,6 +2441,7 @@ impl Config {
             .heartbeat
             .map(|raw| heartbeat(raw, &memory.timezone))
             .transpose()?;
+        let (sandbox_section, scripts_section) = sandbox_and_scripts(raw.sandbox, raw.scripts)?;
         Ok(Self {
             owner: OwnerName::new(raw.owner)?,
             system: raw.system.unwrap_or_else(|| String::from(DEFAULT_SYSTEM)),
@@ -2400,7 +2470,8 @@ impl Config {
                 dir: raw.skills.dir.map(std::path::PathBuf::from),
             },
             tools: tools(&raw.tools)?,
-            sandbox: raw.sandbox.map(sandbox).transpose()?,
+            sandbox: sandbox_section,
+            scripts: scripts_section,
             approvals: approvals(&raw.approvals)?,
             flow: FlowConfig {
                 rule_of_two: raw.flow.rule_of_two.unwrap_or(true),
@@ -2679,6 +2750,45 @@ mod tests {
         let moved =
             Config::parse("owner = \"mark\"\n[sandbox]\nbackend = \"process\"\napprover = \"42\"");
         assert!(moved.is_err());
+    }
+
+    #[test]
+    fn the_scripts_section_shares_the_sandbox_and_takes_its_network() {
+        let plain = Config::parse("owner = \"mark\"").unwrap();
+        assert_eq!(plain.scripts, None);
+        let base = "owner = \"mark\"\n[sandbox]\nbackend = \"process\"\n";
+        let default = Config::parse(&format!("{base}[scripts]")).unwrap();
+        assert_eq!(
+            default.scripts,
+            Some(ScriptsConfig {
+                dir: None,
+                network: false,
+            })
+        );
+        let set = Config::parse(&format!(
+            "{base}network = true\n[scripts]\ndir = \"/s\"\nnetwork = false"
+        ))
+        .unwrap();
+        let scripts = set.scripts.unwrap();
+        assert_eq!(scripts.dir, Some(PathBuf::from("/s")));
+        assert!(!scripts.network, "the scripts keep their own network");
+        let sandbox = set.sandbox.unwrap();
+        assert!(sandbox.network);
+        let theirs = scripts.sandbox(&sandbox);
+        assert!(!theirs.network);
+        assert_eq!(theirs.backend, sandbox.backend);
+        let inherited = Config::parse(&format!("{base}network = true\n[scripts]")).unwrap();
+        assert!(inherited.scripts.unwrap().network);
+    }
+
+    #[test]
+    fn scripts_without_a_sandbox_or_with_an_unknown_key_are_refused() {
+        match Config::parse("owner = \"mark\"\n[scripts]") {
+            Err(ConfigError::Scripts(why)) => assert!(why.contains("[sandbox]"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        let text = "owner = \"mark\"\n[sandbox]\nbackend = \"process\"\n[scripts]\nshell = true";
+        assert!(Config::parse(text).is_err());
     }
 
     #[test]

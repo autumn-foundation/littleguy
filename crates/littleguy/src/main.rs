@@ -62,6 +62,8 @@ mod research;
 #[cfg(feature = "self-debug")]
 mod runlog;
 mod sandbox;
+#[cfg(feature = "scripts")]
+mod scripts;
 #[cfg(feature = "skills")]
 mod skills;
 mod stamp;
@@ -168,6 +170,11 @@ enum Command {
     /// Show, open or decline one patch of the assistant.
     #[command(subcommand)]
     Patch(PatchCommand),
+    /// List the saved scripts, the drafts that wait and the recent runs.
+    Scripts,
+    /// Show, accept, decline or retire one saved script.
+    #[command(subcommand)]
+    Script(ScriptCommand),
     /// Propose, list and activate profile overlays of the assistant.
     #[command(subcommand)]
     Refine(RefineCommand),
@@ -329,6 +336,75 @@ async fn patch(socket: &Path, command: PatchCommand) -> Result<bool> {
             ask(socket, &Request::DeclinePatch { id, reason }).await
         }
     }
+}
+
+/// One saved script of the assistant (ADR 0045).
+#[derive(Debug, Subcommand)]
+enum ScriptCommand {
+    /// Print a draft whole: its description and its code.
+    Show {
+        /// The draft id, from `lg scripts`.
+        id: i64,
+    },
+    /// Print the draft, ask, and accept it. A tick may then run it.
+    Accept {
+        /// The draft id, from `lg scripts`.
+        id: i64,
+    },
+    /// Decline the draft.
+    Decline {
+        /// The draft id, from `lg scripts`.
+        id: i64,
+    },
+    /// Retire an accepted script, so it no longer runs.
+    Retire {
+        /// The script name, from `lg scripts`.
+        name: String,
+    },
+}
+
+/// Runs one `lg script` command. An accept prints the code and accepts
+/// only on a `y`, with the digest of the draft that it printed.
+async fn script(socket: &Path, command: ScriptCommand) -> Result<bool> {
+    let id = match &command {
+        ScriptCommand::Retire { name } => {
+            return ask(socket, &Request::RetireScript { name: name.clone() }).await;
+        }
+        ScriptCommand::Decline { id } => {
+            return ask(socket, &Request::DeclineScript { id: *id }).await;
+        }
+        ScriptCommand::Show { id } | ScriptCommand::Accept { id } => *id,
+    };
+    let listing = client::send(socket, &Request::Scripts).await?;
+    let Response::Scripts { drafts, .. } = &listing else {
+        let (text, _) = client::render(&listing);
+        println!("{text}");
+        return Ok(false);
+    };
+    let Some(found) = drafts.iter().find(|draft| draft.id == id) else {
+        println!("error: no script draft {id} waits. Run `lg scripts`");
+        return Ok(false);
+    };
+    println!("{}", client::render_script_draft(found));
+    if matches!(command, ScriptCommand::Show { .. }) {
+        return Ok(true);
+    }
+    print!(
+        "Accept script {}? A tick may then run it. [y/N] ",
+        found.name
+    );
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    if !line.trim().eq_ignore_ascii_case("y") {
+        println!("draft {id} still waits");
+        return Ok(false);
+    }
+    let request = Request::AcceptScript {
+        id,
+        digest: found.digest.clone(),
+    };
+    ask(socket, &request).await
 }
 
 /// The models that `lg serve` can run.
@@ -754,17 +830,25 @@ fn hook_token(config: &Config, keys: &house_keys::HouseKeys) -> Result<Option<we
 }
 
 /// The daemon with its config file, which it watches and `lg reload`
-/// reads, and the skills folder next to it, unless `[skills]` names one.
+/// reads, and the skills and scripts folders next to it, unless `[skills]`
+/// or `[scripts]` names one.
 fn with_config_file(daemon: daemon::Daemon, file: Option<PathBuf>) -> daemon::Daemon {
     let Some(file) = file else {
         return daemon;
     };
     #[cfg(feature = "skills")]
     let skills = file.parent().map(|parent| parent.join("skills"));
+    #[cfg(feature = "scripts")]
+    let scripts = file.parent().map(|parent| parent.join("scripts"));
     let daemon = daemon.with_config_file(file);
     #[cfg(feature = "skills")]
     let daemon = match skills {
         Some(dir) => daemon.with_skills_dir(dir),
+        None => daemon,
+    };
+    #[cfg(feature = "scripts")]
+    let daemon = match scripts {
+        Some(dir) => daemon.with_scripts_dir(dir),
         None => daemon,
     };
     daemon
@@ -813,6 +897,8 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let mcp = tools::mcp_tools(&config.mcp, keys.lookup()).await;
     let extras = daemon::Extras {
         sandbox,
+        #[cfg(feature = "scripts")]
+        scripts: scripts::runtime(&config)?,
         mcp,
         #[cfg(feature = "google")]
         google: connections
@@ -942,6 +1028,8 @@ async fn run(cli: Cli) -> Result<bool> {
         Command::Deny { id, reason } => ask(&socket, &Request::Deny { id, reason }).await,
         Command::Refine(command) => ask(&socket, &command.request()?).await,
         Command::Patches => ask(&socket, &Request::Patches).await,
+        Command::Scripts => ask(&socket, &Request::Scripts).await,
+        Command::Script(command) => script(&socket, command).await,
         Command::Patch(command) => patch(&socket, command).await,
         Command::Ui => ask(&socket, &Request::UiLink).await,
         Command::Reload => ask(&socket, &Request::Reload).await,

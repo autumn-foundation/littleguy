@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted, 2026-11-14.
+Accepted, 2026-11-14. Amended 2026-11-23: a tick may keep its progress
+notes (ADR 0043).
 
 ## Context
 
@@ -65,3 +66,8 @@ Three facts shape the design:
   autumn-harvest #2658, so it waits for that.
 - A tick has no model of its own yet. `AgentHeartbeat::model` can name a
   cheaper harness model once the harness holds more than one.
+- A tick may keep its progress notes, and it stays read-only (amended
+  2026-11-23, ADR 0043). With a `[compaction]` section, a long tick saves
+  its notes and resets its window, as an attended op does. The flag that
+  allows it, `allow_memory_writes`, is not `allow_actions`. A tick still
+  refuses each tool that writes or acts outside.

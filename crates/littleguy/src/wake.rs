@@ -126,9 +126,19 @@ fn marked(mark: &str, prompt: &str) -> String {
 }
 
 /// The read-only heartbeat that ticks `every` from now with `prompt`.
+///
+/// A tick may keep its progress notes (ADR 0043). Without that flag the
+/// engine gives a tick no context reset, so a long tick stops at the
+/// request cap. The engine keeps the flag only when the profile heartbeat
+/// sets it too (`AgentHeartbeat::narrowed`). So the profile decides, and
+/// the flag here is inert without it. The flag grants no action: a tick
+/// stays read-only.
 #[must_use]
 pub fn heartbeat(prompt: &str, every: Duration) -> AgentHeartbeat {
-    AgentHeartbeat::every(every).prompt(prompt)
+    let mut beat = AgentHeartbeat::every(every).prompt(prompt);
+    // autumn-harvest-agent 0.11 has no builder for this flag.
+    beat.allow_memory_writes = true;
+    beat
 }
 
 /// One arm of the engine timer: the op and its key.
@@ -709,7 +719,8 @@ mod tests {
         assert_eq!(arm.key, "heartbeat:2026-11-14T12:30:00+00:00");
         assert_eq!(set(&arm).every_secs, 30 * 60);
         assert!(set(&arm).precheck);
-        assert!(!set(&arm).allow_actions && !set(&arm).allow_memory_writes);
+        assert!(!set(&arm).allow_actions, "a tick stays read-only");
+        assert!(set(&arm).allow_memory_writes, "a tick may keep notes");
         assert!(set(&arm).prompt.starts_with(HEARTBEAT_MARK));
         assert!(!flag.load(Ordering::SeqCst), "a heartbeat is not a brief");
         // The tick ran a little late. The next beat counts from the arm.

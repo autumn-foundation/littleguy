@@ -167,33 +167,34 @@ async fn one_sweep_call_reads_each_source_and_names_its_spend() {
     assert_eq!(result["spent"]["total_tokens"], 2 * (ITEM_IN + ITEM_OUT));
 }
 
+/// The usage of a reply. A message names the variant only, so a test log
+/// never holds the body of a response.
+fn usage_of(response: &Response) -> crate::protocol::Usage {
+    match response {
+        Response::Reply {
+            usage: Some(usage), ..
+        } => *usage,
+        _ => panic!("the response is not a reply with usage"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_usage_of_an_op_counts_its_source_runs() {
     let (_dir, _model, mut daemon) = open("[research]");
-    let response = daemon
-        .handle_request(UID, request("m-1", "read both"))
-        .await;
-    let Response::Reply {
-        usage: Some(usage), ..
-    } = response
-    else {
-        panic!("no usage: {response:?}");
-    };
+    let usage = usage_of(
+        &daemon
+            .handle_request(UID, request("m-1", "read both"))
+            .await,
+    );
     // Two assistant turns and one turn in each of the two source runs.
-    assert_eq!(usage.calls, 4, "{usage:?}");
+    assert_eq!(usage.calls, 4);
     assert_eq!(usage.input_tokens, 2 + 2 * u64::from(ITEM_IN));
     assert_eq!(usage.output_tokens, 2 + 2 * u64::from(ITEM_OUT));
 
     // A later op counts only its own calls. The model sees the earlier
     // result in its window, so it answers with one call and no sweep.
-    let response = daemon.handle_request(UID, request("m-2", "again")).await;
-    let Response::Reply {
-        usage: Some(usage), ..
-    } = response
-    else {
-        panic!("no usage: {response:?}");
-    };
-    assert_eq!(usage.calls, 1, "{usage:?}");
+    let usage = usage_of(&daemon.handle_request(UID, request("m-2", "again")).await);
+    assert_eq!(usage.calls, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

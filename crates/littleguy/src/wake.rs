@@ -5,9 +5,18 @@
 //! interval only. Both the brief and the heartbeat need it. So the daemon
 //! plans every wake here and aims the one timer at the earliest: it sends
 //! one `Control::SetHeartbeat` whose interval is the time from now to that
-//! wake. The op key holds the wake, so a wake is armed once, also across a
-//! restart. After the tick runs, the engine books the next tick one interval
+//! wake. After the tick runs, the engine books the next tick one interval
 //! later. That time is wrong, so the daemon arms the next wake.
+//!
+//! The op key names what an arm sets: the kind, the time of the wake and a
+//! digest of the setting less its interval (ADR 0045). A retry of one arm
+//! keeps its key, also across a restart, so the engine applies it once. The
+//! interval follows from the time of the wake, so the key leaves it out.
+//! Two arms that set different things at one time get two keys, so neither
+//! is dropped. The engine can still drop an arm whose key went out before a
+//! later arm replaced it. The daemon then reads the setting that the engine
+//! holds. When it differs, the daemon sends the arm again under a key that
+//! names that setting ([`Arm::over`]).
 //!
 //! - **The brief** wakes at each slot of `brief.schedule`.
 //! - **The heartbeat** wakes `every_minutes` after the last arm, outside
@@ -15,6 +24,8 @@
 //!   skips a tick with no model call when no goal is due and no idea waits.
 //! - **A reflection** wakes once, soon after a memory consolidation pass,
 //!   so the assistant files ideas from what the pass learned (ADR 0022).
+//!   Its tick asks the precheck too. It runs only while its pass is
+//!   pending ([`PendingPass`]), so one pass costs one model call at most.
 //! - **A follow-up** wakes at the next wake that the assistant booked with
 //!   `wake_me` (ADR 0023). Its prompt is fixed: the text of the wake stays
 //!   in the store, where `list_plans` shows it.
@@ -37,7 +48,7 @@ use anyhow::{Result, bail};
 use autumn_harvest::policy::Schedule;
 use autumn_harvest_agent::agent::MIN_CUSTOM_HEARTBEAT_SECS;
 use autumn_harvest_agent::{AgentHeartbeat, AgentOp, Control, HeartbeatSetting};
-#[cfg(feature = "heartbeat")]
+#[cfg(any(feature = "heartbeat", feature = "reflection"))]
 use autumn_harvest_agent::{BoxFuture, HeartbeatTask, Precheck};
 use jiff::Timestamp;
 
@@ -144,10 +155,76 @@ pub fn heartbeat(prompt: &str, every: Duration) -> AgentHeartbeat {
 /// One arm of the engine timer: the op and its key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Arm {
-    /// The op key. It names the wake.
+    /// The op key. It names the wake and what the arm sets.
     pub key: String,
     /// The `Control::SetHeartbeat` op.
     pub op: AgentOp,
+}
+
+impl Arm {
+    /// The arm that sets `setting`, keyed by `prefix`, the time of the
+    /// wake, and a digest of the setting.
+    fn keyed(prefix: &str, at: Timestamp, setting: HeartbeatSetting) -> Self {
+        Self {
+            key: format!(
+                "{prefix}{}#{:016x}",
+                crate::stamp::rfc3339(at),
+                digest(&setting)
+            ),
+            op: AgentOp::Control(Control::SetHeartbeat { setting }),
+        }
+    }
+
+    /// The setting that this arm sends.
+    const fn setting(&self) -> Option<&HeartbeatSetting> {
+        match &self.op {
+            AgentOp::Control(Control::SetHeartbeat { setting }) => Some(setting),
+            _ => None,
+        }
+    }
+
+    /// Whether the engine holds what this arm sets, when it holds `held`.
+    /// The engine narrows a custom heartbeat under the profile, so only the
+    /// prompt and the precheck count. Each kind of wake has its own prompt.
+    #[must_use]
+    pub fn holds(&self, held: &HeartbeatSetting) -> bool {
+        match (self.setting(), held) {
+            (Some(HeartbeatSetting::Off), HeartbeatSetting::Off)
+            | (Some(HeartbeatSetting::Profile), HeartbeatSetting::Profile) => true,
+            (
+                Some(HeartbeatSetting::Custom { heartbeat: ours }),
+                HeartbeatSetting::Custom { heartbeat: theirs },
+            ) => ours.prompt == theirs.prompt && ours.precheck == theirs.precheck,
+            _ => false,
+        }
+    }
+
+    /// This arm again, for an engine that dropped its key and holds
+    /// `held`. The new key adds a digest of `held`. So the arm goes out
+    /// once over each setting that replaced it, and a retry keeps the key.
+    #[must_use]
+    pub fn over(&self, held: &HeartbeatSetting) -> Self {
+        Self {
+            key: format!("{}~{:016x}", self.key, digest(held)),
+            op: self.op.clone(),
+        }
+    }
+}
+
+/// A digest of what `setting` sets, less its interval. The interval
+/// follows from the time of the wake, which the key holds already.
+fn digest(setting: &HeartbeatSetting) -> u64 {
+    let text = match setting {
+        HeartbeatSetting::Custom { heartbeat } => {
+            let mut what = heartbeat.clone();
+            what.every_secs = 0;
+            serde_json::to_string(&HeartbeatSetting::Custom { heartbeat: what })
+        }
+        other => serde_json::to_string(other),
+    };
+    // A setting always serializes. An empty text still leaves the kind and
+    // the time in the key.
+    crate::fnv::fnv1a(&text.unwrap_or_default())
 }
 
 /// The op that turns the engine timer off, keyed by `now`.
@@ -158,6 +235,41 @@ pub fn off(now: Timestamp) -> Arm {
         op: AgentOp::Control(Control::SetHeartbeat {
             setting: HeartbeatSetting::Off,
         }),
+    }
+}
+
+/// The consolidation pass whose reflection may still run. The plan sets it
+/// with [`Wake::reflect`]. The reflection precheck takes it, so a pass wakes
+/// one reflection tick at most, whatever the engine timer holds. The daemon
+/// clears it when it sees the reflection tick ran.
+#[cfg(feature = "reflection")]
+#[derive(Debug, Default)]
+pub struct PendingPass(std::sync::Mutex<Option<String>>);
+
+#[cfg(feature = "reflection")]
+impl PendingPass {
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        // The slot holds one id. A panic while it is held leaves a whole
+        // value, so a poisoned lock is safe to use.
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set(&self, pass: &str) {
+        *self.slot() = Some(pass.to_owned());
+    }
+
+    /// The pending pass, which is no longer pending after this call.
+    pub fn take(&self) -> Option<String> {
+        self.slot().take()
+    }
+
+    /// The pending pass, which stays pending.
+    #[cfg(test)]
+    #[must_use]
+    pub fn get(&self) -> Option<String> {
+        self.slot().clone()
     }
 }
 
@@ -442,10 +554,17 @@ impl Wake {
 
     /// Plans one reflection on the consolidation pass `pass` with `prompt`,
     /// as the next wake. It replaces the arm that waits, which the next arm
-    /// books again.
+    /// books again. `pending` is what the reflection precheck reads.
     #[cfg(feature = "reflection")]
-    pub fn reflect(&mut self, pass: &str, prompt: &str) {
+    pub fn reflect(&mut self, pass: &str, prompt: &str, pending: &PendingPass) {
         self.reflect = Some((pass.to_owned(), prompt.to_owned()));
+        pending.set(pass);
+        self.armed = None;
+    }
+
+    /// Forgets the arm that waits, so the next [`arm`](Self::arm) arms
+    /// again. The daemon calls it when the engine dropped the arm.
+    pub const fn forget_arm(&mut self) {
         self.armed = None;
     }
 
@@ -517,45 +636,42 @@ impl Wake {
         self.brief_armed
             .store(kind == Kind::Brief, Ordering::SeqCst);
         let every = interval(now, at);
-        let (key, heartbeat) = match kind {
+        let (prefix, heartbeat) = match kind {
             Kind::Brief => {
                 let prompt = self
                     .brief
                     .as_ref()
                     .map_or("", |brief| brief.prompt.as_str());
-                (
-                    format!("{BRIEF_KEY}{}", crate::stamp::rfc3339(at)),
-                    heartbeat(prompt, every),
-                )
+                (String::from(BRIEF_KEY), heartbeat(prompt, every))
             }
             #[cfg(feature = "heartbeat")]
             Kind::Heartbeat => {
                 let prompt = self.beat.as_ref().map_or("", |beat| beat.prompt.as_str());
                 (
-                    format!("{HEARTBEAT_KEY}{}", crate::stamp::rfc3339(at)),
+                    String::from(HEARTBEAT_KEY),
                     heartbeat(prompt, every).precheck(),
                 )
             }
             #[cfg(feature = "followups")]
             Kind::Followup => (
-                format!("{FOLLOWUP_KEY}{}", crate::stamp::rfc3339(at)),
+                String::from(FOLLOWUP_KEY),
                 heartbeat(&marked(FOLLOWUP_MARK, FOLLOWUP_PROMPT), every),
             ),
             #[cfg(feature = "reflection")]
             Kind::Reflection => {
                 let (pass, prompt) = self.reflect.take().unwrap_or_default();
+                // The precheck runs it only while its pass is pending.
                 (
-                    format!("{REFLECT_KEY}{pass}"),
-                    heartbeat(&marked(REFLECT_MARK, &prompt), every),
+                    format!("{REFLECT_KEY}{pass}@"),
+                    heartbeat(&marked(REFLECT_MARK, &prompt), every).precheck(),
                 )
             }
         };
-        Some(Arm {
-            key,
-            op: AgentOp::Control(Control::SetHeartbeat {
-                setting: HeartbeatSetting::Custom { heartbeat },
-            }),
-        })
+        Some(Arm::keyed(
+            &prefix,
+            at,
+            HeartbeatSetting::Custom { heartbeat },
+        ))
     }
 }
 
@@ -567,18 +683,29 @@ fn interval(now: Timestamp, at: Timestamp) -> Duration {
     Duration::from_secs(millis.div_ceil(1_000).max(MIN_CUSTOM_HEARTBEAT_SECS))
 }
 
-/// The precheck of a heartbeat tick: run it only when a goal is due, or,
-/// with `research`, when an idea is open. A brief tick always runs. With
-/// no store of goals and ideas, every heartbeat runs.
-#[cfg(feature = "heartbeat")]
+/// The precheck of a tick.
+///
+/// - A heartbeat runs only when a goal is due, or, with `research`, when an
+///   idea is open. With no store of goals and ideas, every heartbeat runs.
+/// - A reflection runs only while its pass is pending, and it takes the
+///   pass. So an engine timer that keeps the reflection setting by mistake
+///   costs no model call after the first tick.
+/// - Any other tick always runs.
+#[cfg(any(feature = "heartbeat", feature = "reflection"))]
 #[derive(Debug)]
 pub struct Due {
     /// The goals and ideas, when they are on.
+    #[cfg(feature = "heartbeat")]
     pub plans: Option<Arc<SqliteStores>>,
     /// Research open ideas when no goal is due.
+    #[cfg(feature = "heartbeat")]
     pub research: bool,
     /// Where the decision goes, for the tick log.
+    #[cfg(feature = "heartbeat")]
     pub verdict: Arc<Verdict>,
+    /// The pass that waits for its reflection.
+    #[cfg(feature = "reflection")]
+    pub pass: Arc<PendingPass>,
 }
 
 #[cfg(feature = "heartbeat")]
@@ -594,16 +721,28 @@ impl Due {
     }
 }
 
-#[cfg(feature = "heartbeat")]
+#[cfg(any(feature = "heartbeat", feature = "reflection"))]
 impl Precheck for Due {
     fn should_run<'a>(&'a self, task: &'a HeartbeatTask) -> BoxFuture<'a, bool> {
         Box::pin(async move {
-            if !task.prompt.starts_with(HEARTBEAT_MARK) {
-                return true;
+            #[cfg(feature = "reflection")]
+            if task.prompt.starts_with(REFLECT_MARK) {
+                let pass = self.pass.take();
+                if pass.is_none() {
+                    tracing::warn!(
+                        "a reflection tick came with no pass pending: the engine timer \
+                         holds a reflection setting that it should not, so the tick is skipped"
+                    );
+                }
+                return pass.is_some();
             }
-            let run = self.worth_it(Timestamp::now().as_millisecond());
-            self.verdict.set(run);
-            run
+            #[cfg(feature = "heartbeat")]
+            if task.prompt.starts_with(HEARTBEAT_MARK) {
+                let run = self.worth_it(Timestamp::now().as_millisecond());
+                self.verdict.set(run);
+                return run;
+            }
+            true
         })
     }
 }
@@ -656,6 +795,12 @@ mod tests {
         }
     }
 
+    /// The part of a key that names the wake, less the digest of what the
+    /// arm sets.
+    fn base(key: &str) -> &str {
+        key.split_once('#').map_or(key, |(wake, _)| wake)
+    }
+
     #[test]
     fn nothing_to_plan_is_no_plan() {
         let flag = Arc::new(AtomicBool::new(false));
@@ -676,7 +821,7 @@ mod tests {
             now,
         );
         let arm = wake.arm(now, 0).unwrap();
-        assert_eq!(arm.key, "brief:2026-11-09T07:30:00+00:00");
+        assert_eq!(base(&arm.key), "brief:2026-11-09T07:30:00+00:00");
         assert_eq!(
             wake.armed_at(),
             Some((at("2026-11-09T07:30:00Z"), Kind::Brief))
@@ -698,12 +843,12 @@ mod tests {
         assert!(wake.waits_for_tick(after));
         assert_eq!(wake.arm(after, 3), None, "the tick has not run yet");
         let arm = wake.arm(after, 4).unwrap();
-        assert_eq!(arm.key, "brief:2026-11-03T08:00:00+00:00");
+        assert_eq!(base(&arm.key), "brief:2026-11-03T08:00:00+00:00");
         assert_eq!(set(&arm).every_secs, 24 * 3600 - 1);
         // Three slots pass with no tick. One arm aims at the next slot.
         let late = at("2026-11-06T09:00:00Z");
         let arm = wake.arm(late, 4).unwrap();
-        assert_eq!(arm.key, "brief:2026-11-07T08:00:00+00:00");
+        assert_eq!(base(&arm.key), "brief:2026-11-07T08:00:00+00:00");
         assert_eq!(wake.arm(late, 4), None);
     }
 
@@ -716,7 +861,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let arm = wake.arm(now, 0).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-14T12:30:00+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-14T12:30:00+00:00");
         assert_eq!(set(&arm).every_secs, 30 * 60);
         assert!(set(&arm).precheck);
         assert!(!set(&arm).allow_actions, "a tick stays read-only");
@@ -725,7 +870,7 @@ mod tests {
         assert!(!flag.load(Ordering::SeqCst), "a heartbeat is not a brief");
         // The tick ran a little late. The next beat counts from the arm.
         let arm = wake.arm(at("2026-11-14T12:31:00Z"), 1).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-14T13:01:00+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-14T13:01:00+00:00");
     }
 
     #[cfg(feature = "heartbeat")]
@@ -742,11 +887,11 @@ mod tests {
         .unwrap()
         .unwrap();
         let arm = wake.arm(now, 0).unwrap();
-        assert_eq!(arm.key, "brief:2026-11-02T07:30:00+00:00");
+        assert_eq!(base(&arm.key), "brief:2026-11-02T07:30:00+00:00");
         assert!(flag.load(Ordering::SeqCst));
         // After the brief, the heartbeat is next.
         let arm = wake.arm(at("2026-11-02T07:30:05Z"), 1).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-02T08:30:05+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-02T08:30:05+00:00");
         assert!(!flag.load(Ordering::SeqCst));
     }
 
@@ -757,16 +902,16 @@ mod tests {
         let mut wake = plan(None, Some(&quiet), at("2026-11-14T21:30:00Z"));
         // 22:30 is quiet, so the beat waits until 08:00.
         let arm = wake.arm(at("2026-11-14T21:30:00Z"), 0).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-15T08:00:00+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-15T08:00:00+00:00");
         // 20:00 to 21:00 is outside the window.
         let mut wake = plan(None, Some(&quiet), at("2026-11-14T20:00:00Z"));
         let arm = wake.arm(at("2026-11-14T20:00:00Z"), 0).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-14T21:00:00+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-14T21:00:00+00:00");
         // A window inside one day: 12:00 to 13:00.
         let lunch = beat(60, Some((12 * 60, 13 * 60)));
         let mut wake = plan(None, Some(&lunch), at("2026-11-14T11:30:00Z"));
         let arm = wake.arm(at("2026-11-14T11:30:00Z"), 0).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-14T13:00:00+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-14T13:00:00+00:00");
     }
 
     #[test]
@@ -809,17 +954,27 @@ mod tests {
         let now = at("2026-11-14T03:05:00Z");
         let flag = Arc::new(AtomicBool::new(true));
         let mut wake = Wake::idle(Arc::clone(&flag));
+        let pending = PendingPass::default();
         assert_eq!(wake.arm(now, 0), None, "nothing planned, nothing armed");
-        wake.reflect("pass-7", "Two facts.");
+        wake.reflect("pass-7", "Two facts.", &pending);
         assert_eq!(
             wake.pending_reflection(),
             Some((String::from("pass-7"), String::from("Two facts.")))
         );
+        assert_eq!(pending.get().as_deref(), Some("pass-7"));
         let arm = wake.arm(now, 0).unwrap();
         assert_eq!(wake.pending_reflection(), None);
-        assert_eq!(arm.key, "reflect:pass-7");
+        assert_eq!(
+            pending.get().as_deref(),
+            Some("pass-7"),
+            "the pass waits for its tick, not for its arm"
+        );
+        assert_eq!(base(&arm.key), "reflect:pass-7@2026-11-14T03:06:00+00:00");
         assert_eq!(set(&arm).every_secs, MIN_CUSTOM_HEARTBEAT_SECS);
-        assert!(!set(&arm).precheck, "a reflection always runs");
+        assert!(
+            set(&arm).precheck,
+            "a reflection asks whether its pass waits"
+        );
         assert!(set(&arm).prompt.starts_with(REFLECT_MARK));
         assert!(!flag.load(Ordering::SeqCst), "a reflection is not a brief");
         assert!(!wake.waits_for_tick(at("2026-11-14T03:05:59Z")));
@@ -836,11 +991,145 @@ mod tests {
         let now = at("2026-11-14T03:00:00Z");
         let mut wake = plan(None, Some(&beat(60, None)), now);
         assert!(wake.arm(now, 0).unwrap().key.starts_with(HEARTBEAT_KEY));
-        wake.reflect("p", "A fact.");
+        wake.reflect("p", "A fact.", &PendingPass::default());
         let soon = at("2026-11-14T03:05:00Z");
-        assert_eq!(wake.arm(soon, 0).unwrap().key, "reflect:p");
+        assert!(wake.arm(soon, 0).unwrap().key.starts_with("reflect:p@"));
         let arm = wake.arm(at("2026-11-14T03:06:01Z"), 1).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-14T04:06:01+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-14T04:06:01+00:00");
+    }
+
+    /// The nightly pass ends in quiet hours, on top of the heartbeat that
+    /// waits for the end of the window. The arm after the reflection aims
+    /// at the same heartbeat, with the same key as its first arm. The
+    /// daemon sees the engine drop it while the reflection setting holds,
+    /// and the arm goes out again under a key that names that setting.
+    #[cfg(all(feature = "heartbeat", feature = "reflection"))]
+    #[test]
+    fn the_heartbeat_after_a_reflection_in_quiet_hours_goes_out_again() {
+        let quiet = beat(60, Some((22 * 60, 8 * 60)));
+        let night = at("2026-11-21T02:30:00Z");
+        let mut wake = plan(None, Some(&quiet), night);
+        let first = wake.arm(night, 0).unwrap();
+        assert_eq!(base(&first.key), "heartbeat:2026-11-21T08:00:00+00:00");
+
+        let pending = PendingPass::default();
+        wake.reflect("pass-1", "A fact.", &pending);
+        let pass_end = at("2026-11-21T03:00:00Z");
+        let reflection = wake.arm(pass_end, 0).unwrap();
+        assert!(set(&reflection).prompt.starts_with(REFLECT_MARK));
+        // The reflection tick ran, so the next arm comes.
+        let next = wake.arm(at("2026-11-21T03:01:30Z"), 1).unwrap();
+        assert!(set(&next).prompt.starts_with(HEARTBEAT_MARK));
+        assert_eq!(next.key, first.key, "the same wake and the same setting");
+
+        // The engine holds the reflection, not what the arm sets.
+        let held = reflection.setting().unwrap();
+        assert!(!next.holds(held));
+        let again = next.over(held);
+        assert_ne!(again.key, first.key);
+        assert!(again.key.starts_with(&first.key));
+        assert_eq!(again.op, next.op);
+        assert_eq!(again, next.over(held), "a retry keeps its key");
+        // Once applied, the engine holds what the arm sets.
+        assert!(again.holds(next.setting().unwrap()));
+    }
+
+    #[cfg(feature = "heartbeat")]
+    #[test]
+    fn two_arms_at_one_wake_that_set_different_prompts_get_two_keys() {
+        let now = at("2026-11-14T12:00:00Z");
+        let mut first = beat(60, None);
+        first.prompt = String::from("check in");
+        let mut second = first.clone();
+        second.prompt = String::from("look around");
+        let a = plan(None, Some(&first), now).arm(now, 0).unwrap();
+        let b = plan(None, Some(&second), now).arm(now, 0).unwrap();
+        assert_eq!(base(&a.key), base(&b.key), "one wake");
+        assert_ne!(a.key, b.key, "two settings");
+        assert!(!a.holds(b.setting().unwrap()));
+        // The same plan arms the same key, also in a new process.
+        let again = plan(None, Some(&first), now).arm(now, 0).unwrap();
+        assert_eq!(a.key, again.key);
+        assert_eq!(
+            a.key.len() - base(&a.key).len(),
+            17,
+            "a hash sign and 16 hex digits"
+        );
+    }
+
+    #[test]
+    fn the_key_leaves_the_interval_out_and_holds_ignores_narrowing() {
+        let one = heartbeat("[littleguy brief]\nhi", Duration::from_secs(60));
+        let mut other = one.clone();
+        other.every_secs = 3600;
+        let custom = |heartbeat: AgentHeartbeat| HeartbeatSetting::Custom { heartbeat };
+        assert_eq!(digest(&custom(one.clone())), digest(&custom(other.clone())));
+        // The engine narrows a custom heartbeat. The arm still holds.
+        let arm = Arm::keyed(BRIEF_KEY, at("2026-11-14T00:00:00Z"), custom(one.clone()));
+        other.max_steps = Some(8);
+        assert!(arm.holds(&custom(other)));
+        assert!(!arm.holds(&HeartbeatSetting::Off));
+        assert!(!arm.holds(&HeartbeatSetting::Profile));
+        let mut prechecked = one;
+        prechecked.precheck = true;
+        assert!(!arm.holds(&custom(prechecked)));
+        let stop = off(at("2026-11-14T00:00:00Z"));
+        assert!(stop.holds(&HeartbeatSetting::Off));
+        assert_ne!(
+            digest(&HeartbeatSetting::Off),
+            digest(&HeartbeatSetting::Profile)
+        );
+    }
+
+    #[test]
+    fn a_forgotten_arm_arms_again() {
+        let now = at("2026-11-02T07:00:00Z");
+        let mut wake = plan(Some(&brief("0 8 * * *", "UTC")), None, now);
+        let first = wake.arm(now, 0).unwrap();
+        assert_eq!(wake.arm(now, 0), None);
+        wake.forget_arm();
+        assert_eq!(wake.arm(now, 0), Some(first));
+    }
+
+    #[cfg(feature = "reflection")]
+    #[tokio::test]
+    async fn a_reflection_runs_only_while_its_pass_is_pending() {
+        let pending = Arc::new(PendingPass::default());
+        let due = Due {
+            #[cfg(feature = "heartbeat")]
+            plans: None,
+            #[cfg(feature = "heartbeat")]
+            research: false,
+            #[cfg(feature = "heartbeat")]
+            verdict: Arc::default(),
+            pass: Arc::clone(&pending),
+        };
+        let reflection = HeartbeatTask {
+            prompt: marked(REFLECT_MARK, "Two facts."),
+            ..HeartbeatTask::default()
+        };
+        assert!(
+            !due.should_run(&reflection).await,
+            "no pass waits, so no model call"
+        );
+        let mut wake = Wake::idle(Arc::default());
+        wake.reflect("pass-7", "Two facts.", &pending);
+        assert!(due.should_run(&reflection).await, "the pass waits");
+        assert_eq!(pending.get(), None, "the tick took the pass");
+        // An engine timer that keeps the reflection setting ticks again.
+        assert!(
+            !due.should_run(&reflection).await,
+            "the same pass runs once"
+        );
+        // A brief or a follow-up never asks for a pass.
+        let brief = HeartbeatTask {
+            prompt: marked(BRIEF_MARK, "go"),
+            ..HeartbeatTask::default()
+        };
+        assert!(due.should_run(&brief).await);
+        pending.set("pass-8");
+        assert_eq!(pending.take().as_deref(), Some("pass-8"));
+        assert!(!due.should_run(&reflection).await, "a cleared pass");
     }
 
     #[cfg(feature = "heartbeat")]
@@ -853,7 +1142,7 @@ mod tests {
         // A wake at 12:20 is sooner than the 13:00 beat, so it takes the arm.
         wake.set_followup(Some(at("2026-11-14T12:20:00Z")), now);
         let arm = wake.arm(now, 0).unwrap();
-        assert_eq!(arm.key, "followup:2026-11-14T12:20:00+00:00");
+        assert_eq!(base(&arm.key), "followup:2026-11-14T12:20:00+00:00");
         assert!(set(&arm).prompt.starts_with(FOLLOWUP_MARK));
         assert!(
             set(&arm).prompt.ends_with(FOLLOWUP_PROMPT),
@@ -873,7 +1162,7 @@ mod tests {
         // The daemon marks it done; no wake is left, so the beat is next.
         wake.set_followup(None, after);
         let arm = wake.arm(after, 1).unwrap();
-        assert_eq!(arm.key, "heartbeat:2026-11-14T13:20:30+00:00");
+        assert_eq!(base(&arm.key), "heartbeat:2026-11-14T13:20:30+00:00");
     }
 
     #[cfg(feature = "followups")]
@@ -883,7 +1172,7 @@ mod tests {
         let mut wake = Wake::idle(Arc::new(AtomicBool::new(false)));
         wake.set_followup(Some(now), now);
         let arm = wake.arm(now, 0).unwrap();
-        assert_eq!(arm.key, "followup:2026-11-14T12:01:00+00:00");
+        assert_eq!(base(&arm.key), "followup:2026-11-14T12:01:00+00:00");
     }
 
     #[test]
@@ -927,6 +1216,8 @@ mod tests {
             plans: Some(Arc::clone(&stores)),
             research: true,
             verdict: Arc::clone(&verdict),
+            #[cfg(feature = "reflection")]
+            pass: Arc::default(),
         };
         assert!(!due.should_run(&heartbeat).await, "nothing to do");
         assert_eq!(verdict.take_skipped(), Some(true));
@@ -942,6 +1233,8 @@ mod tests {
                 plans: None,
                 research: true,
                 verdict: Arc::default(),
+                #[cfg(feature = "reflection")]
+                pass: Arc::default(),
             }
             .should_run(&heartbeat)
             .await,
@@ -962,6 +1255,8 @@ mod tests {
             plans: Some(Arc::clone(&stores)),
             research: false,
             verdict: Arc::default(),
+            #[cfg(feature = "reflection")]
+            pass: Arc::default(),
         };
         assert!(!quiet_research.should_run(&heartbeat).await);
         let goal = stores

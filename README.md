@@ -442,7 +442,11 @@ success for a change that the engine would not keep. It cannot act
 outside or write anything that people see. When it has news, the answer waits in the web chat, labelled
 "littleguy, on its own". The heartbeat and the morning brief share the
 engine timer, and a brief slot always comes first.
-[ADR 0021](docs/adr/0021-the-heartbeat.md) explains the design.
+[ADR 0021](docs/adr/0021-the-heartbeat.md) explains the design. Each arm of
+the timer has a key that names what it sets, so a second arm at the same
+wake is never dropped quietly. A reflection runs only while its pass is
+pending, so one pass costs one reflection at most
+([ADR 0045](docs/adr/0045-a-wake-key-names-what-the-arm-sets.md)).
 
 The heartbeat comes with the `heartbeat` feature, which is on by default
 and needs `plans`. A build without it refuses a `[heartbeat]` section at

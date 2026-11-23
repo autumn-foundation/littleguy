@@ -8,8 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-autumn-harvest = { version = "0.10", default-features = false }
-autumn-harvest-agent = { version = "0.10.0", default-features = false }
+autumn-harvest = { version = "0.11.0", default-features = false }
+autumn-harvest-agent = { version = "0.11.0", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

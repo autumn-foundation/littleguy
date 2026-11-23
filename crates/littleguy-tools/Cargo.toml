@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 base64 = { version = "0.23", optional = true }
-autumn-harvest-agent = { version = "0.10.0", default-features = false }
+autumn-harvest-agent = { version = "0.11.0", default-features = false }
 littleguy-core = { workspace = true }
 reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "rustls-no-provider"] }
 # Linear-time matching, so no pattern of a model can hang a call.

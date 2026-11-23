@@ -63,7 +63,7 @@ function between `// mirror-begin` and `// mirror-end` markers. The test
 
 ## Engine facts that bind this repository
 
-- Depend on the published autumn-harvest crates (0.10 today). Work around a
+- Depend on the published autumn-harvest crates (0.11 today). Work around a
   missing engine piece here, and adopt the engine version at a later upgrade.
 - The SQLite runtime is a single writer. It takes `<db>.lock`, so a second
   daemon on one database fails to open it.

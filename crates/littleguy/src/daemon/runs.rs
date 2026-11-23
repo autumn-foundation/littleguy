@@ -80,7 +80,9 @@ impl Daemon {
         }
         let keep = Duration::from_secs(u64::from(self.kit.config.runs.keep_days) * DAY_SECS);
         let policy = PurgePolicy::new().max_age(keep).batch_limit(PURGE_BATCHES);
-        let report = self.rt.purge_with_as_of(now, &policy)?;
+        let report = self
+            .rt
+            .purge_with_as_of(crate::instant::to_engine(now), &policy)?;
         if report.complete {
             self.purged_at = Some(now);
         }

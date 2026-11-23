@@ -42,6 +42,7 @@ mod features;
 mod fleet;
 mod guard;
 mod house_keys;
+mod instant;
 mod memory;
 #[cfg(feature = "notes")]
 mod notes;

@@ -35,12 +35,13 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use autumn_harvest::policy::Schedule;
-use autumn_harvest::schedule_plan::next_fire_after;
 use autumn_harvest_agent::agent::MIN_CUSTOM_HEARTBEAT_SECS;
 use autumn_harvest_agent::{AgentHeartbeat, AgentOp, Control, HeartbeatSetting};
 #[cfg(feature = "heartbeat")]
 use autumn_harvest_agent::{BoxFuture, HeartbeatTask, Precheck};
 use chrono::{DateTime, Utc};
+
+use crate::instant::next_fire_after;
 #[cfg(feature = "heartbeat")]
 use littleguy_core::QuietHours;
 use littleguy_core::{BriefConfig, HeartbeatConfig};

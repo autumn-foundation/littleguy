@@ -9,9 +9,33 @@
 # needs to pass.
 
 services:
+  # Docker seeds a volume from the image only while the volume is empty.
+  # So a volume made by an older image lacks a folder that a newer image
+  # adds, and lg cannot make one in the config folder of root (ADR 0032).
+  # This service runs as root before each start. It makes the folders that
+  # lg writes and gives them to lg. It never touches lg.toml or the config
+  # folder itself. `cargo xtask container` checks it on an old volume.
+  volume:
+    image: littleguy:local
+    user: root
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        mkdir -p /data/config/littleguy/skills /data/config/littleguy/scripts
+        /data/share/littleguy
+        && chown -R lg:lg /data/config/littleguy/skills /data/config/littleguy/scripts
+        && chown lg:lg /data/share /data/share/littleguy
+    volumes:
+      - lg-data:/data
+    restart: "no"
+
   lg:
     build: .
     image: littleguy:local
+    depends_on:
+      volume:
+        condition: service_completed_successfully
     command: ["serve", "--model", "${LG_MODEL:-offline}"]
     environment:
       - LG_MODEL_NAME

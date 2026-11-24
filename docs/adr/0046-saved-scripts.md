@@ -165,6 +165,15 @@ applies at the next start. The image makes `scripts/` next to the config
 and gives it to `lg`, as it does `skills/`, and `cargo xtask container`
 checks that.
 
+Amended 2026-11-24: Docker seeds a volume from the image only while the
+volume is empty. So a volume made before this ADR had no `scripts/`, `lg`
+could not make one in the config folder of root, and the first Accept
+failed with "Permission denied". The `volume` service of `compose.yaml`
+now runs as root before each start. It makes the folders that `lg` writes
+and gives them to `lg`. `cargo xtask container` removes `scripts/` as root
+and checks that the service makes it again. A failed write names the
+folder, and a denied one names the fix.
+
 ```mermaid
 sequenceDiagram
   participant T as tick (read-only)

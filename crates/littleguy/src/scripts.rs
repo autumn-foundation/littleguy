@@ -243,7 +243,7 @@ impl Scripts {
             return Err(format!("`{}` is not a script name", draft.name));
         }
         let file = self.file_name(&draft.name, &draft.runtime);
-        let fail = |error: std::io::Error| format!("the scripts folder fails: {error}");
+        let fail = |error: std::io::Error| folder_failure(&dir, &error);
         std::fs::create_dir_all(&dir).map_err(fail)?;
         retire_files(&dir, &draft.name).map_err(fail)?;
         let path = dir.join(&file);
@@ -299,8 +299,7 @@ impl Scripts {
             return Err(format!("no accepted script is named {name}"));
         }
         if is_script_name(name) {
-            retire_files(&dir, name)
-                .map_err(|error| format!("the scripts folder fails: {error}"))?;
+            retire_files(&dir, name).map_err(|error| folder_failure(&dir, &error))?;
         }
         tracing::info!(script = %name, "the owner retired a script");
         Ok(())
@@ -475,6 +474,22 @@ impl Scripts {
         }
         String::from_utf8(bytes).map_err(|_| String::from("its file is not UTF-8 text"))
     }
+}
+
+/// The message of a failed write to the scripts folder `dir`. It names the
+/// folder. A denied write gets the fix too: the daemon user must own the
+/// folder. Docker seeds a volume from the image only while it is empty, so
+/// a volume made before saved scripts has no folder that `lg` owns, and
+/// `lg` cannot make one in the config folder of root (ADR 0032).
+fn folder_failure(dir: &Path, error: &std::io::Error) -> String {
+    let mut message = format!("the scripts folder {} fails: {error}", dir.display());
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        message.push_str(
+            ". The user of the daemon must own that folder. In the container, \
+             `docker compose up -d` gives it to lg",
+        );
+    }
+    message
 }
 
 /// Moves each file of the script `name` in `dir` to the retired folder,

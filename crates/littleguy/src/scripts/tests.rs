@@ -435,3 +435,42 @@ impl Bench {
             .unwrap_or_default()
     }
 }
+
+#[test]
+fn a_denied_folder_names_the_folder_and_the_fix() {
+    let dir = Path::new("/data/config/littleguy/scripts");
+    let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+    let message = folder_failure(dir, &denied);
+    assert!(
+        message.contains("/data/config/littleguy/scripts"),
+        "{message}"
+    );
+    assert!(message.contains("must own that folder"), "{message}");
+    assert!(message.contains("docker compose up -d"), "{message}");
+    let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+    let message = folder_failure(dir, &missing);
+    assert!(
+        message.contains("/data/config/littleguy/scripts"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("must own"),
+        "only a denied write gets the fix"
+    );
+}
+
+#[tokio::test]
+async fn acceptance_into_a_folder_that_fails_names_the_folder() {
+    let bench = Bench::new(false);
+    // A file blocks the folder, as a folder of root blocks lg.
+    std::fs::write(bench.folder(), b"a file, not a folder").unwrap();
+    let id = bench.propose("echo-args", ECHO, "p1").await;
+    let error = bench.scripts.accept(id, &bench.digest(id)).unwrap_err();
+    assert!(
+        error.contains(&bench.folder().display().to_string()),
+        "{error}"
+    );
+    let (drafts, scripts, _) = bench.listing();
+    assert_eq!(drafts.len(), 1, "the draft still waits");
+    assert_eq!(scripts, []);
+}

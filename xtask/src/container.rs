@@ -13,6 +13,10 @@
 //! from inside the namespaces of a run, and the config is read-only to the
 //! `lg` user while the skills and the scripts stay writable.
 //!
+//! Last it makes an old volume: it removes the scripts folder as root, as a
+//! volume from before saved scripts lacks it. The `volume` service of
+//! `compose.yaml` must make the folder again and give it to `lg`.
+//!
 //! It runs as its own compose project, so it never touches a running
 //! littleguy, and it removes its container and volume at the end.
 
@@ -52,6 +56,24 @@ const PROBES: [&[&str]; 4] = [
     &["sh", "-c", FILES_PROBE],
 ];
 
+/// An old volume, then the repair of `compose.yaml`: root removes the
+/// scripts folder, and the `volume` service makes it again for `lg`.
+const OLD_VOLUME: [&[&str]; 2] = [
+    &[
+        "run",
+        "--rm",
+        "--no-deps",
+        "--user",
+        "root",
+        "--entrypoint",
+        "rm",
+        "lg",
+        "-rf",
+        "/data/config/littleguy/scripts",
+    ],
+    &["run", "--rm", "volume"],
+];
+
 /// The arguments of `docker compose` for the check project.
 fn compose(rest: &[&str]) -> Vec<String> {
     ["compose", "-p", PROJECT]
@@ -83,10 +105,16 @@ pub fn check(root: &Path) -> Result<()> {
     docker(root, compose(&["build", "lg"]))?;
     let probed = PROBES
         .iter()
-        .try_for_each(|probe| docker(root, probe_args(probe)));
+        .try_for_each(|probe| docker(root, probe_args(probe)))
+        .and_then(|()| {
+            OLD_VOLUME
+                .iter()
+                .try_for_each(|step| docker(root, compose(step)))
+        })
+        .and_then(|()| docker(root, probe_args(&["sh", "-c", FILES_PROBE])));
     let cleaned = docker(root, compose(&["down", "--volumes", "--remove-orphans"]));
     probed.context(
-        "the container cannot make the namespaces of run_code: check security_opt in compose.yaml",
+        "the container cannot run code or keep its folders: check security_opt and the volume service in compose.yaml",
     )?;
     cleaned
 }
@@ -109,5 +137,35 @@ mod tests {
                 "no network, as by default"
             );
         }
+    }
+
+    #[test]
+    fn the_old_volume_loses_its_scripts_as_root_and_the_volume_service_repairs_it() {
+        let remove = compose(OLD_VOLUME[0]);
+        assert!(remove.windows(2).any(|pair| pair == ["--user", "root"]));
+        assert_eq!(
+            remove.last().map(String::as_str),
+            Some("/data/config/littleguy/scripts")
+        );
+        assert_eq!(
+            compose(OLD_VOLUME[1]).last().map(String::as_str),
+            Some("volume")
+        );
+    }
+
+    #[test]
+    fn compose_runs_the_volume_service_as_root_before_lg() {
+        let compose = include_str!("../../compose.yaml");
+        let volume = compose
+            .split("\n  volume:\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n  lg:\n").next())
+            .unwrap();
+        assert!(volume.contains("user: root"), "{volume}");
+        assert!(volume.contains(
+            "chown -R lg:lg /data/config/littleguy/skills /data/config/littleguy/scripts"
+        ));
+        assert!(!volume.contains("lg.toml"), "the config stays root's");
+        assert!(compose.contains("condition: service_completed_successfully"));
     }
 }

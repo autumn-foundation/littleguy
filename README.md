@@ -643,6 +643,14 @@ docker compose exec lg lg chat "hi"
   A volume made before ADR 0032 has a config folder that `lg` owns. The same
   `docker compose run` line fixes it. Later config changes go in with
   `docker compose cp`, which writes as root.
+- **Folders of a newer image.** Docker copies the folders of the image into
+  a volume only while the volume is empty. So a volume from an older image
+  lacks a folder that a newer one adds, such as `scripts/`, and `lg` cannot
+  make it in the config folder of root. The `volume` service of
+  `compose.yaml` runs as root before each start. It makes the skills, the
+  scripts and the data folders and gives them to `lg`. So after an
+  upgrade, `docker compose up -d --build` is enough. A plain `docker run`
+  of the image skips it: run the `chown` line above once instead.
 - **Pages.** They serve on the loopback address of the container. A small
   `pages` service shares its network and forwards to them, and compose
   publishes it on `127.0.0.1:3004` of the Mac only. So the pages stay on

@@ -27,7 +27,7 @@ use super::{Daemon, harness, routing, warn_unreachable};
 use crate::brief::BriefDelivery;
 use crate::chats::Chats;
 use crate::protocol::Response;
-#[cfg(feature = "heartbeat")]
+#[cfg(any(feature = "heartbeat", feature = "reflection"))]
 use crate::wake::Due;
 use crate::wake::Wake;
 
@@ -90,6 +90,9 @@ pub(super) struct Kit {
     /// What the precheck decided for the last heartbeat, for the tick log.
     #[cfg(feature = "heartbeat")]
     pub(super) verdict: Arc<crate::wake::Verdict>,
+    /// The pass whose reflection may still run. It lives across reloads.
+    #[cfg(feature = "reflection")]
+    pub(super) pending_pass: Arc<crate::wake::PendingPass>,
     /// The skills folder that the skill tools read, set at each sync.
     #[cfg(feature = "skills")]
     pub(super) skills_dir: crate::plans::SkillsDir,
@@ -262,6 +265,26 @@ impl Kit {
         (google.into_iter().chain(api).collect::<Tools>(), always)
     }
 
+    /// The precheck of the ticks. A heartbeat tick asks first whether a goal
+    /// is due or an idea waits. A reflection tick asks whether its pass is
+    /// still pending (ADR 0045).
+    #[cfg(any(feature = "heartbeat", feature = "reflection"))]
+    fn precheck(&self, config: &Config, stores: Option<&Arc<SqliteStores>>) -> Due {
+        // Only the heartbeat reads the config and the store.
+        #[cfg(not(feature = "heartbeat"))]
+        let _ = (config, stores);
+        Due {
+            #[cfg(feature = "heartbeat")]
+            plans: stores.cloned().filter(|_| config.tools.plans),
+            #[cfg(feature = "heartbeat")]
+            research: config.heartbeat.as_ref().is_some_and(|beat| beat.research),
+            #[cfg(feature = "heartbeat")]
+            verdict: Arc::clone(&self.verdict),
+            #[cfg(feature = "reflection")]
+            pass: Arc::clone(&self.pending_pass),
+        }
+    }
+
     /// Builds the assistant and the parts around it from `config`.
     pub(super) fn assemble(&mut self, config: &Config, chats: &Arc<Chats>) -> Result<Assembled> {
         let db = self.db.clone();
@@ -327,13 +350,8 @@ impl Kit {
         let approver = config.approvals.approver.clone();
         warn_unreachable(approver.as_ref(), &self.services);
         refuse_left_out(config)?;
-        // A heartbeat tick asks first whether a goal is due or an idea waits.
-        #[cfg(feature = "heartbeat")]
-        let precheck = config.heartbeat.as_ref().map(|beat| Due {
-            plans: stores.clone().filter(|_| config.tools.plans),
-            research: beat.research,
-            verdict: Arc::clone(&self.verdict),
-        });
+        #[cfg(any(feature = "heartbeat", feature = "reflection"))]
+        let precheck = self.precheck(config, stores.as_ref());
         let memory = stores
             .filter(|_| config.memory.enabled)
             .map(|stores| (stores, db.as_path()));
@@ -351,11 +369,8 @@ impl Kit {
         #[cfg(not(feature = "refine"))]
         let _ = model;
         let assistant = assistant.live_sink(Arc::clone(&self.live) as Arc<dyn LiveSink>);
-        #[cfg(feature = "heartbeat")]
-        let assistant = match precheck {
-            Some(due) => assistant.precheck(Arc::new(due)),
-            None => assistant,
-        };
+        #[cfg(any(feature = "heartbeat", feature = "reflection"))]
+        let assistant = assistant.precheck(Arc::new(precheck));
         Ok(Assembled {
             harness: assistant,
             wake,
@@ -495,7 +510,7 @@ impl Daemon {
                 let brief_armed = Arc::clone(&self.kit.brief_armed);
                 self.wake
                     .get_or_insert_with(|| Wake::idle(brief_armed))
-                    .reflect(&pass, &prompt);
+                    .reflect(&pass, &prompt, &self.kit.pending_pass);
             }
             self.disarm = self.wake.is_none();
             // The new plan reads the booked wakes again.

@@ -40,6 +40,7 @@ mod daemon;
 mod features;
 #[cfg(feature = "fleet")]
 mod fleet;
+mod fnv;
 mod guard;
 mod house_keys;
 mod memory;

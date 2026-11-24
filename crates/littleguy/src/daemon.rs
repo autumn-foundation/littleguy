@@ -729,6 +729,8 @@ impl Daemon {
             wake_links: crate::plans::WakeLinks::default(),
             #[cfg(feature = "heartbeat")]
             verdict: Arc::default(),
+            #[cfg(feature = "reflection")]
+            pending_pass: Arc::default(),
             #[cfg(feature = "skills")]
             skills_dir: crate::plans::SkillsDir::default(),
             untrusted: Arc::default(),
@@ -1421,7 +1423,9 @@ impl Daemon {
 
     /// Aims the engine timer at the next wake of the brief or the
     /// heartbeat, when it needs an arm. It returns the op key of the arm
-    /// that it sent. The key names the wake, so a wake is armed once.
+    /// that the engine holds. The key names the wake and what the arm
+    /// sets, so one arm is applied once ([`Self::apply_arm`]). It returns
+    /// `None` when nothing needed an arm, or when the engine dropped it.
     ///
     /// With no plan, it checks once whether an earlier plan left the timer
     /// booked, and turns it off.
@@ -1448,8 +1452,7 @@ impl Daemon {
             }
             let arm = crate::wake::off(now);
             tracing::info!("no brief and no heartbeat: the engine timer stops");
-            sqlite::send(&mut self.rt, &id, &arm.op, Some(&arm.key))?;
-            return Ok(Some(arm.key));
+            return self.apply_arm(&id, arm).await;
         };
         // The state query replays the run, so it runs only after a wake.
         let state = if wake.waits_for_tick(now) {
@@ -1464,6 +1467,12 @@ impl Daemon {
         if let Some((due, kind)) = wake.ran(now, ticks)
             && let Some(stores) = self.kit.stores.as_ref()
         {
+            // The reflection ran, so its pass waits no more. The precheck
+            // took it already when the tick asked.
+            #[cfg(feature = "reflection")]
+            if kind == crate::wake::Kind::Reflection {
+                self.kit.pending_pass.take();
+            }
             #[cfg(feature = "followups")]
             let finished = {
                 let finished = stores.finish_wakes(due.as_millisecond())?;
@@ -1509,8 +1518,49 @@ impl Daemon {
             return Ok(None);
         };
         tracing::info!(wake = %arm.key, "the next wake");
-        sqlite::send(&mut self.rt, &id, &arm.op, Some(&arm.key))?;
-        Ok(Some(arm.key))
+        self.apply_arm(&id, arm).await
+    }
+
+    /// Sends `arm` and makes sure that the engine holds what it sets. It
+    /// returns the key that the engine holds, or `None` when the engine
+    /// dropped the arm.
+    ///
+    /// The engine drops a key that it has seen. That is right for a retry
+    /// of an arm that the engine still holds. It is wrong when a later arm
+    /// replaced it, for example a reflection on top of the next heartbeat.
+    /// So on a drop the daemon reads the setting that the engine holds. When
+    /// it differs, the arm goes out again under a key that names that
+    /// setting. A second drop clears the arm of the plan and logs an error, so
+    /// the next tick arms again and nobody reads the drop as an arm.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state does not read or the runtime does
+    /// not take the op.
+    async fn apply_arm(&mut self, id: &AgentId, arm: crate::wake::Arm) -> Result<Option<String>> {
+        if sqlite::send(&mut self.rt, id, &arm.op, Some(&arm.key))?.signal_delivered {
+            return Ok(Some(arm.key));
+        }
+        let held = sqlite::state(&self.rt, id)
+            .await?
+            .map(|state| state.heartbeat)
+            .unwrap_or_default();
+        if arm.holds(&held) {
+            tracing::debug!(wake = %arm.key, "the engine holds this wake already");
+            return Ok(Some(arm.key));
+        }
+        let again = arm.over(&held);
+        tracing::warn!(wake = %arm.key, retry = %again.key,
+            "the engine dropped a wake that a later setting replaced, so it goes out again");
+        if sqlite::send(&mut self.rt, id, &again.op, Some(&again.key))?.signal_delivered {
+            return Ok(Some(again.key));
+        }
+        tracing::error!(wake = %again.key,
+            "the engine dropped a wake twice and holds another setting: the next tick arms again");
+        if let Some(wake) = self.wake.as_mut() {
+            wake.forget_arm();
+        }
+        Ok(None)
     }
 
     /// Reads the next booked wake into the plan, when a wake tool changed
@@ -1638,7 +1688,7 @@ impl Daemon {
         let brief_armed = Arc::clone(&self.kit.brief_armed);
         self.wake
             .get_or_insert_with(|| Wake::idle(brief_armed))
-            .reflect(&pass, &prompt);
+            .reflect(&pass, &prompt, &self.kit.pending_pass);
         Ok(())
     }
 
@@ -4788,6 +4838,156 @@ mod tests {
         assert_eq!(booked, None);
     }
 
+    /// The heartbeat setting that the engine holds for the assistant, and
+    /// its next tick.
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    fn held(
+        state: autumn_harvest_agent::AgentState,
+    ) -> (Option<autumn_harvest_agent::AgentHeartbeat>, Option<i64>) {
+        let beat = match state.heartbeat {
+            autumn_harvest_agent::HeartbeatSetting::Custom { heartbeat } => Some(heartbeat),
+            _ => None,
+        };
+        (beat, state.next_heartbeat_ms)
+    }
+
+    /// The nightly pass ends in quiet hours. The heartbeat is armed at the
+    /// end of the window, and the reflection arms on top of it. When the
+    /// reflection ends, the next arm aims at the same heartbeat. Its first
+    /// key once dropped it, so the reflection fired every minute until the
+    /// window ended.
+    #[cfg(all(
+        feature = "heartbeat",
+        feature = "reflection",
+        any(feature = "discord", feature = "sandbox")
+    ))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reflection_in_quiet_hours_gives_the_timer_back_to_the_heartbeat() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        // 02:30 in Chicago. The window is 22:00 to 08:00 there.
+        let clock = HandClock::at("2026-11-21T08:30:00Z");
+        let hand = clock.clone();
+        let mut config = heartbeat_config();
+        if let Some(beat) = config.heartbeat.as_mut() {
+            beat.quiet = Some(littleguy_core::QuietHours {
+                start: 22 * 60,
+                end: 8 * 60,
+            });
+            beat.timezone = String::from("America/Chicago");
+        }
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        daemon
+            .handle_request(UID, request("q-1", "I like tea"))
+            .await;
+        daemon.tick().await.unwrap();
+        // 08:00 in Chicago.
+        let morning = utc("2026-11-21T14:00:00Z");
+        assert_eq!(armed(&daemon), Some(morning));
+
+        // 03:00 in Chicago: the nightly pass ends, and a reflection follows.
+        clock.set("2026-11-21T09:00:00Z");
+        daemon
+            .rt
+            .trigger_schedule(
+                autumn_harvest_agent::consolidate_all::CONSOLIDATE_ALL_WORKFLOW_NAME,
+                false,
+                None,
+            )
+            .unwrap();
+        daemon.rt.run_until_idle().await.unwrap();
+        daemon.tick().await.unwrap();
+        assert_eq!(armed(&daemon), Some(utc("2026-11-21T09:01:00Z")));
+        let before = model.calls.load(Ordering::SeqCst);
+        clock.set("2026-11-21T09:01:01Z");
+        tick_until(&mut daemon, || model.calls.load(Ordering::SeqCst) > before).await;
+        assert_eq!(model.calls.load(Ordering::SeqCst), before + 1);
+
+        // The next arm aims at the same heartbeat, and the engine takes it.
+        clock.set("2026-11-21T09:01:30Z");
+        daemon.tick().await.unwrap();
+        assert_eq!(armed(&daemon), Some(morning));
+        let (beat, next) = held(
+            sqlite::state(&daemon.rt, daemon.assistant())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let beat = beat.expect("a custom heartbeat");
+        assert!(
+            beat.prompt.starts_with(crate::wake::HEARTBEAT_MARK),
+            "the engine still holds: {}",
+            beat.prompt.lines().next().unwrap_or_default()
+        );
+        assert!(beat.precheck);
+        assert_eq!(next, Some(morning.as_millisecond()));
+
+        // No reflection runs again before the morning.
+        let after = model.calls.load(Ordering::SeqCst);
+        for minute in [3, 10, 30] {
+            clock.set(&format!("2026-11-21T09:{minute:02}:30Z"));
+            daemon.tick().await.unwrap();
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), after);
+    }
+
+    /// Two arms aimed at one wake with different prompts both reach the
+    /// engine. A reload that changes only the prompt arms the same time
+    /// again.
+    #[cfg(all(feature = "heartbeat", any(feature = "discord", feature = "sandbox")))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_prompt_at_the_same_wake_reaches_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = Arc::new(MemoryModel::default());
+        let clock = HandClock::at("2026-11-14T12:00:00Z");
+        let hand = clock.clone();
+        let config = heartbeat_config();
+        let mut daemon = Daemon::open(
+            &dir.path().join("lg.db"),
+            &config,
+            Arc::clone(&model) as Arc<dyn AgentModel>,
+            UID,
+            false,
+        )
+        .unwrap()
+        .with_clock(move || hand.now());
+        let first = daemon.arm_wake().await.unwrap().unwrap();
+        daemon.tick().await.unwrap();
+        let (beat, _) = held(
+            sqlite::state(&daemon.rt, daemon.assistant())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(beat.unwrap().prompt.ends_with("check in"));
+
+        let mut next = config.clone();
+        if let Some(beat) = next.heartbeat.as_mut() {
+            beat.prompt = String::from("look around");
+        }
+        daemon.reload(next).unwrap();
+        let second = daemon.arm_wake().await.unwrap().unwrap();
+        assert_ne!(first, second, "one wake, two settings, two keys");
+        daemon.tick().await.unwrap();
+        let (beat, next) = held(
+            sqlite::state(&daemon.rt, daemon.assistant())
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(beat.unwrap().prompt.ends_with("look around"));
+        assert_eq!(next, Some(utc("2026-11-14T13:00:00Z").as_millisecond()));
+    }
+
     #[cfg(any(feature = "discord", feature = "sandbox"))]
     #[cfg(feature = "followups")]
     #[tokio::test(flavor = "multi_thread")]
@@ -5307,7 +5507,11 @@ mod tests {
         let mut daemon = brief_daemon(&dir.path().join("lg.db"), &config, &model, &clock, &fake);
 
         let armed = daemon.arm_wake().await.unwrap();
-        assert_eq!(armed.as_deref(), Some("brief:2026-11-09T08:00:00+00:00"));
+        let armed = armed.unwrap();
+        assert!(
+            armed.starts_with("brief:2026-11-09T08:00:00+00:00#"),
+            "{armed}"
+        );
         // Before the slot, ticks send nothing and arm nothing new.
         for _ in 0..3 {
             daemon.tick().await.unwrap();

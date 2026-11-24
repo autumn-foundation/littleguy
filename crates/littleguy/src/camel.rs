@@ -39,6 +39,8 @@ use littleguy_core::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::fnv::fnv1a;
+
 /// The channel id of camel routes.
 pub const CAMEL_CHANNEL: &str = "camel";
 
@@ -98,13 +100,6 @@ fn plain(value: &Value) -> String {
     value
         .as_str()
         .map_or_else(|| value.to_string(), ToOwned::to_owned)
-}
-
-/// The FNV-1a hash of `text`. It is stable across builds and platforms.
-fn fnv1a(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    })
 }
 
 /// The agent message id of a camel message. A long id keeps its start and
@@ -552,8 +547,6 @@ mod tests {
         assert!(a.as_str().len() <= MAX_ID_BYTES);
         assert_ne!(a, b);
         assert_eq!(a, agent_message_id("inbox", &long).unwrap(), "stable");
-        assert_eq!(fnv1a(""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a("a"), 0xaf63_dc4c_8601_ec8c);
     }
 
     #[test]

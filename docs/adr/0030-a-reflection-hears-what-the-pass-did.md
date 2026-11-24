@@ -4,6 +4,7 @@
 
 Accepted, 2026-11-15. It amends ADR 0022. ADR 0034 raises the output cap
 of a pass. Amended 2026-11-17: the prompt names each pass and its episodes.
+Amended 2026-11-23: the prompt lists the replaces and removes of a pass.
 
 ## Context
 
@@ -60,6 +61,20 @@ the same way.
   of a skipped reflection says how many episodes of an unmarked pass wait.
   Only the engine can count the duplicates: `FactsWritten` would need a
   field for the facts that the block held already.
+- **The prompt lists each replace and remove** (amended 2026-11-23).
+  autumn-harvest#2797 (engine ADR 0020) lets a pass replace and remove an
+  entry. The input of the fact write gives each edit a `verb` and a
+  `target`. The prompt lists a replace as `replace "old" with "new"` and a
+  remove as `remove "old"`, after the added facts. The count names each
+  kind, as in "sent 2 facts and 1 remove". A pass with only removes still
+  wakes a reflection. The line of a pass gives `facts_removed` from the
+  report. The report names a dropped edit by the `fact_hash` of its target,
+  never by its text. The daemon hashes the target of each edit that it
+  read and shows the reason beside the edit. A reason with no match shows
+  on the line of the pass. That line also says that a dropped edit consumes
+  its source episodes, so no pass sends it again. Engine 0.11.0 has no
+  field for these, so the daemon reads them from the raw output of the
+  pass. Under 0.11.0 the fields are absent and the prompt is as before.
 - **`[memory] pass_episodes` sets the batch of a pass**, 8 by default
   instead of the engine's 20, so a reply fits the cap. Only 0 is refused.
 

@@ -15,11 +15,19 @@
 //! The prompt counts what the passes sent, not what changed (goal #11). The
 //! memory store skips a fact that its block holds already, and the engine
 //! still counts it as written. So no count here can say which facts are new.
+//!
+//! A pass can also replace and remove an entry (autumn-harvest#2797, engine
+//! ADR 0020). The prompt lists each edit with the entry that it targets. The
+//! write drops an edit whose target changed, is gone, or has a label that
+//! the pass lacks. A dropped edit consumes its sources, so the prompt says
+//! that no pass sends it again. The engine names a dropped edit by the hash
+//! of its target, and the daemon matches that hash to the edit that it sent.
 
 use std::fmt::Write as _;
 use std::str::FromStr;
 
 use autumn_harvest::{ExecutionId, WorkflowEvent};
+use autumn_harvest_agent::episode::fact_hash;
 use autumn_harvest_agent::{ConsolidationReport, ConsolidationStop};
 use autumn_harvest_sqlite::{ExecutionOutcome, SqliteRuntime};
 use jiff::Timestamp;
@@ -43,9 +51,42 @@ const WRITE_ACTIVITY: &str = "agent_consolidate_write";
 /// fact is new (goal #11).
 pub const MEMORY_NOTE: &str = "The Memory section of your instructions was read when \
      this reflection started, after the passes. So it already holds each fact above that \
-     the store kept. The count is what the passes sent, not what changed: the store skips \
+     the store kept, and no longer holds an entry that a pass replaced or removed. The count is what the passes sent, not what changed: the store skips \
      a fact that the block held before, and refuses one that does not fit. So a fact \
      above is new from these passes unless the block held it before.";
+
+/// What an edit does to an entry of the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    /// The edit writes a new text over the entry.
+    Replace,
+    /// The edit takes the entry out of the block.
+    Remove,
+}
+
+impl Verb {
+    /// The verb as the engine spells it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Replace => "replace",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+/// A replace or a remove that a pass sent to the memory store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    /// What the edit does.
+    pub verb: Verb,
+    /// The whole block entry that the edit changes.
+    pub target: String,
+    /// The new text of a replace. Empty for a remove.
+    pub entry: String,
+    /// Why the write dropped the edit, or `None` when it did not.
+    pub dropped: Option<String>,
+}
 
 /// What one pass did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,8 +107,15 @@ pub struct Pass {
     pub refused: u64,
     /// The reason of each refused fact, such as a full block.
     pub refusals: Vec<String>,
-    /// The facts that it wrote, as the memory block holds them.
+    /// The facts that it added, as the memory block holds them.
     pub facts: Vec<String>,
+    /// The replaces and the removes that it sent.
+    pub edits: Vec<Edit>,
+    /// How many entries its removes took out of the block.
+    pub removed: u64,
+    /// The reason of each edit that the write dropped. A dropped edit
+    /// consumes its source episodes, unlike a refused fact.
+    pub edit_drops: Vec<String>,
     /// Why it stopped, as the engine names it, such as `invalid_reply`.
     pub stop: String,
 }
@@ -88,6 +136,16 @@ pub fn read_pass(rt: &SqliteRuntime, exec: &str) -> anyhow::Result<Pass> {
         });
     };
     let report: ConsolidationReport = serde_json::from_value(output.clone()).unwrap_or_default();
+    // Engine 0.11.0 has no field for a remove or a dropped edit. A pass of a
+    // later engine reports them, so the daemon reads them from the output.
+    let removed = output["facts_removed"].as_u64().unwrap_or(0);
+    let edit_drops: Vec<String> = output["edit_drops"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect();
     let mut pass = Pass {
         exec: exec.to_owned(),
         episodes: report.episodes,
@@ -96,6 +154,8 @@ pub fn read_pass(rt: &SqliteRuntime, exec: &str) -> anyhow::Result<Pass> {
         marked: report.stop == ConsolidationStop::Completed,
         refused: report.facts_refused,
         refusals: report.refusals,
+        removed,
+        edit_drops,
         stop: output["stop"].as_str().unwrap_or("unknown").to_owned(),
         ..Pass::default()
     };
@@ -115,14 +175,58 @@ pub fn read_pass(rt: &SqliteRuntime, exec: &str) -> anyhow::Result<Pass> {
                 pass.episode_ids = strings(&output["episodes"], "id");
             }
             WorkflowEvent::ActivityScheduled { name, input, .. }
-                if name == WRITE_ACTIVITY && report.facts_written > 0 =>
+                if name == WRITE_ACTIVITY && (report.facts_written > 0 || removed > 0) =>
             {
-                pass.facts.extend(strings(&input["facts"], "entry"));
+                let (adds, edits) = sent(&input["facts"], &pass.edit_drops);
+                pass.facts.extend(adds);
+                pass.edits.extend(edits);
             }
             _ => {}
         }
     }
     Ok(pass)
+}
+
+/// The adds and the edits in the fact list of a write input.
+///
+/// An add carries no verb. A replace or a remove carries its verb and its
+/// target. An edit gets the reason in `drops` that names its verb and the
+/// hash of its target.
+fn sent(facts: &serde_json::Value, drops: &[String]) -> (Vec<String>, Vec<Edit>) {
+    let mut adds = Vec::new();
+    let mut edits = Vec::new();
+    for fact in facts.as_array().into_iter().flatten() {
+        let entry = fact["entry"].as_str().unwrap_or_default();
+        let verb = match fact["verb"].as_str() {
+            None | Some("add") => {
+                adds.push(entry.to_owned());
+                continue;
+            }
+            Some("replace") => Verb::Replace,
+            Some("remove") => Verb::Remove,
+            Some(_) => continue,
+        };
+        let Some(target) = fact["target"].as_str() else {
+            continue;
+        };
+        let prefix = format!("{} of fact {} dropped", verb.as_str(), fact_hash(target));
+        let dropped = drops
+            .iter()
+            .find(|why| why.starts_with(&prefix))
+            .map(|why| {
+                why[prefix.len()..]
+                    .trim_start_matches(':')
+                    .trim()
+                    .to_owned()
+            });
+        edits.push(Edit {
+            verb,
+            target: target.to_owned(),
+            entry: entry.to_owned(),
+            dropped,
+        });
+    }
+    (adds, edits)
 }
 
 /// The string field `key` of each object in the array `list`.
@@ -179,30 +283,111 @@ fn pass_line(pass: &Pass) -> String {
         }
         line.push_str(", so their source episodes stay pending.");
     }
+    if pass.removed > 0 {
+        let _ = write!(
+            line,
+            " Its removes took {} out of the block.",
+            count(pass.removed, "fact")
+        );
+    }
+    if !pass.edit_drops.is_empty() {
+        let _ = write!(
+            line,
+            " The write dropped {}",
+            count(pass.edit_drops.len() as u64, "edit")
+        );
+        // A drop that matches a listed edit shows beside it. Any other
+        // drop shows here, so no reason is lost.
+        let unmatched: Vec<String> = pass
+            .edit_drops
+            .iter()
+            .filter(|why| !pass.edits.iter().any(|edit| matches(edit, why)))
+            .map(|why| one_line(why))
+            .collect();
+        if !unmatched.is_empty() {
+            let _ = write!(line, " ({})", unmatched.join("; "));
+        }
+        line.push_str(
+            ", and a dropped edit consumes its source episodes, so no pass sends it again.",
+        );
+    }
     line
 }
 
-/// The prompt of the reflection on `passes`, or `None` when they wrote no
-/// fact, so there is nothing to reflect on.
+/// The drop reason `why` names `edit`.
+fn matches(edit: &Edit, why: &str) -> bool {
+    edit.dropped.is_some()
+        && why.starts_with(&format!(
+            "{} of fact {} dropped",
+            edit.verb.as_str(),
+            fact_hash(&edit.target)
+        ))
+}
+
+/// One line on what `edit` does, and why the write dropped it.
+fn edit_line(edit: &Edit) -> String {
+    let mut line = match edit.verb {
+        Verb::Replace => format!(
+            "- replace \"{}\" with \"{}\"",
+            one_line(&edit.target),
+            one_line(&edit.entry)
+        ),
+        Verb::Remove => format!("- remove \"{}\"", one_line(&edit.target)),
+    };
+    if let Some(why) = &edit.dropped {
+        let _ = write!(line, " (dropped: {})", one_line(why));
+    }
+    line
+}
+
+/// `n` of `noun` for each part that is not 0, such as "2 facts and 1
+/// remove".
+fn tally(parts: &[(u64, &str)]) -> String {
+    let named: Vec<String> = parts
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, noun)| count(*n, noun))
+        .collect();
+    match named.as_slice() {
+        [] => count(0, "fact"),
+        [one] => one.clone(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
+    }
+}
+
+/// The prompt of the reflection on `passes`, or `None` when they sent no
+/// fact and no edit, so there is nothing to reflect on.
 #[must_use]
 pub fn prompt(passes: &[Pass]) -> Option<String> {
     let facts: Vec<&String> = passes.iter().flat_map(|pass| &pass.facts).collect();
-    if facts.is_empty() {
+    let edits: Vec<&Edit> = passes.iter().flat_map(|pass| &pass.edits).collect();
+    if facts.is_empty() && edits.is_empty() {
         return None;
     }
     let episodes: u64 = passes.iter().map(|pass| pass.episodes).sum();
+    let of = |verb: Verb| edits.iter().filter(|edit| edit.verb == verb).count() as u64;
     // The count is what the passes sent. The store skips a fact that the
     // block holds already, so the prompt never says the block changed.
     let mut text = format!(
         "Your memory was just consolidated. The passes read {} and sent {} to your \
          memory store:\n",
         count(episodes, "episode"),
-        count(facts.len() as u64, "fact")
+        tally(&[
+            (facts.len() as u64, "fact"),
+            (of(Verb::Replace), "replace"),
+            (of(Verb::Remove), "remove"),
+        ])
     );
     // Every fact, whole: the reflection judges what the passes sent.
     for fact in &facts {
         text.push_str("- ");
         text.push_str(&one_line(fact));
+        text.push('\n');
+    }
+    // Every edit, with the entry that it targets, so the reflection can
+    // judge a remove as well as an add.
+    for edit in &edits {
+        text.push_str(&edit_line(edit));
         text.push('\n');
     }
     // Each pass by id, so a repeat of one batch shows as a repeat.
@@ -258,6 +443,9 @@ mod tests {
             refused: 0,
             refusals: Vec::new(),
             facts: facts.iter().map(|fact| (*fact).to_owned()).collect(),
+            edits: Vec::new(),
+            removed: 0,
+            edit_drops: Vec::new(),
             stop: stop.to_owned(),
         }
     }
@@ -424,6 +612,157 @@ mod tests {
                  episodes stay pending."
             ),
             "{text}"
+        );
+    }
+
+    fn edit(verb: Verb, target: &str, entry: &str) -> Edit {
+        Edit {
+            verb,
+            target: target.to_owned(),
+            entry: entry.to_owned(),
+            dropped: None,
+        }
+    }
+
+    #[test]
+    fn the_write_input_splits_into_adds_and_edits() {
+        // The shape that engine ADR 0020 records for a write input.
+        let input = serde_json::json!([
+            {"entry": "mark likes tea", "sources": ["r:s0"]},
+            {"entry": "mark drinks green tea", "sources": ["r:s1"],
+             "verb": "replace", "target": "mark likes tea"},
+            {"entry": "", "sources": [], "verb": "remove", "target": "mark lives\nin Ohio"},
+        ]);
+        let (adds, edits) = sent(&input, &[]);
+        assert_eq!(adds, vec![String::from("mark likes tea")]);
+        assert_eq!(
+            edits,
+            vec![
+                edit(Verb::Replace, "mark likes tea", "mark drinks green tea"),
+                edit(Verb::Remove, "mark lives\nin Ohio", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_drop_reason_finds_its_edit_by_the_hash_of_the_target() {
+        let input = serde_json::json!([
+            {"entry": "", "sources": [], "verb": "remove", "target": "old"},
+            {"entry": "", "sources": [], "verb": "remove", "target": "kept"},
+            {"entry": "new", "sources": [], "verb": "replace", "target": "other"},
+        ]);
+        let drops = vec![
+            format!(
+                "remove of fact {} dropped: the entry has the labels [secret] that the pass lacks",
+                fact_hash("old")
+            ),
+            // A replace reason never matches a remove of the same entry.
+            format!(
+                "replace of fact {} dropped: the entry changed during the pass",
+                fact_hash("kept")
+            ),
+        ];
+        let (_, edits) = sent(&input, &drops);
+        assert_eq!(
+            edits[0].dropped.as_deref(),
+            Some("the entry has the labels [secret] that the pass lacks")
+        );
+        assert_eq!(edits[1].dropped, None);
+        assert_eq!(edits[2].dropped, None);
+    }
+
+    #[test]
+    fn an_unknown_verb_or_an_edit_with_no_target_is_left_out() {
+        let input = serde_json::json!([
+            {"entry": "x", "sources": [], "verb": "unknown"},
+            {"entry": "", "sources": [], "verb": "remove"},
+        ]);
+        assert_eq!(sent(&input, &[]), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn the_prompt_lists_each_replace_and_remove_with_its_target() {
+        let edits = Pass {
+            edits: vec![
+                edit(Verb::Replace, "mark likes\ntea", "mark likes green tea"),
+                edit(Verb::Remove, "mark lives in Ohio", ""),
+            ],
+            removed: 1,
+            ..pass(
+                "pass-a",
+                &["r:s0"],
+                &["mark works on littleguy"],
+                "completed",
+            )
+        };
+        let text = prompt(&[edits]).unwrap();
+        assert!(
+            text.contains("sent 1 fact, 1 replace and 1 remove to your memory store:\n"),
+            "{text}"
+        );
+        assert!(text.contains("- mark works on littleguy\n"));
+        assert!(
+            text.contains("- replace \"mark likes tea\" with \"mark likes green tea\"\n"),
+            "one line: {text}"
+        );
+        assert!(text.contains("- remove \"mark lives in Ohio\"\n"), "{text}");
+        assert!(
+            text.contains(" Its removes took 1 fact out of the block."),
+            "{text}"
+        );
+        assert!(text.contains("no longer holds an entry that a pass replaced or removed"));
+    }
+
+    #[test]
+    fn a_pass_with_only_removes_gets_a_reflection() {
+        let only = Pass {
+            edits: vec![edit(Verb::Remove, "stale", "")],
+            removed: 1,
+            ..pass("pass-a", &["r:s0"], &[], "completed")
+        };
+        let text = prompt(&[only]).unwrap();
+        assert!(text.contains("sent 1 remove to your memory store:\n- remove \"stale\"\n"));
+    }
+
+    #[test]
+    fn a_dropped_edit_shows_its_reason_and_that_its_sources_are_consumed() {
+        let why = format!(
+            "remove of fact {} dropped: no single entry of the block matches it",
+            fact_hash("gone")
+        );
+        let stray = String::from("replace of fact 0000000000000000 dropped: the entry changed");
+        let dropped = Pass {
+            edits: vec![Edit {
+                dropped: Some(String::from("no single entry of the block matches it")),
+                ..edit(Verb::Remove, "gone", "")
+            }],
+            edit_drops: vec![why, stray],
+            ..pass("pass-a", &["r:s0"], &["mark likes tea"], "completed")
+        };
+        let text = prompt(&[dropped]).unwrap();
+        assert!(
+            text.contains("- remove \"gone\" (dropped: no single entry of the block matches it)\n"),
+            "{text}"
+        );
+        // The matched reason shows beside its edit, and only the stray one
+        // shows on the pass line.
+        assert!(
+            text.contains(
+                " The write dropped 2 edits (replace of fact 0000000000000000 dropped: the \
+                 entry changed), and a dropped edit consumes its source episodes, so no pass \
+                 sends it again."
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Its removes took"));
+    }
+
+    #[test]
+    fn the_tally_names_each_kind_that_is_not_zero() {
+        assert_eq!(tally(&[(0, "fact"), (0, "remove")]), "0 facts");
+        assert_eq!(
+            tally(&[(2, "fact"), (0, "replace"), (3, "remove")]),
+            "2 facts and 3 removes"
         );
     }
 

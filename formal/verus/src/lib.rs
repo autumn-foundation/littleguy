@@ -12,6 +12,7 @@ pub mod house_keys;
 pub mod pairing;
 pub mod patch_path;
 pub mod route;
+pub mod script_name;
 
 verus! {
 

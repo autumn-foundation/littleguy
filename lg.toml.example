@@ -196,6 +196,13 @@ bind = "127.0.0.1:3004"
 # approve = "always"                ## or "untrusted": ask only after outside text (ADR 0033),
                                     ## or "auto": a reviewer model decides first (ADR 0037)
 
+## Saved scripts (ADR 0046): littleguy proposes a script, you accept it on
+## the Scripts tab, and a heartbeat may then run it with run_script. They
+## run on the [sandbox] backend. What a script changes stays changed.
+# [scripts]
+# dir = "/home/mark/.config/littleguy/scripts"   ## the default is scripts/ next to this file
+# network = true                    ## the default is the [sandbox] network
+
 ## ------------------------------------------------------- outside services
 
 ## MCP servers. A child gets only PATH, HOME and the variables that `env`

@@ -54,6 +54,18 @@ pub(super) struct Kit {
     /// The patches of `[patches]`, rebuilt at each assembly (ADR 0042).
     #[cfg(feature = "patches")]
     pub(super) patches: Option<Arc<crate::patches::Patches>>,
+    /// The sandbox of the saved scripts, started at start (ADR 0046).
+    #[cfg(feature = "scripts")]
+    pub(super) scripts_runtime: Option<std::sync::Arc<autumn_harvest::sandbox::SandboxRuntime>>,
+    /// The saved scripts of `[scripts]`, rebuilt at each assembly.
+    #[cfg(feature = "scripts")]
+    pub(super) scripts: Option<Arc<crate::scripts::Scripts>>,
+    /// The scripts folder that the script tools read, set at each assembly.
+    #[cfg(feature = "scripts")]
+    pub(super) scripts_dir: crate::scripts::Dir,
+    /// The scripts folder of a config with no `[scripts] dir`.
+    #[cfg(feature = "scripts")]
+    pub(super) scripts_default: Option<PathBuf>,
     /// The tenant database of a fleet, which holds the stores.
     pub(super) tenant: Option<PathBuf>,
     /// The secrets by variable name, opened at start (ADR 0040).
@@ -141,6 +153,13 @@ impl Kit {
                 tools = tools.with(crate::patches::tools(patches));
             }
         }
+        #[cfg(feature = "scripts")]
+        {
+            self.scripts = self.scripts_of(config)?;
+            if let Some(scripts) = &self.scripts {
+                tools = tools.with(crate::scripts::tools(scripts));
+            }
+        }
         // Notes are memory, and the file switch covers them too. A daemon
         // with memory off opens no memory file for them.
         #[cfg(feature = "notes")]
@@ -175,6 +194,42 @@ impl Kit {
             base_branch: section.base.clone(),
             stores: self.stores()?,
             secrets: Arc::new(secrets),
+        })))
+    }
+
+    /// Points the scripts folder at `[scripts] dir`, or at the default.
+    #[cfg(feature = "scripts")]
+    pub(super) fn set_scripts_dir(&self) {
+        let named = self
+            .config
+            .scripts
+            .as_ref()
+            .and_then(|scripts| scripts.dir.clone());
+        self.scripts_dir
+            .set(named.or_else(|| self.scripts_default.clone()));
+    }
+
+    /// The saved scripts of `config`, when it has a `[scripts]` section and
+    /// the sandbox of the scripts started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the memory store does not open.
+    #[cfg(feature = "scripts")]
+    fn scripts_of(&mut self, config: &Config) -> Result<Option<Arc<crate::scripts::Scripts>>> {
+        let Some(section) = &config.scripts else {
+            return Ok(None);
+        };
+        let Some(runtime) = self.scripts_runtime.clone() else {
+            tracing::warn!("the script tools are off: their sandbox did not start");
+            return Ok(None);
+        };
+        self.scripts_dir
+            .set(section.dir.clone().or_else(|| self.scripts_default.clone()));
+        Ok(Some(Arc::new(crate::scripts::Scripts {
+            stores: self.stores()?,
+            runtime,
+            dir: self.scripts_dir.clone(),
         })))
     }
 
@@ -294,16 +349,7 @@ impl Kit {
         });
         let approver = config.approvals.approver.clone();
         warn_unreachable(approver.as_ref(), &self.services);
-        // A reload refuses a section that this build leaves out, as the
-        // start does (ADR 0026).
-        #[cfg(not(feature = "compaction"))]
-        if config.compaction.is_some() {
-            anyhow::bail!(crate::features::missing("[compaction]", "compaction"));
-        }
-        #[cfg(not(feature = "research"))]
-        if config.research.is_some() {
-            anyhow::bail!(crate::features::missing("[research]", "research"));
-        }
+        refuse_left_out(config)?;
         #[cfg(any(feature = "heartbeat", feature = "reflection"))]
         let precheck = self.precheck(config, stores.as_ref());
         let memory = stores
@@ -334,6 +380,33 @@ impl Kit {
             refine,
         })
     }
+}
+
+/// Refuses a section that this build leaves out, so a reload fails as the
+/// start does (ADR 0026).
+#[cfg_attr(
+    all(feature = "compaction", feature = "research", feature = "scripts"),
+    expect(
+        clippy::unnecessary_wraps,
+        clippy::missing_const_for_fn,
+        reason = "this build has every section, so nothing is refused"
+    )
+)]
+fn refuse_left_out(config: &Config) -> Result<()> {
+    #[cfg(not(feature = "compaction"))]
+    if config.compaction.is_some() {
+        anyhow::bail!(crate::features::missing("[compaction]", "compaction"));
+    }
+    #[cfg(not(feature = "research"))]
+    if config.research.is_some() {
+        anyhow::bail!(crate::features::missing("[research]", "research"));
+    }
+    #[cfg(not(feature = "scripts"))]
+    if config.scripts.is_some() {
+        anyhow::bail!(crate::features::missing("[scripts]", "scripts"));
+    }
+    let _ = config;
+    Ok(())
 }
 
 /// The senders that the config allows, which an unpair keeps.

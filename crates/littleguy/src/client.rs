@@ -15,6 +15,7 @@ use crate::protocol::{
 };
 use crate::protocol::{ConversationEntry, PastTurn};
 use crate::protocol::{InvalidSkill, PatchEntry, SkillDraftEntry, SkillEntry};
+use crate::protocol::{ScriptDraftEntry, ScriptEntry, ScriptRunEntry};
 
 /// The prefix of each message id of the web and the CLI. The history shows
 /// only the turns whose key starts with it.
@@ -190,6 +191,13 @@ pub fn render(response: &Response) -> (String, bool) {
         Response::PatchOpened { id, pr, url } => {
             (format!("patch {id} is draft PR #{pr}: {url}"), true)
         }
+        Response::Scripts {
+            dir,
+            drafts,
+            scripts,
+            runs,
+            ..
+        } => (render_scripts(dir, drafts, scripts, runs), true),
         Response::WorkspaceFile { path, bytes, text } => (
             text.clone()
                 .unwrap_or_else(|| format!("{path}: {bytes} bytes, not text or too large to show")),
@@ -226,6 +234,77 @@ fn render_skills(
         return String::from("no skills yet");
     }
     lines.join("\n")
+}
+
+/// One line per accepted script, per draft and per recent run.
+fn render_scripts(
+    dir: &str,
+    drafts: &[ScriptDraftEntry],
+    scripts: &[ScriptEntry],
+    runs: &[ScriptRunEntry],
+) -> String {
+    let mut lines: Vec<String> = scripts
+        .iter()
+        .map(|script| {
+            let drift = if script.drifted {
+                " (its file changed: it does not run)"
+            } else {
+                ""
+            };
+            format!(
+                "{} [{}]: {}{drift}",
+                script.name, script.runtime, script.description
+            )
+        })
+        .collect();
+    lines.extend(drafts.iter().map(|draft| {
+        let revises = if draft.revises {
+            ", revises the script"
+        } else {
+            ""
+        };
+        format!("draft {}: {} waits for you{revises}", draft.id, draft.name)
+    }));
+    if lines.is_empty() {
+        lines.push(format!("no scripts in {dir} yet"));
+    }
+    if !runs.is_empty() {
+        lines.push(String::from("recent runs:"));
+        lines.extend(runs.iter().map(|run| {
+            let mut line = format!(
+                "  {} {} {:?}",
+                crate::stamp::from_millis(run.at_ms)
+                    .map_or_else(String::new, crate::stamp::rfc3339),
+                run.name,
+                run.args
+            );
+            if let Some(stdin) = &run.stdin {
+                let _ = write!(line, " stdin {} chars", stdin.chars().count());
+            }
+            let _ = write!(line, ": {}", run.outcome);
+            line
+        }));
+    }
+    lines.join("\n")
+}
+
+/// One draft whole, for `lg script show` and `lg script accept`: the
+/// name, the runtime, the description and the code.
+#[must_use]
+pub fn render_script_draft(draft: &ScriptDraftEntry) -> String {
+    let revises = if draft.revises {
+        "\nreplaces the accepted script of that name"
+    } else {
+        ""
+    };
+    format!(
+        "draft {}: {} [{}]{revises}\n{}\n\n{}",
+        draft.id,
+        draft.name,
+        draft.runtime,
+        draft.description.trim(),
+        draft.code
+    )
 }
 
 /// One line per patch, with its status and PR.
@@ -487,6 +566,72 @@ fn render_pairs(entries: &[PairEntry]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_scripts_listing_names_drafts_drift_and_runs() {
+        let draft = ScriptDraftEntry {
+            id: 2,
+            name: String::from("walk-repo"),
+            runtime: String::from("python3"),
+            description: String::from("Walk a repository."),
+            code: String::from("print(1)\n"),
+            digest: String::from("ab"),
+            revises: true,
+            created_ms: 0,
+        };
+        let script = ScriptEntry {
+            name: String::from("walk-repo"),
+            runtime: String::from("python3"),
+            description: String::from("Walk a repository."),
+            path: String::from("/s/walk-repo.py"),
+            sha256: String::from("cd"),
+            code: None,
+            drifted: true,
+            accepted_ms: 0,
+        };
+        let run = ScriptRunEntry {
+            name: String::from("walk-repo"),
+            args: vec![String::from("a b")],
+            stdin: Some(String::from("xyz")),
+            outcome: String::from("exited 0"),
+            duration_ms: 4,
+            at_ms: 0,
+        };
+        let (text, ok) = render(&Response::Scripts {
+            dir: String::from("/s"),
+            network: false,
+            drafts: vec![draft.clone()],
+            scripts: vec![script],
+            runs: vec![run],
+        });
+        assert!(ok);
+        assert!(
+            text.contains("walk-repo [python3]: Walk a repository. (its file changed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("draft 2: walk-repo waits for you, revises the script"),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"walk-repo ["a b"] stdin 3 chars: exited 0"#),
+            "{text}"
+        );
+        let empty = render(&Response::Scripts {
+            dir: String::from("/s"),
+            network: false,
+            drafts: Vec::new(),
+            scripts: Vec::new(),
+            runs: Vec::new(),
+        });
+        assert_eq!(empty.0, "no scripts in /s yet");
+        let shown = render_script_draft(&draft);
+        assert!(
+            shown.starts_with("draft 2: walk-repo [python3]\nreplaces"),
+            "{shown}"
+        );
+        assert!(shown.ends_with("print(1)\n"), "{shown}");
+    }
 
     #[test]
     fn fresh_ids_differ_and_are_valid() {

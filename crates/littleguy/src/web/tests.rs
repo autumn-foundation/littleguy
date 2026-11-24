@@ -1128,6 +1128,187 @@ async fn the_owner_accepts_and_retires_a_skill_on_the_skills_tab() {
         .assert_status(401);
 }
 
+/// A rig with `[scripts]` on a backend that runs nothing, and the folder of
+/// the scripts.
+#[cfg(feature = "scripts")]
+async fn scripts_rig() -> (Rig, tempfile::TempDir) {
+    use autumn_harvest::sandbox::SandboxBackend;
+    let folder = tempfile::tempdir().unwrap();
+    let mut config = config(false);
+    let sandbox = littleguy_core::SandboxConfig {
+        backend: littleguy_core::SandboxBackend::Process,
+        network: false,
+        approve: littleguy_core::SandboxApprove::Always,
+    };
+    let scripts = littleguy_core::ScriptsConfig {
+        dir: Some(folder.path().to_path_buf()),
+        network: false,
+    };
+    let backend = Arc::new(crate::scripts::testing::EchoBackend::default());
+    let runtime = crate::sandbox::runtime_on(
+        Arc::clone(&backend) as Arc<dyn SandboxBackend>,
+        &scripts.sandbox(&sandbox),
+    )
+    .unwrap();
+    config.sandbox = Some(sandbox);
+    config.scripts = Some(scripts);
+    let extras = daemon::Extras {
+        scripts: Some(runtime),
+        ..daemon::Extras::default()
+    };
+    (
+        rig_extras(&config, None, Arc::new(Saver), extras).await,
+        folder,
+    )
+}
+
+/// Asks the assistant of `rig` to say `text`, as a chat.
+#[cfg(feature = "scripts")]
+async fn say(rig: &Rig, id: &str, text: &str) -> Response {
+    rig.handle
+        .ask(Request::Chat {
+            message_id: id.to_owned(),
+            text: text.to_owned(),
+        })
+        .await
+        .unwrap()
+}
+
+/// The assistant drafts `walk-repo`. Returns the URL that accepts it.
+#[cfg(feature = "scripts")]
+async fn draft_walk(rig: &Rig) -> String {
+    let drafted = say(
+        rig,
+        "s-1",
+        r#"use propose_script {"name": "walk-repo", "runtime": "sh", "description": "Walk <b>it</b>.", "code": "echo hi\n"}"#,
+    )
+    .await;
+    assert_eq!(reply_text(&drafted), "saved");
+    let Response::Scripts { drafts, .. } = rig.handle.ask(Request::Scripts).await.unwrap() else {
+        panic!("not a listing");
+    };
+    format!("/scripts/accept/1/{}", drafts[0].digest)
+}
+
+#[cfg(feature = "scripts")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_owner_accepts_a_script_with_the_digest_on_the_scripts_tab() {
+    let (rig, folder) = scripts_rig().await;
+    let token = sign_in(&rig).await;
+    rig.client
+        .get("/workspace?tab=scripts")
+        .send()
+        .await
+        .assert_text_contains("#plan-view", "No scripts in");
+    let accept_url = draft_walk(&rig).await;
+
+    // The tab counts the draft, shows its code and its warning, and the
+    // Accept button carries the digest of what the page shows.
+    let files = rig.client.get("/workspace").send().await;
+    files.assert_text_contains("#tabs a[href='/workspace?tab=scripts'] .count", "1 waiting");
+    let page = rig.client.get("/workspace?tab=scripts").send().await;
+    page.assert_text_contains("#file .doc .tag", "waiting for you");
+    page.assert_text_contains("#file .doc pre code", "echo hi");
+    page.assert_text_contains("#file .doc .error", "a heartbeat may run this code");
+    page.assert_selector_count(&format!("#file button[hx-post='{accept_url}']"), 1);
+    page.assert_selector_count("#file button[hx-post='/scripts/decline/1']", 1);
+    page.assert_selector_count("#file b", 0);
+    page.assert_text_contains("#plan-view .runs", "No script has run yet");
+
+    rig.client.post(&accept_url).send().await.assert_status(403);
+    let stale = rig
+        .client
+        .post("/scripts/accept/1/stale")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    stale.assert_text_contains("#plan-view .error", "changed since you read it");
+    let accepted = rig
+        .client
+        .post(&accept_url)
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    accepted.assert_status(200);
+    accepted.assert_text_contains("#plan-view #file .doc h2", "walk-repo");
+    accepted.assert_selector_count("#plan-view .tag.active", 1);
+    accepted.assert_selector_count("#plan-view button[hx-post='/scripts/retire/walk-repo']", 1);
+    accepted.assert_selector_count("#tabs[hx-swap-oob='true']", 1);
+    accepted.assert_selector_count("#tabs .count", 0);
+    assert!(folder.path().join("walk-repo.sh").exists());
+    rig.client.log_out();
+    rig.client
+        .post("/scripts/decline/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(401);
+}
+
+#[cfg(feature = "scripts")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_scripts_tab_logs_each_run_and_retires_a_script() {
+    let (rig, _folder) = scripts_rig().await;
+    let token = sign_in(&rig).await;
+    let accept_url = draft_walk(&rig).await;
+    rig.client
+        .post(&accept_url)
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(200);
+    // A run shows in the log with its arguments, as text.
+    say(
+        &rig,
+        "s-2",
+        r#"use run_script {"name": "walk-repo", "args": ["<i>owner/repo</i>"]}"#,
+    )
+    .await;
+    let page = rig
+        .client
+        .get("/workspace?tab=scripts&name=walk-repo")
+        .send()
+        .await;
+    page.assert_text_contains("#plan-view .runs td code", "<i>owner/repo</i>");
+    page.assert_text_contains("#plan-view .runs", "exited 0");
+    page.assert_selector_count("#plan-view .runs i", 0);
+
+    let retired = rig
+        .client
+        .post("/scripts/retire/walk-repo")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    retired.assert_text_contains("#plan-view", "No scripts in");
+    retired.assert_text_contains("#plan-view .runs", "walk-repo");
+    let again = rig
+        .client
+        .post("/scripts/retire/walk-repo")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await;
+    again.assert_text_contains("#plan-view .error", "no accepted script is named walk-repo");
+    rig.client
+        .post("/scripts/bogus/1")
+        .header("X-CSRF-Token", &token)
+        .send()
+        .await
+        .assert_status(404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_scripts_tab_hides_while_scripts_are_off() {
+    let rig = rig(&config(false)).await;
+    sign_in(&rig).await;
+    let files = rig.client.get("/workspace").send().await;
+    files.assert_selector_count("#tabs a[href='/workspace?tab=scripts']", 0);
+    rig.client
+        .get("/workspace?tab=scripts")
+        .send()
+        .await
+        .assert_text_contains("#plan-view", "scripts");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn new_conversation_starts_the_thread_over() {
     let rig = rig(&config(false)).await;

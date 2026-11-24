@@ -168,6 +168,28 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// The saved scripts of the assistant, the drafts that wait and the run
+    /// log (ADR 0046). Only the owner may.
+    Scripts,
+    /// Accept the waiting draft `id`, when its digest is `digest`: the
+    /// digest of the draft that the owner read. Only the owner may.
+    AcceptScript {
+        /// The draft.
+        id: i64,
+        /// The digest of the draft that the owner read.
+        digest: String,
+    },
+    /// Decline the waiting draft `id`. Only the owner may.
+    DeclineScript {
+        /// The draft.
+        id: i64,
+    },
+    /// Retire the accepted script `name`: its file moves to the retired
+    /// folder, and `run_script` refuses it. Only the owner may.
+    RetireScript {
+        /// The script.
+        name: String,
+    },
     /// Accept a proposed goal, or decline it, drop an active goal, drop an
     /// open or answered idea, or reopen an answered idea. Only the owner
     /// may.
@@ -251,6 +273,67 @@ pub struct PatchEntry {
     pub warnings: Vec<String>,
     /// When the assistant proposed it, in epoch milliseconds.
     pub created_ms: i64,
+}
+
+/// A script that the assistant drafted, which waits for the owner
+/// (ADR 0046).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptDraftEntry {
+    /// Its number.
+    pub id: i64,
+    /// The name that `run_script` would take.
+    pub name: String,
+    /// The sandbox runtime, such as `python3`.
+    pub runtime: String,
+    /// What it does, and what its arguments and stdin are.
+    pub description: String,
+    /// The program.
+    pub code: String,
+    /// The digest of the name, the runtime, the description and the code.
+    /// Accepting sends it back.
+    pub digest: String,
+    /// Whether an accepted script has the name, so accepting replaces it.
+    pub revises: bool,
+    /// When it was drafted, in epoch milliseconds.
+    pub created_ms: i64,
+}
+
+/// A script that the owner accepted (ADR 0046).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptEntry {
+    /// The name that `run_script` takes.
+    pub name: String,
+    /// The sandbox runtime, such as `python3`.
+    pub runtime: String,
+    /// What it does, and what its arguments and stdin are.
+    pub description: String,
+    /// The file in the scripts folder.
+    pub path: String,
+    /// The SHA-256 of the file at acceptance.
+    pub sha256: String,
+    /// The code in the file now. `None` when the file does not read.
+    pub code: Option<String>,
+    /// Whether the file differs from its hash, so `run_script` refuses it.
+    pub drifted: bool,
+    /// When the owner accepted it, in epoch milliseconds.
+    pub accepted_ms: i64,
+}
+
+/// One run of a script: what ran and with what arguments (ADR 0046).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptRunEntry {
+    /// The script.
+    pub name: String,
+    /// The arguments, as the assistant gave them.
+    pub args: Vec<String>,
+    /// The stdin, as the assistant gave it.
+    pub stdin: Option<String>,
+    /// What happened, such as `exited 0`, or why it was refused.
+    pub outcome: String,
+    /// How long the code ran, in milliseconds.
+    pub duration_ms: i64,
+    /// When it ran, in epoch milliseconds.
+    pub at_ms: i64,
 }
 
 /// What the owner decides about a goal or an idea.
@@ -692,6 +775,19 @@ pub enum Response {
         /// The URL of the PR.
         url: String,
     },
+    /// The saved scripts of the assistant.
+    Scripts {
+        /// The scripts folder.
+        dir: String,
+        /// Whether a script may use the network.
+        network: bool,
+        /// The drafts that wait, oldest first.
+        drafts: Vec<ScriptDraftEntry>,
+        /// The accepted scripts, by name.
+        scripts: Vec<ScriptEntry>,
+        /// The newest runs, the newest first.
+        runs: Vec<ScriptRunEntry>,
+    },
     /// What a listing asked for is not set up in this daemon: a section is
     /// missing, or this build lacks the feature. It is not a failure. The
     /// message says how to turn it on.
@@ -831,6 +927,15 @@ mod tests {
             Request::DeclinePatch {
                 id: 4,
                 reason: None,
+            },
+            Request::Scripts,
+            Request::AcceptScript {
+                id: 5,
+                digest: String::from("cd34"),
+            },
+            Request::DeclineScript { id: 5 },
+            Request::RetireScript {
+                name: String::from("walk-repo"),
             },
         ] {
             let line = serde_json::to_string(&request).unwrap();

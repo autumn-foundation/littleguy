@@ -25,6 +25,8 @@ use tokio::sync::mpsc;
 
 use super::Web;
 use super::decisions::Poll;
+
+mod scripts;
 use crate::client::render;
 use crate::daemon::live::Piece;
 use crate::protocol::{
@@ -82,6 +84,8 @@ pub fn routes() -> Vec<autumn_web::Route> {
         decide_plan,
         decide_skill,
         decide_patch,
+        accept_script,
+        decide_script,
         login,
         logout,
         chat,
@@ -330,6 +334,8 @@ enum Tab {
     Skills,
     /// The patches of the assistant (ADR 0042).
     Patches,
+    /// The saved scripts and their run log (ADR 0046).
+    Scripts,
 }
 
 impl Tab {
@@ -341,6 +347,7 @@ impl Tab {
             Some("notes") => Self::Notes,
             Some("skills") => Self::Skills,
             Some("patches") => Self::Patches,
+            Some("scripts") => Self::Scripts,
             _ => Self::Files,
         }
     }
@@ -354,6 +361,7 @@ impl Tab {
             Self::Notes => "notes",
             Self::Skills => "skills",
             Self::Patches => "patches",
+            Self::Scripts => "scripts",
         };
         id.map_or_else(
             || format!("/workspace?tab={tab}"),
@@ -388,6 +396,7 @@ struct Counts {
     plans: Answer,
     skills: Answer,
     patches: Answer,
+    scripts: Answer,
 }
 
 impl Counts {
@@ -397,6 +406,7 @@ impl Counts {
             plans: ask(web, Request::Plans).await,
             skills: ask(web, Request::Skills).await,
             patches: ask(web, Request::Patches).await,
+            scripts: ask(web, Request::Scripts).await,
         }
     }
 }
@@ -404,7 +414,7 @@ impl Counts {
 /// The tabs of the workspace page, with `current` marked. The goals,
 /// skills and patches tabs count what waits for the owner. With `oob`, an
 /// htmx answer swaps the tabs too, so the counts stay right after a
-/// decision. The patches tab shows only when patches are on.
+/// decision. The patches and scripts tabs show only when they are on.
 fn tabs(current: Tab, counts: &Counts, oob: bool) -> Markup {
     let (plans, skills) = (&counts.plans, &counts.skills);
     let waiting = match plans {
@@ -419,6 +429,10 @@ fn tabs(current: Tab, counts: &Counts, oob: bool) -> Markup {
         Answer::Patches { patches, .. } => {
             Some(patches.iter().filter(|p| p.status == "waiting").count())
         }
+        _ => None,
+    };
+    let scripts = match &counts.scripts {
+        Answer::Scripts { drafts, .. } => Some(drafts.len()),
         _ => None,
     };
     let mark = |tab: Tab| (tab == current).then_some("page");
@@ -439,6 +453,12 @@ fn tabs(current: Tab, counts: &Counts, oob: bool) -> Markup {
                 a href=(Tab::Patches.url(None)) aria-current=[mark(Tab::Patches)] {
                     "Patches"
                     @if waiting > 0 { span.count title="patches wait for you" { (waiting) " waiting" } }
+                }
+            }
+            @if let Some(waiting) = scripts {
+                a href=(Tab::Scripts.url(None)) aria-current=[mark(Tab::Scripts)] {
+                    "Scripts"
+                    @if waiting > 0 { span.count title="scripts wait for you" { (waiting) " waiting" } }
                 }
             }
         }
@@ -470,6 +490,7 @@ async fn workspace(
         Tab::Notes => notes_view(&ask(&web, Request::Notes).await, open.name.as_deref()),
         Tab::Skills => skills_view(&counts.skills, open.id, open.name.as_deref(), None),
         Tab::Patches => patches_view(&counts.patches, open.id, None),
+        Tab::Scripts => scripts::view(&counts.scripts, open.id, open.name.as_deref(), None),
     };
     let body = html! {
         (bar(csrf.token(), "/workspace"))
@@ -1233,6 +1254,67 @@ async fn decide_patch(
     let counts = Counts::of(&web).await;
     let view = patches_view(&counts.patches, Some(id), notice);
     html! { (view) (tabs(Tab::Patches, &counts, true)) }.into_response()
+}
+
+/// The owner accepts a script draft. The digest in the path is the one on
+/// the page that the owner read. Answers with the scripts tab, and the
+/// tabs out of band.
+#[post("/scripts/accept/{id}/{digest}")]
+async fn accept_script(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, digest)): Path<(i64, String)>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let answer = ask(&web, Request::AcceptScript { id, digest }).await;
+    script_answer(&web, &answer, Some(id), None).await
+}
+
+/// The owner declines a script draft, or retires a script. Answers with
+/// the scripts tab, and the tabs out of band.
+#[post("/scripts/{action}/{target}")]
+async fn decide_script(
+    State(state): State<AppState>,
+    session: Session,
+    Path((action, target)): Path<(String, String)>,
+) -> Response {
+    if !is_owner(&session).await {
+        return unsigned(true);
+    }
+    let Some(web) = web(&state) else {
+        return broken();
+    };
+    let request = match (action.as_str(), target.parse::<i64>()) {
+        ("decline", Ok(id)) => Request::DeclineScript { id },
+        ("retire", _) => Request::RetireScript {
+            name: target.clone(),
+        },
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let answer = ask(&web, request).await;
+    script_answer(&web, &answer, None, Some(&target)).await
+}
+
+/// The scripts tab after a decision: a refusal goes on top, and the tabs
+/// swap out of band, so the waiting count stays right.
+async fn script_answer(
+    web: &Web,
+    answer: &Answer,
+    id: Option<i64>,
+    name: Option<&str>,
+) -> Response {
+    let notice = match answer {
+        Answer::Scripts { .. } => None,
+        _ => Some(note(answer)),
+    };
+    let counts = Counts::of(web).await;
+    let view = scripts::view(&counts.scripts, id, name, notice);
+    html! { (view) (tabs(Tab::Scripts, &counts, true)) }.into_response()
 }
 
 /// Whether `path` names a Markdown file, in any case.

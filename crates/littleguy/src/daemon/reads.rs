@@ -46,6 +46,8 @@ pub struct View {
     pub(super) connections: Option<crate::oauth::Lister>,
     #[cfg(feature = "patches")]
     pub(super) patches: Option<Arc<crate::patches::Patches>>,
+    #[cfg(feature = "scripts")]
+    pub(super) scripts: Option<Arc<crate::scripts::Scripts>>,
 }
 
 impl std::fmt::Debug for View {
@@ -171,6 +173,10 @@ impl View {
             Request::Patches => super::patches::listing_of(self.patches.as_deref()),
             #[cfg(not(feature = "patches"))]
             Request::Patches => Ok(super::patches::off(request)),
+            #[cfg(feature = "scripts")]
+            Request::Scripts => super::scripts::listing_of(self.scripts.as_deref()),
+            #[cfg(not(feature = "scripts"))]
+            Request::Scripts => Ok(super::scripts::off(request)),
             Request::Pairs => Ok(self.pairs.clone()),
             _ => return None,
         })

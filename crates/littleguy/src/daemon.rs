@@ -540,6 +540,9 @@ pub struct Cursor {
 pub struct Extras {
     /// The runtime of the `run_code` tool.
     pub sandbox: Option<crate::sandbox::Runtime>,
+    /// The sandbox of the saved scripts (ADR 0046).
+    #[cfg(feature = "scripts")]
+    pub scripts: Option<Arc<autumn_harvest::sandbox::SandboxRuntime>>,
     /// The tools of the MCP servers.
     pub mcp: Vec<Arc<dyn autumn_harvest_agent::Tool>>,
     /// The Google API of the owner, for the `[google]` tools.
@@ -656,6 +659,8 @@ impl Daemon {
             .transpose()?;
         let extras = Extras {
             sandbox,
+            #[cfg(feature = "scripts")]
+            scripts: crate::scripts::runtime(config)?,
             ..Extras::default()
         };
         Self::open_with(db, config, model, owner_uid, discord, extras)
@@ -703,6 +708,14 @@ impl Daemon {
             api: extras.api,
             #[cfg(feature = "patches")]
             patches: None,
+            #[cfg(feature = "scripts")]
+            scripts_runtime: extras.scripts,
+            #[cfg(feature = "scripts")]
+            scripts: None,
+            #[cfg(feature = "scripts")]
+            scripts_dir: crate::scripts::Dir::default(),
+            #[cfg(feature = "scripts")]
+            scripts_default: None,
             tenant: extras.tenant,
             keys: extras.keys,
             services,
@@ -821,6 +834,8 @@ impl Daemon {
             connections: self.connections.as_ref().map(Connections::lister),
             #[cfg(feature = "patches")]
             patches: self.kit.patches.clone(),
+            #[cfg(feature = "scripts")]
+            scripts: self.kit.scripts.clone(),
         }
     }
 
@@ -964,6 +979,10 @@ impl Daemon {
             request @ (Request::Patches
             | Request::OpenPatch { .. }
             | Request::DeclinePatch { .. }) => self.patches_request(request).await,
+            request @ (Request::Scripts
+            | Request::AcceptScript { .. }
+            | Request::DeclineScript { .. }
+            | Request::RetireScript { .. }) => self.scripts_request(request),
             #[cfg(feature = "plans")]
             Request::Decide { decision, id } => self.decide_plan(decision, id),
             #[cfg(not(feature = "plans"))]
@@ -2503,6 +2522,7 @@ mod reload;
 #[cfg(feature = "auto-approve")]
 mod review;
 mod runs;
+mod scripts;
 #[cfg(feature = "skills")]
 mod skills;
 mod usage;
@@ -3945,6 +3965,9 @@ mod tests {
                 "build",
                 "patch",
                 "patches",
+                "script",
+                "script_draft",
+                "scripts",
             ]
             .iter()
             .any(|key| result.get(key).is_some())
@@ -6679,4 +6702,6 @@ mod tests {
     mod research;
     #[cfg(feature = "sandbox")]
     mod sandboxed;
+    #[cfg(feature = "scripts")]
+    mod scripts;
 }

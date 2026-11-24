@@ -3,7 +3,8 @@
 ## Status
 
 Accepted, 2026-11-14. Amended 2026-11-23: a tick may keep its progress
-notes (ADR 0043).
+notes (ADR 0043). ADR 0046 amends it too: a tick changes nothing else
+except through a script that the owner accepted.
 
 ## Context
 

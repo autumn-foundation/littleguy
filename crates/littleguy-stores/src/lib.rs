@@ -51,6 +51,8 @@ pub mod plans;
 #[cfg(feature = "self-debug")]
 pub mod runlog;
 pub mod runtime_state;
+#[cfg(feature = "scripts")]
+pub mod scripts;
 #[cfg(feature = "skills")]
 pub mod skill_drafts;
 #[cfg(feature = "self-debug")]
@@ -63,7 +65,7 @@ pub use approvals::{ApprovalRecord, Claim, Verdict};
 pub use runlog::RunLog;
 
 /// The schema version that [`SqliteStores::open`] writes.
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// The most edit keys that one memory scope keeps. A retry comes soon after
 /// its first attempt, so the oldest key is safe to forget. The engine keeps
@@ -194,6 +196,36 @@ CREATE TABLE IF NOT EXISTS patches (
     updated_ms INTEGER NOT NULL,
     key        TEXT UNIQUE
 );
+CREATE TABLE IF NOT EXISTS script_drafts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    runtime     TEXT NOT NULL,
+    description TEXT NOT NULL,
+    code        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'draft',
+    created_ms  INTEGER NOT NULL,
+    key         TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS scripts (
+    name        TEXT PRIMARY KEY,
+    runtime     TEXT NOT NULL,
+    description TEXT NOT NULL,
+    file        TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    accepted_ms INTEGER NOT NULL,
+    draft       INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS script_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    args        TEXT NOT NULL,
+    stdin       TEXT,
+    run_id      TEXT NOT NULL,
+    outcome     TEXT NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    at_ms       INTEGER NOT NULL,
+    key         TEXT UNIQUE
+);
 CREATE TABLE IF NOT EXISTS wakes (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     at_ms      INTEGER NOT NULL,
@@ -219,7 +251,7 @@ pub enum StoreError {
 }
 
 /// The tables of the stores, in the order an import copies them.
-const TABLES: [&str; 17] = [
+const TABLES: [&str; 20] = [
     "memory_scopes",
     "memory_edits",
     "episode_logs",
@@ -237,6 +269,9 @@ const TABLES: [&str; 17] = [
     "council_log",
     "notes",
     "patches",
+    "script_drafts",
+    "scripts",
+    "script_runs",
 ];
 
 /// Where the stores get a connection.

@@ -12,6 +12,7 @@ pub mod pairing;
 pub mod patch_path;
 pub mod reload;
 pub mod route;
+pub mod script_name;
 
 pub use config::{
     ApiConfig, ApprovalsConfig, BriefConfig, CamelRoute, ChatConfig, CompactionConfig, Config,
@@ -19,8 +20,8 @@ pub use config::{
     FlowConfig, FlowRecheck, GoogleConfig, HeartbeatConfig, HeartbeatDelivery, HooksConfig,
     Integration, McpServer, McpTransport, MemoryConfig, PatchesConfig, QuietHours, RefineConfig,
     RefineDimension, Replica, ResearchConfig, RunsConfig, S3Replica, SanMateoConfig, SanMateoError,
-    SandboxApprove, SandboxBackend, SandboxConfig, SkillsConfig, SlackConfig, ToolsConfig,
-    UiConfig, chat_user, discord_sender, slack_sender,
+    SandboxApprove, SandboxBackend, SandboxConfig, ScriptsConfig, SkillsConfig, SlackConfig,
+    ToolsConfig, UiConfig, chat_user, discord_sender, slack_sender,
 };
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
 pub use pairing::{PairingCode, Pending, PendingPairings};

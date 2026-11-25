@@ -1876,7 +1876,10 @@ async fn activate(
     session: Session,
     Path(version): Path<u64>,
 ) -> Response {
-    let request = Request::OverlayActivate { version };
+    let request = Request::OverlayActivate {
+        version,
+        expected: None,
+    };
     act(&state, &session, request, Section::Refine).await
 }
 

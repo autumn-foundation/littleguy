@@ -93,7 +93,7 @@ use littleguy_models::OfflineModel;
 use littleguy_models::{OpenAiModel, Provider};
 
 use crate::paths::Env;
-use crate::protocol::{Request, Response};
+use crate::protocol::{ExpectedActive, Request, Response};
 
 /// An always-on personal agent on autumn-harvest.
 #[derive(Debug, Parser)]
@@ -245,6 +245,10 @@ enum RefineCommand {
     Activate {
         /// The version, from `lg refine list`.
         version: u64,
+        /// The version that must be active now, or `none`. When another
+        /// version is active, nothing changes.
+        #[arg(long, value_parser = parse_expected)]
+        expected: Option<ExpectedActive>,
     },
     /// Activate the version that was active before the current one.
     Rollback,
@@ -265,9 +269,24 @@ impl RefineCommand {
                 overlay: std::fs::read_to_string(&file)
                     .with_context(|| format!("reading {}", file.display()))?,
             },
-            Self::Activate { version } => Request::OverlayActivate { version },
+            Self::Activate { version, expected } => Request::OverlayActivate { version, expected },
             Self::Rollback => Request::OverlayRollback,
         })
+    }
+}
+
+/// The `--expected` version of `lg refine activate`: a number, or `none`.
+///
+/// # Errors
+///
+/// Returns an error for any other text.
+fn parse_expected(text: &str) -> Result<ExpectedActive, String> {
+    if text == "none" {
+        return Ok(ExpectedActive::None);
+    }
+    match text.parse::<u64>() {
+        Ok(version) if version > 0 => Ok(ExpectedActive::Version(version)),
+        _ => Err(String::from("a version from `lg refine list`, or `none`")),
     }
 }
 
@@ -1081,7 +1100,24 @@ mod tests {
             ),
             (
                 vec!["lg", "refine", "activate", "2"],
-                Request::OverlayActivate { version: 2 },
+                Request::OverlayActivate {
+                    version: 2,
+                    expected: None,
+                },
+            ),
+            (
+                vec!["lg", "refine", "activate", "2", "--expected", "1"],
+                Request::OverlayActivate {
+                    version: 2,
+                    expected: Some(ExpectedActive::Version(1)),
+                },
+            ),
+            (
+                vec!["lg", "refine", "activate", "2", "--expected", "none"],
+                Request::OverlayActivate {
+                    version: 2,
+                    expected: Some(ExpectedActive::None),
+                },
             ),
             (vec!["lg", "refine", "rollback"], Request::OverlayRollback),
         ];
@@ -1089,6 +1125,12 @@ mod tests {
             assert_eq!(refine_request(&words).unwrap(), request, "{words:?}");
         }
         assert!(Cli::try_parse_from(["lg", "refine", "show", "x"]).is_err());
+        for bad in ["0", "x", "-1", ""] {
+            assert!(
+                Cli::try_parse_from(["lg", "refine", "activate", "2", "--expected", bad]).is_err(),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

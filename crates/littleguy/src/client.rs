@@ -60,6 +60,11 @@ pub async fn send(socket: &Path, request: &Request) -> Result<Response> {
     serde_json::from_str(&answer).context("the answer is not valid")
 }
 
+/// `version` of an overlay for a person: `vN`, or `none`.
+pub fn show_version(version: Option<u64>) -> String {
+    version.map_or_else(|| String::from("none"), |version| format!("v{version}"))
+}
+
 /// The text that `lg chat` prints, and whether the command succeeded.
 #[must_use]
 #[expect(
@@ -151,6 +156,19 @@ pub fn render(response: &Response) -> (String, bool) {
                 }
             },
             true,
+        ),
+        Response::OverlayMoved {
+            version,
+            expected,
+            actual,
+        } => (
+            format!(
+                "the active overlay is {}, not {}, so version {version} is not active. \
+                 Nothing changed. Run `lg refine list` and decide again",
+                show_version(*actual),
+                show_version(*expected),
+            ),
+            false,
         ),
         Response::Reloaded {
             applied,
@@ -728,6 +746,22 @@ mod tests {
             previous: None,
         });
         assert!(!text.contains("was"), "{text}");
+        let (text, ok) = render(&Response::OverlayMoved {
+            version: 3,
+            expected: Some(1),
+            actual: Some(2),
+        });
+        assert!(!ok, "a refused activation fails the command");
+        assert!(
+            text.contains("is v2, not v1") && text.contains("version 3 is not active"),
+            "{text}"
+        );
+        let (text, _) = render(&Response::OverlayMoved {
+            version: 1,
+            expected: None,
+            actual: Some(4),
+        });
+        assert!(text.contains("is v4, not none"), "{text}");
         let (text, _) = render(&Response::Overlay {
             entry: overlay(1, true, &["guardrails"]),
             overlay: String::from("{\"guardrails\": \"x\"}"),

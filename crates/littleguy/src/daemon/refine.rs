@@ -14,8 +14,9 @@ use autumn_harvest_sqlite::SqliteResult;
 use littleguy_core::Config;
 
 use super::Daemon;
+use crate::client::show_version;
 use crate::protocol::{Request, Response};
-use crate::refine::{Proposal, Refine, path_for};
+use crate::refine::{Activation, Proposal, Refine, path_for};
 
 /// The text for a refine request when the config has no `[refine]`.
 const OFF: &str = "the refine loop is off: add a [refine] section to the config";
@@ -117,10 +118,25 @@ async fn answer(
         Request::OverlayPut { overlay } => Response::OverlayStored {
             version: refine.put(&overlay, &owner).await?,
         },
-        Request::OverlayActivate { version } => {
-            let (previous, _) = refine.list().await?;
-            refine.activate(version, &owner).await?;
-            Response::OverlayActive { version, previous }
+        Request::OverlayActivate { version, expected } => {
+            match (refine.activate(version, expected, &owner).await?, expected) {
+                (Activation::Moved { previous }, _) => {
+                    Response::OverlayActive { version, previous }
+                }
+                // Only a caller that sent `expected` knows the new kind.
+                (Activation::Refused { actual }, Some(expected)) => Response::OverlayMoved {
+                    version,
+                    expected: expected.version(),
+                    actual,
+                },
+                (Activation::Refused { actual }, None) => Response::Error {
+                    message: format!(
+                        "the active overlay moved to {} meanwhile, so version {version} \
+                         is not active",
+                        show_version(actual)
+                    ),
+                },
+            }
         }
         Request::OverlayRollback => {
             let back = refine.rollback(&owner).await?;
@@ -144,6 +160,7 @@ mod tests {
     use littleguy_core::{OwnerName, RefineConfig};
 
     use super::*;
+    use crate::protocol::ExpectedActive;
 
     const UID: u32 = 1000;
 
@@ -218,7 +235,13 @@ mod tests {
         assert!(!waiting.contains(PIRATE), "a proposal waits");
 
         let active = daemon
-            .handle_request(UID, Request::OverlayActivate { version: 1 })
+            .handle_request(
+                UID,
+                Request::OverlayActivate {
+                    version: 1,
+                    expected: None,
+                },
+            )
             .await;
         assert_eq!(
             active,
@@ -248,7 +271,13 @@ mod tests {
         }
         for version in [1, 2] {
             daemon
-                .handle_request(UID, Request::OverlayActivate { version })
+                .handle_request(
+                    UID,
+                    Request::OverlayActivate {
+                        version,
+                        expected: None,
+                    },
+                )
                 .await;
         }
         let plain = say(&mut daemon, "m-1").await;
@@ -282,6 +311,145 @@ mod tests {
             matches!(missing, Response::Error { .. }),
             "version 7 is missing"
         );
+    }
+
+    /// Stores `count` overlays as versions 1 to `count`.
+    async fn put_versions(daemon: &mut Daemon, count: u64) {
+        for _ in 0..count {
+            let stored = daemon
+                .handle_request(
+                    UID,
+                    Request::OverlayPut {
+                        overlay: String::from("{}"),
+                    },
+                )
+                .await;
+            assert!(
+                matches!(stored, Response::OverlayStored { .. }),
+                "{stored:?}"
+            );
+        }
+    }
+
+    async fn activate(
+        daemon: &mut Daemon,
+        version: u64,
+        expected: Option<ExpectedActive>,
+    ) -> Response {
+        daemon
+            .handle_request(UID, Request::OverlayActivate { version, expected })
+            .await
+    }
+
+    async fn active(daemon: &mut Daemon) -> Option<u64> {
+        match daemon.handle_request(UID, Request::Overlays).await {
+            Response::Overlays { active, .. } => active,
+            other => panic!("expected the overlay list, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_activation_moves_only_from_the_expected_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(dir.path(), true);
+        put_versions(&mut daemon, 3).await;
+
+        // From no active version: `none` is the expected one.
+        assert_eq!(
+            activate(&mut daemon, 1, Some(ExpectedActive::None)).await,
+            Response::OverlayActive {
+                version: 1,
+                previous: None
+            }
+        );
+        // The caller read v1, so a move to v2 goes through.
+        assert_eq!(
+            activate(&mut daemon, 2, Some(ExpectedActive::Version(1))).await,
+            Response::OverlayActive {
+                version: 2,
+                previous: Some(1)
+            }
+        );
+        assert_eq!(active(&mut daemon).await, Some(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_after_the_read_refuses_the_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(dir.path(), true);
+        put_versions(&mut daemon, 3).await;
+        activate(&mut daemon, 1, None).await;
+
+        // A caller reads v1. Then a person rolls forward to v2 on the web
+        // pages, before the caller activates v3.
+        activate(&mut daemon, 2, None).await;
+        assert_eq!(
+            activate(&mut daemon, 3, Some(ExpectedActive::Version(1))).await,
+            Response::OverlayMoved {
+                version: 3,
+                expected: Some(1),
+                actual: Some(2)
+            }
+        );
+        assert_eq!(
+            active(&mut daemon).await,
+            Some(2),
+            "the person's move holds"
+        );
+
+        // A caller that expects no active version is refused too.
+        assert_eq!(
+            activate(&mut daemon, 3, Some(ExpectedActive::None)).await,
+            Response::OverlayMoved {
+                version: 3,
+                expected: None,
+                actual: Some(2)
+            }
+        );
+        // So is a rollback in between: the pointer came back to an older
+        // version, not to the one the caller read.
+        daemon.handle_request(UID, Request::OverlayRollback).await;
+        assert_eq!(active(&mut daemon).await, Some(1));
+        assert_eq!(
+            activate(&mut daemon, 3, Some(ExpectedActive::Version(2))).await,
+            Response::OverlayMoved {
+                version: 3,
+                expected: Some(2),
+                actual: Some(1)
+            }
+        );
+        assert_eq!(active(&mut daemon).await, Some(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_expected_activation_still_checks_the_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(dir.path(), true);
+        put_versions(&mut daemon, 1).await;
+        // An unknown version is an error, whatever the caller expects.
+        let unknown = activate(&mut daemon, 9, Some(ExpectedActive::None)).await;
+        assert!(matches!(unknown, Response::Error { .. }), "{unknown:?}");
+        // Version 0 never exists, as a target or as the expected version.
+        let zero = activate(&mut daemon, 1, Some(ExpectedActive::Version(0))).await;
+        assert!(matches!(zero, Response::Error { .. }), "{zero:?}");
+        assert_eq!(active(&mut daemon).await, None, "nothing moved");
+        // The active version again, from itself, is no move and no error.
+        activate(&mut daemon, 1, None).await;
+        assert_eq!(
+            activate(&mut daemon, 1, Some(ExpectedActive::Version(1))).await,
+            Response::OverlayActive {
+                version: 1,
+                previous: Some(1)
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_refine_off_an_expected_activation_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(dir.path(), false);
+        let off = activate(&mut daemon, 1, Some(ExpectedActive::None)).await;
+        assert!(matches!(off, Response::Error { .. }), "{off:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -27,7 +27,7 @@ use autumn_harvest_agent::{
 };
 use littleguy_core::{ASSISTANT_KIND, RefineConfig, RefineDimension};
 
-use crate::protocol::OverlayEntry;
+use crate::protocol::{ExpectedActive, OverlayEntry};
 
 /// The file of the overlay store, next to the database.
 pub const FILE_NAME: &str = "overlays.db";
@@ -64,6 +64,22 @@ pub enum Proposal {
     },
     /// The proposer kept the active overlay. Nothing was stored.
     Kept,
+}
+
+/// The outcome of one activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    /// The version is active now. `previous` was active before, if any. It
+    /// equals the version when that version was already active.
+    Moved {
+        /// The version that was active before.
+        previous: Option<u64>,
+    },
+    /// The active version was not the expected one. Nothing changed.
+    Refused {
+        /// The active version at the time of the refusal.
+        actual: Option<u64>,
+    },
 }
 
 /// The overlay store and the proposer of the assistant.
@@ -230,29 +246,50 @@ impl Refine {
         Ok(version.get())
     }
 
-    /// Makes `version` the active version, by `owner`.
+    /// Makes `version` the active version, by `owner`, when the active
+    /// version is `expected`. The store checks `expected` in the swap
+    /// transaction, so a move by anyone else after the caller read the
+    /// pointer refuses the activation. With no `expected`, the active
+    /// version just before the swap is the expected one.
     ///
     /// # Errors
     ///
-    /// Returns an error for an unknown version, for one that no longer fits
-    /// the ceilings, when the pointer moved meanwhile, or when the store
-    /// fails.
-    pub async fn activate(&self, version: u64, owner: &str) -> Result<()> {
+    /// Returns an error for version 0, for an unknown version, for one that
+    /// no longer fits the ceilings, or when the store fails. A pointer that
+    /// is not the expected version is [`Activation::Refused`], not an error.
+    pub async fn activate(
+        &self,
+        version: u64,
+        expected: Option<ExpectedActive>,
+        owner: &str,
+    ) -> Result<Activation> {
         let number = number(version)?;
-        let expected = self
+        let expected = match expected {
+            Some(expected) => expected.version().map(self::number).transpose()?,
+            None => self
+                .store
+                .active(ASSISTANT_KIND)
+                .await?
+                .map(|stored| stored.version()),
+        };
+        let moved = self
             .store
-            .active(ASSISTANT_KIND)
-            .await?
-            .map(|stored| stored.version());
-        self.store
             .activate(
                 ASSISTANT_KIND,
                 number,
                 expected,
                 Provenance::operator(owner),
             )
-            .await?;
-        Ok(())
+            .await;
+        match moved {
+            Ok(()) => Ok(Activation::Moved {
+                previous: expected.map(OverlayVersion::get),
+            }),
+            Err(OverlayStoreError::Conflict { actual }) => Ok(Activation::Refused {
+                actual: actual.map(OverlayVersion::get),
+            }),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Activates the version that was active before the current one, by
@@ -477,7 +514,10 @@ mod tests {
         let sent = format!("{:?}", request.messages);
         assert!(sent.contains("You have a long answer."), "{sent}");
 
-        refine.activate(1, "mark").await.unwrap();
+        assert_eq!(
+            refine.activate(1, None, "mark").await.unwrap(),
+            Activation::Moved { previous: None }
+        );
         let (active, entries) = refine.list().await.unwrap();
         assert_eq!(active, Some(1));
         assert!(entries[0].active);
@@ -558,8 +598,8 @@ mod tests {
         assert_eq!(refine.put(GUIDE, "mark").await.unwrap(), 1);
         assert_eq!(refine.put("{}", "mark").await.unwrap(), 2);
         assert!(refine.put("{\"colour\": 1}", "mark").await.is_err());
-        refine.activate(1, "mark").await.unwrap();
-        refine.activate(2, "mark").await.unwrap();
+        refine.activate(1, None, "mark").await.unwrap();
+        refine.activate(2, None, "mark").await.unwrap();
         let back = refine.rollback("mark").await.unwrap();
         assert_eq!((back.from.get(), back.to.get()), (2, 1));
         let (entry, json) = refine.show(1).await.unwrap().unwrap();
@@ -568,7 +608,7 @@ mod tests {
         assert!(json.contains("Answer in one sentence."), "{json}");
         assert!(refine.show(9).await.unwrap().is_none());
         assert!(refine.show(0).await.is_err());
-        assert!(refine.activate(9, "mark").await.is_err());
+        assert!(refine.activate(9, None, "mark").await.is_err());
     }
 
     #[test]

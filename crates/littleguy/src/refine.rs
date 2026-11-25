@@ -199,21 +199,21 @@ impl Refine {
         )
     }
 
-    /// Every version, oldest first, and the active one.
+    /// The pointer, then every version, oldest first.
     ///
     /// # Errors
     ///
     /// Returns an error when the store fails.
-    pub async fn list(&self) -> Result<(Option<u64>, Vec<OverlayEntry>)> {
-        let active = self.active().await?;
+    pub async fn list(&self) -> Result<(ExpectedPointer, Vec<OverlayEntry>)> {
+        let pointer = self.pointer().await?;
         let entries = self
             .store
             .list(ASSISTANT_KIND)
             .await?
             .iter()
-            .map(|stored| entry(stored, active))
+            .map(|stored| entry(stored, pointer.active))
             .collect();
-        Ok((active, entries))
+        Ok((pointer, entries))
     }
 
     /// The version `version` and its overlay as JSON, or `None`.
@@ -259,9 +259,10 @@ impl Refine {
     ///
     /// # Errors
     ///
-    /// Returns an error for version 0, for an unknown version, for one that
-    /// no longer fits the ceilings, or when the store fails. A pointer that
-    /// is not the expected one is [`Swap::Refused`], not an error.
+    /// Returns an error for version 0, as the version or as the expected
+    /// active version, for an unknown version, for one that no longer fits
+    /// the ceilings, or when the store fails. A pointer that is not the
+    /// expected one is [`Swap::Refused`], not an error.
     pub async fn activate(
         &self,
         version: u64,
@@ -293,10 +294,14 @@ impl Refine {
             Ok(()) => Ok(Swap::Moved {
                 previous: previous.map(OverlayVersion::get),
             }),
-            Err(OverlayStoreError::Conflict { actual }) => Ok(Swap::Refused {
-                active: actual.map(OverlayVersion::get),
-                head: self.head().await?,
-            }),
+            // The pointer is read again, whole: `actual` alone has no head.
+            Err(OverlayStoreError::Conflict { .. }) => {
+                let now = self.pointer().await?;
+                Ok(Swap::Refused {
+                    active: now.active,
+                    head: now.head,
+                })
+            }
             Err(error) => Err(error.into()),
         }
     }
@@ -353,18 +358,27 @@ impl Refine {
         Ok(Some(version.get()))
     }
 
-    /// The `seq` of the last move of the pointer, or `None` before the
-    /// first move.
+    /// The active version and the `seq` of the last move, from one read.
+    ///
+    /// Each move logs a row in its swap transaction, so the last row names
+    /// the active version and the head together. Two reads could pair an
+    /// old version with a newer head. Before the first move, the log is
+    /// empty, and the store names the active version.
     ///
     /// # Errors
     ///
     /// Returns an error when the store fails.
-    pub async fn head(&self) -> Result<Option<u64>> {
-        Ok(self
-            .store
-            .last_activation(ASSISTANT_KIND)
-            .await?
-            .map(|activation| activation.seq()))
+    pub async fn pointer(&self) -> Result<ExpectedPointer> {
+        Ok(match self.store.last_activation(ASSISTANT_KIND).await? {
+            Some(last) => ExpectedPointer {
+                active: Some(last.to().get()),
+                head: Some(last.seq()),
+            },
+            None => ExpectedPointer {
+                active: self.active().await?,
+                head: None,
+            },
+        })
     }
 
     /// The number of the active version, or `None`.
@@ -528,7 +542,8 @@ mod tests {
             overlay.guardrails.as_deref(),
             Some("Answer in one sentence.")
         );
-        let (active, entries) = refine.list().await.unwrap();
+        let (pointer, entries) = refine.list().await.unwrap();
+        let active = pointer.active;
         assert_eq!(active, None, "a proposal never activates itself");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].author, format!("operator:{PROPOSER_ID}"));
@@ -541,7 +556,8 @@ mod tests {
             refine.activate(1, None, "mark").await.unwrap(),
             Swap::Moved { previous: None }
         );
-        let (active, entries) = refine.list().await.unwrap();
+        let (pointer, entries) = refine.list().await.unwrap();
+        let active = pointer.active;
         assert_eq!(active, Some(1));
         assert!(entries[0].active);
     }
@@ -565,7 +581,8 @@ mod tests {
             None,
             "no change"
         );
-        let (active, entries) = refine.list().await.unwrap();
+        let (pointer, entries) = refine.list().await.unwrap();
+        let active = pointer.active;
         assert_eq!(active, Some(1), "a skills sync activates its version");
         assert_eq!(entries[0].author, format!("operator:{SKILLS_ID}"));
 

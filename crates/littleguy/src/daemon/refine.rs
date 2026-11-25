@@ -106,11 +106,10 @@ async fn answer(
             Proposal::Kept => Response::Kept,
         },
         Request::Overlays => {
-            let (active, entries) = refine.list().await?;
-            let head = refine.head().await?;
+            let (pointer, entries) = refine.list().await?;
             Response::Overlays {
-                active,
-                head,
+                active: pointer.active,
+                head: pointer.head,
                 entries,
             }
         }

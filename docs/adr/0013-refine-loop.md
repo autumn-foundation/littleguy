@@ -39,18 +39,20 @@ one by replay and picks a winner. littleguy cannot use it as it stands:
   the model of the assistant, for one overlay of the configured dimension.
   A reply that does not decode, or does not fit the ceilings, goes back
   with its reason, up to three attempts. `KEEP_BASE` stores nothing.
-- **A person activates each version.** A proposal is stored as an inactive
-  version by the operator `lg-refine`. Only `lg refine activate` moves the
-  pointer, as the owner. `lg refine rollback` moves it back. There is no
-  auto adoption, so the engine's daily cap and approval timeout do not
-  apply yet.
+- **The owner activates each version.** A proposal is stored as an
+  inactive version by the operator `lg-refine`. Only the owner moves the
+  pointer: with `lg refine activate`, on the web pages, or as a program
+  on the owner's socket (see below). `lg refine rollback` moves it back.
+  There is no auto adoption, so the engine's daily cap and approval
+  timeout do not apply yet.
 - **An activation can name the pointer it read** (amended 2026-11-25).
   A program that owns the daemon, such as a game that refines its
   characters, reads `overlays` and then activates. A person can roll back
   or activate on the web pages in between, and the person's choice must
   win. So `overlays` also answers `head`, the `seq` of the last move of
-  the pointer, and `overlay_activate` takes an optional
-  `expected: {"active": A, "head": H}` copied from that answer. Both keys
+  the pointer, read with the active version from the same log row. And
+  `overlay_activate` takes an optional `expected: {"active": A, "head":
+  H}`, copied from that answer. Both keys
   are required, and `null` means no active version or no move yet, as in
   `overlays`. The daemon calls the store's `activate_guarded`, which
   checks both in the swap transaction. Any move after the read refuses

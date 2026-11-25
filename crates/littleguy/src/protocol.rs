@@ -51,15 +51,6 @@ where
     ExpectedPointer::deserialize(deserializer).map(Some)
 }
 
-/// `false`, so the field stays off the wire.
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde passes the field by reference"
-)]
-const fn is_false(value: &bool) -> bool {
-    !*value
-}
-
 /// One request to the daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -745,7 +736,7 @@ pub enum Response {
         /// The daemon checked the `expected` pointer of the request. A
         /// caller that sent `expected` and gets no `guarded` talks to an
         /// older daemon, which moved the pointer unchecked.
-        #[serde(default, skip_serializing_if = "is_false")]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         guarded: bool,
     },
     /// The pointer moved after the caller read it, so it did not move
@@ -967,9 +958,11 @@ mod tests {
             previous: Some(1),
             guarded,
         };
+        let guarded = serde_json::json!({"kind": "overlay_active", "version": 2, "previous": 1, "guarded": true});
+        assert_eq!(serde_json::to_value(active(true)).unwrap(), guarded);
         assert_eq!(
-            serde_json::to_value(active(true)).unwrap(),
-            serde_json::json!({"kind": "overlay_active", "version": 2, "previous": 1, "guarded": true})
+            serde_json::from_value::<Response>(guarded).unwrap(),
+            active(true)
         );
         // An older daemon writes no `guarded`, and it reads as unchecked.
         let unguarded = serde_json::json!({"kind": "overlay_active", "version": 2, "previous": 1});
@@ -978,15 +971,16 @@ mod tests {
             serde_json::from_value::<Response>(unguarded).unwrap(),
             active(false)
         );
-        assert_eq!(
-            serde_json::to_value(Response::OverlayMoved {
+        for (active, head) in [(Some(1), Some(6)), (None, None)] {
+            let moved = Response::OverlayMoved {
                 version: 3,
-                active: Some(1),
-                head: None,
-            })
-            .unwrap(),
-            serde_json::json!({"kind": "overlay_moved", "version": 3, "active": 1, "head": null})
-        );
+                active,
+                head,
+            };
+            let json = serde_json::json!({"kind": "overlay_moved", "version": 3, "active": active, "head": head});
+            assert_eq!(serde_json::to_value(&moved).unwrap(), json);
+            assert_eq!(serde_json::from_value::<Response>(json).unwrap(), moved);
+        }
     }
 
     #[test]

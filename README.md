@@ -1010,7 +1010,6 @@ lg refine propose      # the model writes an overlay; it is not active
 lg refine list         # every version; * marks the active one
 lg refine show 1       # the overlay JSON
 lg refine activate 1   # the next message runs on it
-lg refine activate 2 --expected 1   # only if v1 is still the active one
 lg refine rollback     # back to the version before
 lg refine put base.json   # your own overlay; {} is the config profile
 ```

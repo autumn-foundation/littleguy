@@ -1797,7 +1797,7 @@ async fn overlays_section(web: &Web, notice: Option<Markup>) -> Markup {
             h2 { "Refine" }
             @if let Some(notice) = notice { (notice) }
             @match &answer {
-                Answer::Overlays { active, entries } => {
+                Answer::Overlays { active, entries, .. } => {
                     @if entries.is_empty() { p.note { "No overlay versions yet." } }
                     @else { ul { @for entry in entries { (overlay_line(entry)) } } }
                     @if active.is_none() { p.note { "No version is active: the assistant runs on its config." } }

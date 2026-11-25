@@ -3,7 +3,7 @@
 ## Status
 
 Accepted, 2026-11-10. Amended 2026-11-25: an activation can name the
-version it expects to replace.
+pointer it read, and it moves only when no move came in between.
 
 ## Context
 
@@ -44,19 +44,26 @@ one by replay and picks a winner. littleguy cannot use it as it stands:
   pointer, as the owner. `lg refine rollback` moves it back. There is no
   auto adoption, so the engine's daily cap and approval timeout do not
   apply yet.
-- **An activation can name the version it expects** (amended
-  2026-11-25). `overlay_activate` takes an optional `expected`: `"none"`
-  or `{"version": N}`, the active version that the caller read. The daemon
-  passes it to the store's compare-and-swap, which checks it in the swap
-  transaction. When another version is active, the pointer does not move,
-  and the answer is `overlay_moved` with the expected and the actual
-  version. A program that owns the daemon, such as a game that refines its
-  characters, needs this: a person can roll back or activate on the web
-  pages between its read and its activate, and the person's choice must
-  win. With no `expected`, the daemon reads the active version itself, as
-  before, and a move between that read and the swap is an error.
-  `lg refine activate N --expected M` (or `--expected none`) sends it from
-  the command line. The web pages send none.
+- **An activation can name the pointer it read** (amended 2026-11-25).
+  A program that owns the daemon, such as a game that refines its
+  characters, reads `overlays` and then activates. A person can roll back
+  or activate on the web pages in between, and the person's choice must
+  win. So `overlays` also answers `head`, the `seq` of the last move of
+  the pointer, and `overlay_activate` takes an optional
+  `expected: {"active": A, "head": H}` copied from that answer. Both keys
+  are required, and `null` means no active version or no move yet, as in
+  `overlays`. The daemon calls the store's `activate_guarded`, which
+  checks both in the swap transaction. Any move after the read refuses
+  the activation, also a move away and back to the same version, because
+  each move raises the head. A refusal is `overlay_moved` with the
+  pointer as it is now, and nothing changes. A guarded move answers
+  `overlay_active` with `guarded: true`. An older daemon drops
+  `expected` and moves the pointer unchecked, so a caller that sent
+  `expected` and gets no `guarded` knows that the move was not checked.
+  With no `expected`, the daemon reads the active version itself just
+  before the swap, as before, and a move after the caller read
+  `overlays` goes unseen. `lg refine activate` and the web pages send no
+  `expected`: a person acts on the page in front of them.
 - **The owner can write a version too.** `lg refine put <file>` stores an
   overlay JSON file. `{}` is the config profile with no change, so an owner
   turns every overlay off by putting and activating it.
@@ -79,8 +86,8 @@ sequenceDiagram
   D->>M: ModelProposer request
   M-->>D: overlay JSON
   D->>S: put (validated, inactive)
-  O->>D: lg refine activate N [--expected M]
-  D->>S: move the pointer if M is active
+  O->>D: lg refine activate N
+  D->>S: move the pointer
   A->>S: read the active overlay at the next op
 ```
 

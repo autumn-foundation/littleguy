@@ -60,7 +60,8 @@ pub async fn send(socket: &Path, request: &Request) -> Result<Response> {
     serde_json::from_str(&answer).context("the answer is not valid")
 }
 
-/// `version` of an overlay for a person: `vN`, or `none`.
+/// Writes `version` of an overlay for a person: `vN`, or `none`.
+#[must_use]
 pub fn show_version(version: Option<u64>) -> String {
     version.map_or_else(|| String::from("none"), |version| format!("v{version}"))
 }
@@ -134,7 +135,9 @@ pub fn render(response: &Response) -> (String, bool) {
             String::from("the proposer kept the active overlay. Nothing was stored"),
             true,
         ),
-        Response::Overlays { active, entries } => (render_overlays(*active, entries), true),
+        Response::Overlays {
+            active, entries, ..
+        } => (render_overlays(*active, entries), true),
         Response::Overlay { entry, overlay } => {
             (format!("{}\n{overlay}", render_overlay_line(entry)), true)
         }
@@ -145,7 +148,9 @@ pub fn render(response: &Response) -> (String, bool) {
             ),
             true,
         ),
-        Response::OverlayActive { version, previous } => (
+        Response::OverlayActive {
+            version, previous, ..
+        } => (
             match previous {
                 Some(previous) if previous != version => format!(
                     "the assistant runs on overlay version {version} from its next message \
@@ -158,15 +163,13 @@ pub fn render(response: &Response) -> (String, bool) {
             true,
         ),
         Response::OverlayMoved {
-            version,
-            expected,
-            actual,
+            version, active, ..
         } => (
             format!(
-                "the active overlay is {}, not {}, so version {version} is not active. \
-                 Nothing changed. Run `lg refine list` and decide again",
-                show_version(*actual),
-                show_version(*expected),
+                "the overlay pointer moved after you read it, and {} is active now, \
+                 so version {version} is not active. Nothing changed. \
+                 Run `lg refine list` and decide again",
+                show_version(*active),
             ),
             false,
         ),
@@ -705,6 +708,7 @@ mod tests {
     fn overlays_print_one_line_each_and_mark_the_active_one() {
         let (text, ok) = render(&Response::Overlays {
             active: Some(2),
+            head: None,
             entries: vec![overlay(1, false, &["system"]), overlay(2, true, &[])],
         });
         assert!(ok);
@@ -715,11 +719,13 @@ mod tests {
         );
         let (none, _) = render(&Response::Overlays {
             active: None,
+            head: None,
             entries: vec![overlay(1, false, &["system"])],
         });
         assert!(none.ends_with("the assistant runs on its config"), "{none}");
         let (empty, _) = render(&Response::Overlays {
             active: None,
+            head: None,
             entries: Vec::new(),
         });
         assert!(empty.contains("lg refine propose"), "{empty}");
@@ -739,29 +745,31 @@ mod tests {
         let (text, _) = render(&Response::OverlayActive {
             version: 1,
             previous: Some(2),
+            guarded: false,
         });
         assert!(text.contains("(was 2)"), "{text}");
         let (text, _) = render(&Response::OverlayActive {
             version: 1,
             previous: None,
+            guarded: false,
         });
         assert!(!text.contains("was"), "{text}");
         let (text, ok) = render(&Response::OverlayMoved {
             version: 3,
-            expected: Some(1),
-            actual: Some(2),
+            active: Some(2),
+            head: Some(9),
         });
         assert!(!ok, "a refused activation fails the command");
         assert!(
-            text.contains("is v2, not v1") && text.contains("version 3 is not active"),
+            text.contains("v2 is active now") && text.contains("version 3 is not active"),
             "{text}"
         );
         let (text, _) = render(&Response::OverlayMoved {
             version: 1,
-            expected: None,
-            actual: Some(4),
+            active: None,
+            head: Some(4),
         });
-        assert!(text.contains("is v4, not none"), "{text}");
+        assert!(text.contains("none is active now"), "{text}");
         let (text, _) = render(&Response::Overlay {
             entry: overlay(1, true, &["guardrails"]),
             overlay: String::from("{\"guardrails\": \"x\"}"),

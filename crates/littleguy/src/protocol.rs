@@ -7,7 +7,9 @@
 //!
 //! Other programs of the same user read it too, such as a table that runs
 //! each character as an `lg serve`. So a new field is optional: an older
-//! reader ignores it, and a reply from an older daemon leaves it out.
+//! reader ignores it, and a reply from an older daemon leaves it out. A new
+//! request field that guards an action comes back confirmed in the answer,
+//! because an older daemon drops it and acts unguarded.
 //!
 //! One request has more than one response line: `chat_stream` gets a
 //! [`Piece`] line for each piece of text while the model writes, then the
@@ -18,34 +20,44 @@ use serde::{Deserialize, Serialize};
 /// The largest request line, in bytes. A longer line is refused unread.
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
-/// The active overlay version that `overlay_activate` expects (ADR 0013).
+/// The overlay pointer that `overlay_activate` expects (ADR 0013). A
+/// caller copies both fields from the `overlays` answer that it read.
 ///
-/// On the wire, `"none"` names no active version and `{"version": 3}`
-/// names version 3.
+/// Both fields are required, and `null` means the same as in `overlays`:
+/// no active version, or no move yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExpectedActive {
-    /// No version is active.
-    None,
-    /// This version is active.
-    Version(u64),
+#[serde(deny_unknown_fields)]
+pub struct ExpectedPointer {
+    /// The active version, or `None`. It is `active` of `overlays`.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub active: Option<u64>,
+    /// The `seq` of the last move of the pointer, or `None` before the
+    /// first move. It is `head` of `overlays`. A move away and back
+    /// changes it, while the active version looks the same.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub head: Option<u64>,
 }
 
-impl ExpectedActive {
-    /// The expected version, or `None` for no active version.
-    #[must_use]
-    pub const fn version(self) -> Option<u64> {
-        match self {
-            Self::None => None,
-            Self::Version(version) => Some(version),
-        }
-    }
+/// An `expected` that is present. An explicit `null` is an error, so it
+/// never falls back to an unchecked activation.
+///
+/// # Errors
+///
+/// Returns the error of the deserializer, also for `null`.
+fn present<'de, D>(deserializer: D) -> Result<Option<ExpectedPointer>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    ExpectedPointer::deserialize(deserializer).map(Some)
 }
 
-impl From<Option<u64>> for ExpectedActive {
-    fn from(version: Option<u64>) -> Self {
-        version.map_or(Self::None, Self::Version)
-    }
+/// `false`, so the field stays off the wire.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One request to the daemon.
@@ -128,13 +140,19 @@ pub enum Request {
     OverlayActivate {
         /// The version.
         version: u64,
-        /// The active version that the caller read. The pointer moves only
-        /// when it is still that version, in the same transaction as the
-        /// move. Otherwise the answer is `overlay_moved`, and nothing
-        /// changes. With no `expected`, the daemon reads the active version
-        /// itself, so a move by someone else in between goes unseen.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected: Option<ExpectedActive>,
+        /// The pointer that the caller read. With it, the pointer moves
+        /// only when no move came in between, and the store checks that in
+        /// the swap transaction. Otherwise the answer is `overlay_moved`,
+        /// and nothing changes. With no `expected`, the daemon reads the
+        /// pointer itself, so a move after the caller read `overlays` goes
+        /// unseen. An older daemon drops this field, so the answer says
+        /// `guarded` when the daemon checked it.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present"
+        )]
+        expected: Option<ExpectedPointer>,
     },
     /// Activate the version that was active before. Only the owner may.
     OverlayRollback,
@@ -699,6 +717,10 @@ pub enum Response {
     Overlays {
         /// The active version, if any.
         active: Option<u64>,
+        /// The `seq` of the last move of the pointer, or `None` before the
+        /// first move. An `overlay_activate` passes it back in `expected`.
+        #[serde(default)]
+        head: Option<u64>,
         /// Each version, oldest first.
         entries: Vec<OverlayEntry>,
     },
@@ -720,16 +742,21 @@ pub enum Response {
         version: u64,
         /// The version that was active before, if any.
         previous: Option<u64>,
+        /// The daemon checked the `expected` pointer of the request. A
+        /// caller that sent `expected` and gets no `guarded` talks to an
+        /// older daemon, which moved the pointer unchecked.
+        #[serde(default, skip_serializing_if = "is_false")]
+        guarded: bool,
     },
-    /// The active overlay was not the expected version, so the pointer
-    /// did not move. Only an `overlay_activate` with `expected` gets it.
+    /// The pointer moved after the caller read it, so it did not move
+    /// now. Only an `overlay_activate` with `expected` gets it.
     OverlayMoved {
         /// The version that the request named.
         version: u64,
-        /// The version that the request expected, if any.
-        expected: Option<u64>,
-        /// The active version at the time of the refusal, if any.
-        actual: Option<u64>,
+        /// The active version now, if any, as `overlays` names it.
+        active: Option<u64>,
+        /// The `seq` of the last move now, if any, as `overlays` names it.
+        head: Option<u64>,
     },
     /// The daemon read its config file again.
     Reloaded {
@@ -872,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn an_activation_names_its_expected_version_on_the_wire() {
+    fn an_activation_names_the_pointer_it_read_on_the_wire() {
         let request = |expected| Request::OverlayActivate {
             version: 3,
             expected,
@@ -885,32 +912,80 @@ mod tests {
         let old: Request =
             serde_json::from_str(r#"{"kind":"overlay_activate","version":3}"#).unwrap();
         assert_eq!(old, request(None));
-        for (expected, json) in [
-            (
-                ExpectedActive::Version(2),
-                serde_json::json!({"kind": "overlay_activate", "version": 3, "expected": {"version": 2}}),
-            ),
-            (
-                ExpectedActive::None,
-                serde_json::json!({"kind": "overlay_activate", "version": 3, "expected": "none"}),
-            ),
-        ] {
+        for (active, head) in [(Some(2), Some(7)), (None, None)] {
+            let expected = ExpectedPointer { active, head };
+            let json = serde_json::json!({
+                "kind": "overlay_activate",
+                "version": 3,
+                "expected": {"active": active, "head": head},
+            });
             assert_eq!(serde_json::to_value(request(Some(expected))).unwrap(), json);
             let back: Request = serde_json::from_value(json).unwrap();
             assert_eq!(back, request(Some(expected)));
         }
-        assert_eq!(ExpectedActive::from(Some(2)), ExpectedActive::Version(2));
-        assert_eq!(ExpectedActive::from(None), ExpectedActive::None);
-        assert_eq!(ExpectedActive::Version(2).version(), Some(2));
-        assert_eq!(ExpectedActive::None.version(), None);
+    }
+
+    #[test]
+    fn a_partial_or_null_expected_pointer_is_refused() {
+        for line in [
+            // `null` never falls back to an unchecked activation.
+            r#"{"kind":"overlay_activate","version":3,"expected":null}"#,
+            // A copy of `active` alone misses a move away and back.
+            r#"{"kind":"overlay_activate","version":3,"expected":{"active":2}}"#,
+            r#"{"kind":"overlay_activate","version":3,"expected":{"head":7}}"#,
+            r#"{"kind":"overlay_activate","version":3,"expected":2}"#,
+            r#"{"kind":"overlay_activate","version":3,"expected":{"active":2,"head":7,"x":1}}"#,
+        ] {
+            assert!(serde_json::from_str::<Request>(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_answers_carry_the_pointer_and_the_guard() {
+        // `head` is always on the wire, so `null` reads as no move yet.
+        assert_eq!(
+            serde_json::to_value(Response::Overlays {
+                active: None,
+                head: None,
+                entries: Vec::new(),
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "overlays", "active": null, "head": null, "entries": []})
+        );
+        let older: Response =
+            serde_json::from_str(r#"{"kind":"overlays","active":1,"entries":[]}"#).unwrap();
+        assert_eq!(
+            older,
+            Response::Overlays {
+                active: Some(1),
+                head: None,
+                entries: Vec::new(),
+            }
+        );
+        let active = |guarded| Response::OverlayActive {
+            version: 2,
+            previous: Some(1),
+            guarded,
+        };
+        assert_eq!(
+            serde_json::to_value(active(true)).unwrap(),
+            serde_json::json!({"kind": "overlay_active", "version": 2, "previous": 1, "guarded": true})
+        );
+        // An older daemon writes no `guarded`, and it reads as unchecked.
+        let unguarded = serde_json::json!({"kind": "overlay_active", "version": 2, "previous": 1});
+        assert_eq!(serde_json::to_value(active(false)).unwrap(), unguarded);
+        assert_eq!(
+            serde_json::from_value::<Response>(unguarded).unwrap(),
+            active(false)
+        );
         assert_eq!(
             serde_json::to_value(Response::OverlayMoved {
                 version: 3,
-                expected: Some(1),
-                actual: None,
+                active: Some(1),
+                head: None,
             })
             .unwrap(),
-            serde_json::json!({"kind": "overlay_moved", "version": 3, "expected": 1, "actual": null})
+            serde_json::json!({"kind": "overlay_moved", "version": 3, "active": 1, "head": null})
         );
     }
 
@@ -984,11 +1059,17 @@ mod tests {
             },
             Request::OverlayActivate {
                 version: 2,
-                expected: Some(ExpectedActive::Version(1)),
+                expected: Some(ExpectedPointer {
+                    active: Some(1),
+                    head: Some(4),
+                }),
             },
             Request::OverlayActivate {
                 version: 1,
-                expected: Some(ExpectedActive::None),
+                expected: Some(ExpectedPointer {
+                    active: None,
+                    head: None,
+                }),
             },
             Request::OverlayRollback,
             Request::History,

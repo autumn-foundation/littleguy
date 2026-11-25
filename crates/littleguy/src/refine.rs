@@ -27,7 +27,7 @@ use autumn_harvest_agent::{
 };
 use littleguy_core::{ASSISTANT_KIND, RefineConfig, RefineDimension};
 
-use crate::protocol::{ExpectedActive, OverlayEntry};
+use crate::protocol::{ExpectedPointer, OverlayEntry};
 
 /// The file of the overlay store, next to the database.
 pub const FILE_NAME: &str = "overlays.db";
@@ -68,17 +68,19 @@ pub enum Proposal {
 
 /// The outcome of one activation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Activation {
+pub enum Swap {
     /// The version is active now. `previous` was active before, if any. It
     /// equals the version when that version was already active.
     Moved {
         /// The version that was active before.
         previous: Option<u64>,
     },
-    /// The active version was not the expected one. Nothing changed.
+    /// The pointer was not the expected one. Nothing changed.
     Refused {
-        /// The active version at the time of the refusal.
-        actual: Option<u64>,
+        /// The active version after the refusal, if any.
+        active: Option<u64>,
+        /// The `seq` of the last move after the refusal, if any.
+        head: Option<u64>,
     },
 }
 
@@ -246,47 +248,54 @@ impl Refine {
         Ok(version.get())
     }
 
-    /// Makes `version` the active version, by `owner`, when the active
-    /// version is `expected`. The store checks `expected` in the swap
-    /// transaction, so a move by anyone else after the caller read the
-    /// pointer refuses the activation. With no `expected`, the active
-    /// version just before the swap is the expected one.
+    /// Makes `version` the active version, by `owner`.
+    ///
+    /// With `expected`, the pointer moves only when its active version and
+    /// its last move are still the ones that the caller read. The store
+    /// checks both in the swap transaction, so any move after the read
+    /// refuses the activation, also a move away and back. With no
+    /// `expected`, the active version just before the swap is the expected
+    /// one.
     ///
     /// # Errors
     ///
     /// Returns an error for version 0, for an unknown version, for one that
     /// no longer fits the ceilings, or when the store fails. A pointer that
-    /// is not the expected version is [`Activation::Refused`], not an error.
+    /// is not the expected one is [`Swap::Refused`], not an error.
     pub async fn activate(
         &self,
         version: u64,
-        expected: Option<ExpectedActive>,
+        expected: Option<ExpectedPointer>,
         owner: &str,
-    ) -> Result<Activation> {
+    ) -> Result<Swap> {
         let number = number(version)?;
-        let expected = match expected {
-            Some(expected) => expected.version().map(self::number).transpose()?,
-            None => self
+        let actor = Provenance::operator(owner);
+        let (previous, moved) = if let Some(expected) = expected {
+            let active = expected.active.map(self::number).transpose()?;
+            let moved = self
+                .store
+                .activate_guarded(ASSISTANT_KIND, number, active, expected.head, actor)
+                .await;
+            (active, moved)
+        } else {
+            let active = self
                 .store
                 .active(ASSISTANT_KIND)
                 .await?
-                .map(|stored| stored.version()),
+                .map(|stored| stored.version());
+            let moved = self
+                .store
+                .activate(ASSISTANT_KIND, number, active, actor)
+                .await;
+            (active, moved)
         };
-        let moved = self
-            .store
-            .activate(
-                ASSISTANT_KIND,
-                number,
-                expected,
-                Provenance::operator(owner),
-            )
-            .await;
         match moved {
-            Ok(()) => Ok(Activation::Moved {
-                previous: expected.map(OverlayVersion::get),
+            Ok(()) => Ok(Swap::Moved {
+                previous: previous.map(OverlayVersion::get),
             }),
-            Err(OverlayStoreError::Conflict { actual }) => Ok(Activation::Refused {
-                actual: actual.map(OverlayVersion::get),
+            Err(OverlayStoreError::Conflict { actual }) => Ok(Swap::Refused {
+                active: actual.map(OverlayVersion::get),
+                head: self.head().await?,
             }),
             Err(error) => Err(error.into()),
         }
@@ -342,6 +351,20 @@ impl Refine {
             )
             .await?;
         Ok(Some(version.get()))
+    }
+
+    /// The `seq` of the last move of the pointer, or `None` before the
+    /// first move.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store fails.
+    pub async fn head(&self) -> Result<Option<u64>> {
+        Ok(self
+            .store
+            .last_activation(ASSISTANT_KIND)
+            .await?
+            .map(|activation| activation.seq()))
     }
 
     /// The number of the active version, or `None`.
@@ -516,7 +539,7 @@ mod tests {
 
         assert_eq!(
             refine.activate(1, None, "mark").await.unwrap(),
-            Activation::Moved { previous: None }
+            Swap::Moved { previous: None }
         );
         let (active, entries) = refine.list().await.unwrap();
         assert_eq!(active, Some(1));

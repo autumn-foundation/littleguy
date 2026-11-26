@@ -4,6 +4,7 @@
 
 Accepted, 2026-11-10. Amended 2026-11-25: an activation can name the
 pointer it read, and it moves only when no move came in between.
+Amended 2026-11-26: `overlay_active` names the head of its move.
 
 ## Context
 
@@ -62,10 +63,30 @@ one by replay and picks a winner. littleguy cannot use it as it stands:
   `overlay_active` with `guarded: true`. An older daemon drops
   `expected` and moves the pointer unchecked, so a caller that sent
   `expected` and gets no `guarded` knows that the move was not checked.
-  With no `expected`, the daemon reads the active version itself just
-  before the swap, as before, and a move after the caller read
-  `overlays` goes unseen. `lg refine activate` and the web pages send no
-  `expected`: a person acts on the page in front of them.
+  With no `expected`, the daemon reads the pointer itself just before
+  the swap, as before, and a move after the caller read `overlays` goes
+  unseen. `lg refine activate` and the web pages send no `expected`: a
+  person acts on the page in front of them.
+- **An activation answer names the head of its move** (amended
+  2026-11-26). The owning program stores the pointer of its own move,
+  and on its next pass it compares that with `overlays`. A person who
+  moves away and back leaves the same version active, so only the head
+  shows the move. A second read of `overlays` after the move races such a
+  move, so `overlay_active` carries `head`: the `seq` of the move that
+  it reports, or the head as it stands when the version was already
+  active and nothing moved. `overlay_rollback` answers the same. The
+  caller stores it and compares it with the next `overlays.head`. The
+  engine store returns no `seq` from a swap, so the daemon reads the
+  pointer again right after the swap, in the same job. The loop runs one
+  job at a time, but another process on the same `overlays.db` can move
+  in between. The store numbers the moves of a kind 1, 2, 3 and so on, so
+  the daemon answers the head only when the version is the one just made
+  active and the head is one past the head before the swap, or the same
+  head for no move. Otherwise the answer leaves `head` out, so it never
+  names the head of a later move. The field is optional: an older reader
+  ignores it, and an older daemon leaves it out. A caller with no `head`
+  reads `overlays` again and loses only the check of a move away and
+  back in between.
 - **The owner can write a version too.** `lg refine put <file>` stores an
   overlay JSON file. `{}` is the config profile with no change, so an owner
   turns every overlay off by putting and activating it.

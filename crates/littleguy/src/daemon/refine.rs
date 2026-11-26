@@ -129,9 +129,10 @@ async fn answer(
         Request::OverlayRollback => {
             let back = refine.rollback(&owner).await?;
             Response::OverlayActive {
-                version: back.to.get(),
-                previous: Some(back.from.get()),
+                version: back.to,
+                previous: Some(back.from),
                 guarded: false,
+                head: back.head,
             }
         }
         other => Response::Error {
@@ -144,10 +145,11 @@ async fn answer(
 /// `guarded` says whether the request sent `expected`.
 fn activated(version: u64, guarded: bool, swap: Swap) -> Response {
     match swap {
-        Swap::Moved { previous } => Response::OverlayActive {
+        Swap::Moved { previous, head } => Response::OverlayActive {
             version,
             previous,
             guarded,
+            head,
         },
         Swap::Refused { active, head } if guarded => Response::OverlayMoved {
             version,
@@ -265,6 +267,7 @@ mod tests {
                 version: 1,
                 previous: None,
                 guarded: false,
+                head: Some(1),
             }
         );
         let after = say(&mut daemon, "m-3").await;
@@ -306,6 +309,7 @@ mod tests {
                 version: 1,
                 previous: Some(2),
                 guarded: false,
+                head: Some(3),
             }
         );
         let pirate = say(&mut daemon, "m-2").await;
@@ -389,6 +393,7 @@ mod tests {
                 version: 1,
                 previous: None,
                 guarded: true,
+                head: Some(1),
             }
         );
         let read = pointer(&mut daemon).await;
@@ -400,6 +405,7 @@ mod tests {
                 version: 2,
                 previous: Some(1),
                 guarded: true,
+                head: Some(2),
             }
         );
         // The active version again, from a fresh read, is no move.
@@ -410,6 +416,7 @@ mod tests {
                 version: 2,
                 previous: Some(2),
                 guarded: true,
+                head: Some(2),
             }
         );
         assert_eq!(pointer(&mut daemon).await, read, "nothing moved");
@@ -420,6 +427,7 @@ mod tests {
                 version: 3,
                 previous: Some(2),
                 guarded: false,
+                head: Some(3),
             }
         );
     }
@@ -477,8 +485,66 @@ mod tests {
                 version: 3,
                 previous: Some(1),
                 guarded: true,
+                head: Some(4),
             }
         );
+    }
+
+    /// The head that an `overlay_active` answer names.
+    fn answered_head(answer: &Response) -> Option<u64> {
+        match answer {
+            Response::OverlayActive { head, .. } => *head,
+            _ => panic!("expected an overlay_active answer"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_move_answers_the_head_that_overlays_names_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(dir.path(), true);
+        put_versions(&mut daemon, 2).await;
+
+        // A guarded activation.
+        let read = pointer(&mut daemon).await;
+        let head = answered_head(&activate(&mut daemon, 1, Some(read)).await);
+        assert!(head.is_some(), "a guarded move names its head");
+        assert_eq!(pointer(&mut daemon).await.head, head, "the next head");
+        // An unguarded activation.
+        let head = answered_head(&activate(&mut daemon, 2, None).await);
+        assert!(head.is_some(), "an unguarded move names its head");
+        assert_eq!(pointer(&mut daemon).await.head, head, "the next head");
+        // The active version again is no move, so the head stays.
+        let read = pointer(&mut daemon).await;
+        let head = answered_head(&activate(&mut daemon, 2, Some(read)).await);
+        assert_eq!(head, read.head, "a guarded no move keeps the head");
+        let head = answered_head(&activate(&mut daemon, 2, None).await);
+        assert_eq!(head, read.head, "an unguarded no move keeps the head");
+        assert_eq!(pointer(&mut daemon).await, read, "nothing moved");
+        // A rollback.
+        let back = daemon.handle_request(UID, Request::OverlayRollback).await;
+        let head = answered_head(&back);
+        assert!(head.is_some(), "a rollback names its head");
+        assert_ne!(head, read.head, "a rollback is a move");
+        assert_eq!(pointer(&mut daemon).await.head, head, "the next head");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stored_head_sees_a_move_away_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = open(dir.path(), true);
+        put_versions(&mut daemon, 2).await;
+        activate(&mut daemon, 1, None).await;
+
+        // An owning program moves to v2 and stores the head of its move.
+        let read = pointer(&mut daemon).await;
+        let stored = answered_head(&activate(&mut daemon, 2, Some(read)).await);
+        assert_eq!(pointer(&mut daemon).await.head, stored, "no move yet");
+        // A person tries v1, then rolls back to v2.
+        activate(&mut daemon, 1, None).await;
+        daemon.handle_request(UID, Request::OverlayRollback).await;
+        let now = pointer(&mut daemon).await;
+        assert_eq!(now.active, Some(2), "the same version is active");
+        assert_ne!(now.head, stored, "the stored head shows the move");
     }
 
     #[tokio::test(flavor = "multi_thread")]

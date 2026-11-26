@@ -727,7 +727,8 @@ pub enum Response {
         /// The version.
         version: u64,
     },
-    /// The assistant runs on `version` from its next op.
+    /// The assistant runs on `version` from its next op. Both
+    /// `overlay_activate` and `overlay_rollback` get it.
     OverlayActive {
         /// The active version.
         version: u64,
@@ -738,6 +739,19 @@ pub enum Response {
         /// older daemon, which moved the pointer unchecked.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         guarded: bool,
+        /// The `seq` of the move that this answer reports. When the version
+        /// was already active and nothing moved, it is the head as it
+        /// stands. A caller stores it and compares it with `head` of the
+        /// next `overlays`: a different head means that someone moved the
+        /// pointer after this answer, also away and back to the same
+        /// version. A second read of `overlays` races such a move, so the
+        /// answer carries the head of its own move.
+        ///
+        /// It is absent before the first move, from an older daemon, and
+        /// when the daemon cannot tell that the head belongs to this move.
+        /// The daemon never names the head of a later move.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<u64>,
     },
     /// The pointer moved after the caller read it, so it did not move
     /// now. Only an `overlay_activate` with `expected` gets it.
@@ -957,6 +971,7 @@ mod tests {
             version: 2,
             previous: Some(1),
             guarded,
+            head: None,
         };
         let guarded = serde_json::json!({"kind": "overlay_active", "version": 2, "previous": 1, "guarded": true});
         assert_eq!(serde_json::to_value(active(true)).unwrap(), guarded);
@@ -981,6 +996,53 @@ mod tests {
             assert_eq!(serde_json::to_value(&moved).unwrap(), json);
             assert_eq!(serde_json::from_value::<Response>(json).unwrap(), moved);
         }
+    }
+
+    #[test]
+    fn an_activation_answer_names_the_head_of_its_move() {
+        let with_head = Response::OverlayActive {
+            version: 2,
+            previous: Some(1),
+            guarded: true,
+            head: Some(7),
+        };
+        let json = serde_json::json!({
+            "kind": "overlay_active", "version": 2, "previous": 1, "guarded": true, "head": 7,
+        });
+        assert_eq!(serde_json::to_value(&with_head).unwrap(), json);
+        let back: Response = serde_json::from_value(json).unwrap();
+        assert!(
+            matches!(back, Response::OverlayActive { head: Some(7), .. }),
+            "the head reads back as 7"
+        );
+        // No head stays off the wire, so an older reader sees the old line.
+        let no_head = serde_json::to_value(Response::OverlayActive {
+            version: 2,
+            previous: Some(1),
+            guarded: false,
+            head: None,
+        })
+        .unwrap();
+        assert_eq!(
+            no_head,
+            serde_json::json!({"kind": "overlay_active", "version": 2, "previous": 1})
+        );
+        // A reply from an older daemon has no head, and it reads as none.
+        let older: Response = serde_json::from_str(
+            r#"{"kind":"overlay_active","version":2,"previous":1,"guarded":true}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                older,
+                Response::OverlayActive {
+                    head: None,
+                    guarded: true,
+                    ..
+                }
+            ),
+            "an older line reads with no head"
+        );
     }
 
     #[test]

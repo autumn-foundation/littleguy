@@ -74,6 +74,10 @@ pub enum Swap {
     Moved {
         /// The version that was active before.
         previous: Option<u64>,
+        /// The `seq` of this move, or the head as it stands when nothing
+        /// moved. It is `None` when the daemon cannot tell that the head
+        /// belongs to this move, and before the first move.
+        head: Option<u64>,
     },
     /// The pointer was not the expected one. Nothing changed.
     Refused {
@@ -82,6 +86,18 @@ pub enum Swap {
         /// The `seq` of the last move after the refusal, if any.
         head: Option<u64>,
     },
+}
+
+/// The outcome of one rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RolledBack {
+    /// The version that was active.
+    pub from: u64,
+    /// The version that is active now.
+    pub to: u64,
+    /// The `seq` of the rollback, or `None` when the daemon cannot tell
+    /// that the head belongs to it.
+    pub head: Option<u64>,
 }
 
 /// The overlay store and the proposer of the assistant.
@@ -257,6 +273,10 @@ impl Refine {
     /// `expected`, the active version just before the swap is the expected
     /// one.
     ///
+    /// [`Swap::Moved`] names the head of this move, so a caller can tell a
+    /// later move away and back from no move. `own_head` says why the
+    /// head is left out when another move may come after this one.
+    ///
     /// # Errors
     ///
     /// Returns an error for version 0, as the version or as the expected
@@ -271,28 +291,28 @@ impl Refine {
     ) -> Result<Swap> {
         let number = number(version)?;
         let actor = Provenance::operator(owner);
-        let (previous, moved) = if let Some(expected) = expected {
+        let (before, moved) = if let Some(expected) = expected {
             let active = expected.active.map(self::number).transpose()?;
             let moved = self
                 .store
                 .activate_guarded(ASSISTANT_KIND, number, active, expected.head, actor)
                 .await;
-            (active, moved)
+            (expected, moved)
         } else {
-            let active = self
-                .store
-                .active(ASSISTANT_KIND)
-                .await?
-                .map(|stored| stored.version());
+            // One read gives the version and the head together, so the
+            // head of this move can be checked after the swap.
+            let before = self.pointer().await?;
+            let active = before.active.map(self::number).transpose()?;
             let moved = self
                 .store
                 .activate(ASSISTANT_KIND, number, active, actor)
                 .await;
-            (active, moved)
+            (before, moved)
         };
         match moved {
             Ok(()) => Ok(Swap::Moved {
-                previous: previous.map(OverlayVersion::get),
+                previous: before.active,
+                head: own_head(before, version, self.pointer().await?),
             }),
             // The pointer is read again, whole: `actual` alone has no head.
             Err(OverlayStoreError::Conflict { .. }) => {
@@ -313,11 +333,26 @@ impl Refine {
     ///
     /// Returns an error when no earlier activation exists, or when the store
     /// fails.
-    pub async fn rollback(&self, owner: &str) -> Result<Rollback> {
-        Ok(self
+    pub async fn rollback(&self, owner: &str) -> Result<RolledBack> {
+        let before = self.pointer().await?;
+        let Rollback { from, to } = self
             .store
             .rollback(ASSISTANT_KIND, Provenance::operator(owner))
-            .await?)
+            .await?;
+        let from = from.get();
+        let to = to.get();
+        // The rollback moves from the last move that the store reads. It is
+        // the move of `before` unless another process moved in between, and
+        // then `own_head` gives `None`.
+        let before = ExpectedPointer {
+            active: Some(from),
+            head: before.head,
+        };
+        Ok(RolledBack {
+            from,
+            to,
+            head: own_head(before, to, self.pointer().await?),
+        })
     }
 
     /// Makes `skills` the skills of the active overlay: it stores a new
@@ -388,6 +423,31 @@ impl Refine {
             .active(ASSISTANT_KIND)
             .await?
             .map(|stored| stored.version().get()))
+    }
+}
+
+/// The head of a move to `version` from the pointer `before`, given the
+/// pointer `now` that the daemon reads right after the move.
+///
+/// The engine returns no `seq` from a swap, so the daemon reads the pointer
+/// again in the same job. The loop runs one job at a time, but another
+/// process on the same store can move the pointer in between. So the head
+/// counts only when `now` is exactly this move: the version is the one just
+/// made active, and the head is one past the head of `before`, because the
+/// store numbers the moves of a kind 1, 2, 3 and so on. A swap to the
+/// active version logs no move, so then the head must not have changed.
+/// Any other move after this one makes the head differ, and the answer
+/// leaves the head out. It never names the head of a later move.
+fn own_head(before: ExpectedPointer, version: u64, now: ExpectedPointer) -> Option<u64> {
+    let expected = if before.active == Some(version) {
+        before.head
+    } else {
+        before.head.map_or(Some(1), |head| head.checked_add(1))
+    };
+    if now.active == Some(version) && now.head == expected {
+        now.head
+    } else {
+        None
     }
 }
 
@@ -554,7 +614,10 @@ mod tests {
 
         assert_eq!(
             refine.activate(1, None, "mark").await.unwrap(),
-            Swap::Moved { previous: None }
+            Swap::Moved {
+                previous: None,
+                head: Some(1),
+            }
         );
         let (pointer, entries) = refine.list().await.unwrap();
         let active = pointer.active;
@@ -641,7 +704,8 @@ mod tests {
         refine.activate(1, None, "mark").await.unwrap();
         refine.activate(2, None, "mark").await.unwrap();
         let back = refine.rollback("mark").await.unwrap();
-        assert_eq!((back.from.get(), back.to.get()), (2, 1));
+        assert_eq!((back.from, back.to, back.head), (2, 1, Some(3)));
+        assert_eq!(refine.pointer().await.unwrap().head, back.head);
         let (entry, json) = refine.show(1).await.unwrap().unwrap();
         assert!(entry.active);
         assert_eq!(entry.author, "operator:mark");
@@ -649,6 +713,28 @@ mod tests {
         assert!(refine.show(9).await.unwrap().is_none());
         assert!(refine.show(0).await.is_err());
         assert!(refine.activate(9, None, "mark").await.is_err());
+    }
+
+    #[test]
+    fn a_head_counts_only_for_this_move() {
+        let pointer = |active, head| ExpectedPointer { active, head };
+        // A move from v1 at head 4 to v2 logs head 5.
+        let before = pointer(Some(1), Some(4));
+        assert_eq!(own_head(before, 2, pointer(Some(2), Some(5))), Some(5));
+        // The first move logs head 1.
+        let fresh = pointer(None, None);
+        assert_eq!(own_head(fresh, 1, pointer(Some(1), Some(1))), Some(1));
+        // The active version again logs nothing, so the head stays.
+        let active = pointer(Some(2), Some(5));
+        assert_eq!(own_head(active, 2, active), Some(5));
+        assert_eq!(own_head(fresh, 2, pointer(Some(2), None)), None);
+        // Another process moves after this move: away, or away and back.
+        assert_eq!(own_head(before, 2, pointer(Some(3), Some(6))), None);
+        assert_eq!(own_head(before, 2, pointer(Some(2), Some(7))), None);
+        assert_eq!(own_head(active, 2, pointer(Some(2), Some(7))), None);
+        // A full counter has no next head.
+        let full = pointer(Some(1), Some(u64::MAX));
+        assert_eq!(own_head(full, 2, pointer(Some(2), Some(u64::MAX))), None);
     }
 
     #[test]

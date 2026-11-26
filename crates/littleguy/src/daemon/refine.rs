@@ -345,7 +345,7 @@ mod tests {
                 .await;
             assert!(
                 matches!(stored, Response::OverlayStored { .. }),
-                "{stored:?}"
+                "the put stores a version"
             );
         }
     }
@@ -364,7 +364,7 @@ mod tests {
     async fn pointer(daemon: &mut Daemon) -> ExpectedPointer {
         match daemon.handle_request(UID, Request::Overlays).await {
             Response::Overlays { active, head, .. } => ExpectedPointer { active, head },
-            other => panic!("expected the overlay list, got {other:?}"),
+            _ => panic!("expected the overlay list"),
         }
     }
 
@@ -489,14 +489,20 @@ mod tests {
         let fresh = pointer(&mut daemon).await;
         // An unknown version is an error, whatever the caller read.
         let unknown = activate(&mut daemon, 9, Some(fresh)).await;
-        assert!(matches!(unknown, Response::Error { .. }), "{unknown:?}");
+        assert!(
+            matches!(unknown, Response::Error { .. }),
+            "an unknown version is an error"
+        );
         // Version 0 never exists, so no caller read it as active.
         let zero = ExpectedPointer {
             active: Some(0),
             head: None,
         };
         let zero = activate(&mut daemon, 1, Some(zero)).await;
-        assert!(matches!(zero, Response::Error { .. }), "{zero:?}");
+        assert!(
+            matches!(zero, Response::Error { .. }),
+            "version 0 is an error"
+        );
         assert_eq!(pointer(&mut daemon).await, fresh, "nothing moved");
     }
 
@@ -509,7 +515,7 @@ mod tests {
             head: None,
         };
         let off = activate(&mut daemon, 1, Some(fresh)).await;
-        assert!(matches!(off, Response::Error { .. }), "{off:?}");
+        assert!(matches!(off, Response::Error { .. }), "refine is off");
     }
 
     #[test]

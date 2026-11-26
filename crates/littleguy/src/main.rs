@@ -265,7 +265,10 @@ impl RefineCommand {
                 overlay: std::fs::read_to_string(&file)
                     .with_context(|| format!("reading {}", file.display()))?,
             },
-            Self::Activate { version } => Request::OverlayActivate { version },
+            Self::Activate { version } => Request::OverlayActivate {
+                version,
+                expected: None,
+            },
             Self::Rollback => Request::OverlayRollback,
         })
     }
@@ -1081,7 +1084,10 @@ mod tests {
             ),
             (
                 vec!["lg", "refine", "activate", "2"],
-                Request::OverlayActivate { version: 2 },
+                Request::OverlayActivate {
+                    version: 2,
+                    expected: None,
+                },
             ),
             (vec!["lg", "refine", "rollback"], Request::OverlayRollback),
         ];

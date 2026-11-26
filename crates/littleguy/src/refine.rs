@@ -27,7 +27,7 @@ use autumn_harvest_agent::{
 };
 use littleguy_core::{ASSISTANT_KIND, RefineConfig, RefineDimension};
 
-use crate::protocol::OverlayEntry;
+use crate::protocol::{ExpectedPointer, OverlayEntry};
 
 /// The file of the overlay store, next to the database.
 pub const FILE_NAME: &str = "overlays.db";
@@ -64,6 +64,24 @@ pub enum Proposal {
     },
     /// The proposer kept the active overlay. Nothing was stored.
     Kept,
+}
+
+/// The outcome of one activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Swap {
+    /// The version is active now. `previous` was active before, if any. It
+    /// equals the version when that version was already active.
+    Moved {
+        /// The version that was active before.
+        previous: Option<u64>,
+    },
+    /// The pointer was not the expected one. Nothing changed.
+    Refused {
+        /// The active version after the refusal, if any.
+        active: Option<u64>,
+        /// The `seq` of the last move after the refusal, if any.
+        head: Option<u64>,
+    },
 }
 
 /// The overlay store and the proposer of the assistant.
@@ -181,21 +199,21 @@ impl Refine {
         )
     }
 
-    /// Every version, oldest first, and the active one.
+    /// The pointer, then every version, oldest first.
     ///
     /// # Errors
     ///
     /// Returns an error when the store fails.
-    pub async fn list(&self) -> Result<(Option<u64>, Vec<OverlayEntry>)> {
-        let active = self.active().await?;
+    pub async fn list(&self) -> Result<(ExpectedPointer, Vec<OverlayEntry>)> {
+        let pointer = self.pointer().await?;
         let entries = self
             .store
             .list(ASSISTANT_KIND)
             .await?
             .iter()
-            .map(|stored| entry(stored, active))
+            .map(|stored| entry(stored, pointer.active))
             .collect();
-        Ok((active, entries))
+        Ok((pointer, entries))
     }
 
     /// The version `version` and its overlay as JSON, or `None`.
@@ -232,27 +250,60 @@ impl Refine {
 
     /// Makes `version` the active version, by `owner`.
     ///
+    /// With `expected`, the pointer moves only when its active version and
+    /// its last move are still the ones that the caller read. The store
+    /// checks both in the swap transaction, so any move after the read
+    /// refuses the activation, also a move away and back. With no
+    /// `expected`, the active version just before the swap is the expected
+    /// one.
+    ///
     /// # Errors
     ///
-    /// Returns an error for an unknown version, for one that no longer fits
-    /// the ceilings, when the pointer moved meanwhile, or when the store
-    /// fails.
-    pub async fn activate(&self, version: u64, owner: &str) -> Result<()> {
+    /// Returns an error for version 0, as the version or as the expected
+    /// active version, for an unknown version, for one that no longer fits
+    /// the ceilings, or when the store fails. A pointer that is not the
+    /// expected one is [`Swap::Refused`], not an error.
+    pub async fn activate(
+        &self,
+        version: u64,
+        expected: Option<ExpectedPointer>,
+        owner: &str,
+    ) -> Result<Swap> {
         let number = number(version)?;
-        let expected = self
-            .store
-            .active(ASSISTANT_KIND)
-            .await?
-            .map(|stored| stored.version());
-        self.store
-            .activate(
-                ASSISTANT_KIND,
-                number,
-                expected,
-                Provenance::operator(owner),
-            )
-            .await?;
-        Ok(())
+        let actor = Provenance::operator(owner);
+        let (previous, moved) = if let Some(expected) = expected {
+            let active = expected.active.map(self::number).transpose()?;
+            let moved = self
+                .store
+                .activate_guarded(ASSISTANT_KIND, number, active, expected.head, actor)
+                .await;
+            (active, moved)
+        } else {
+            let active = self
+                .store
+                .active(ASSISTANT_KIND)
+                .await?
+                .map(|stored| stored.version());
+            let moved = self
+                .store
+                .activate(ASSISTANT_KIND, number, active, actor)
+                .await;
+            (active, moved)
+        };
+        match moved {
+            Ok(()) => Ok(Swap::Moved {
+                previous: previous.map(OverlayVersion::get),
+            }),
+            // The pointer is read again, whole: `actual` alone has no head.
+            Err(OverlayStoreError::Conflict { .. }) => {
+                let now = self.pointer().await?;
+                Ok(Swap::Refused {
+                    active: now.active,
+                    head: now.head,
+                })
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Activates the version that was active before the current one, by
@@ -305,6 +356,29 @@ impl Refine {
             )
             .await?;
         Ok(Some(version.get()))
+    }
+
+    /// The active version and the `seq` of the last move, from one read.
+    ///
+    /// Each move logs a row in its swap transaction, so the last row names
+    /// the active version and the head together. Two reads could pair an
+    /// old version with a newer head. Before the first move, the log is
+    /// empty, and the store names the active version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store fails.
+    pub async fn pointer(&self) -> Result<ExpectedPointer> {
+        Ok(match self.store.last_activation(ASSISTANT_KIND).await? {
+            Some(last) => ExpectedPointer {
+                active: Some(last.to().get()),
+                head: Some(last.seq()),
+            },
+            None => ExpectedPointer {
+                active: self.active().await?,
+                head: None,
+            },
+        })
     }
 
     /// The number of the active version, or `None`.
@@ -468,7 +542,8 @@ mod tests {
             overlay.guardrails.as_deref(),
             Some("Answer in one sentence.")
         );
-        let (active, entries) = refine.list().await.unwrap();
+        let (pointer, entries) = refine.list().await.unwrap();
+        let active = pointer.active;
         assert_eq!(active, None, "a proposal never activates itself");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].author, format!("operator:{PROPOSER_ID}"));
@@ -477,8 +552,12 @@ mod tests {
         let sent = format!("{:?}", request.messages);
         assert!(sent.contains("You have a long answer."), "{sent}");
 
-        refine.activate(1, "mark").await.unwrap();
-        let (active, entries) = refine.list().await.unwrap();
+        assert_eq!(
+            refine.activate(1, None, "mark").await.unwrap(),
+            Swap::Moved { previous: None }
+        );
+        let (pointer, entries) = refine.list().await.unwrap();
+        let active = pointer.active;
         assert_eq!(active, Some(1));
         assert!(entries[0].active);
     }
@@ -502,7 +581,8 @@ mod tests {
             None,
             "no change"
         );
-        let (active, entries) = refine.list().await.unwrap();
+        let (pointer, entries) = refine.list().await.unwrap();
+        let active = pointer.active;
         assert_eq!(active, Some(1), "a skills sync activates its version");
         assert_eq!(entries[0].author, format!("operator:{SKILLS_ID}"));
 
@@ -558,8 +638,8 @@ mod tests {
         assert_eq!(refine.put(GUIDE, "mark").await.unwrap(), 1);
         assert_eq!(refine.put("{}", "mark").await.unwrap(), 2);
         assert!(refine.put("{\"colour\": 1}", "mark").await.is_err());
-        refine.activate(1, "mark").await.unwrap();
-        refine.activate(2, "mark").await.unwrap();
+        refine.activate(1, None, "mark").await.unwrap();
+        refine.activate(2, None, "mark").await.unwrap();
         let back = refine.rollback("mark").await.unwrap();
         assert_eq!((back.from.get(), back.to.get()), (2, 1));
         let (entry, json) = refine.show(1).await.unwrap().unwrap();
@@ -568,7 +648,7 @@ mod tests {
         assert!(json.contains("Answer in one sentence."), "{json}");
         assert!(refine.show(9).await.unwrap().is_none());
         assert!(refine.show(0).await.is_err());
-        assert!(refine.activate(9, "mark").await.is_err());
+        assert!(refine.activate(9, None, "mark").await.is_err());
     }
 
     #[test]

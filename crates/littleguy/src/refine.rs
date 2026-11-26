@@ -76,7 +76,8 @@ pub enum Swap {
         previous: Option<u64>,
         /// The `seq` of this move, or the head as it stands when nothing
         /// moved. It is `None` when the daemon cannot tell that the head
-        /// belongs to this move, and before the first move.
+        /// belongs to this move, when the read after the move fails, and
+        /// before the first move.
         head: Option<u64>,
     },
     /// The pointer was not the expected one. Nothing changed.
@@ -96,7 +97,7 @@ pub struct RolledBack {
     /// The version that is active now.
     pub to: u64,
     /// The `seq` of the rollback, or `None` when the daemon cannot tell
-    /// that the head belongs to it.
+    /// that the head belongs to it or cannot read it.
     pub head: Option<u64>,
 }
 
@@ -281,8 +282,10 @@ impl Refine {
     ///
     /// Returns an error for version 0, as the version or as the expected
     /// active version, for an unknown version, for one that no longer fits
-    /// the ceilings, or when the store fails. A pointer that is not the
-    /// expected one is [`Swap::Refused`], not an error.
+    /// the ceilings, or when the store fails before the swap. A pointer
+    /// that is not the expected one is [`Swap::Refused`], not an error. A
+    /// failed read after the swap leaves the head out, since the move
+    /// stands.
     pub async fn activate(
         &self,
         version: u64,
@@ -312,7 +315,7 @@ impl Refine {
         match moved {
             Ok(()) => Ok(Swap::Moved {
                 previous: before.active,
-                head: own_head(before, version, self.pointer().await?),
+                head: self.head_after(before, version).await,
             }),
             // The pointer is read again, whole: `actual` alone has no head.
             Err(OverlayStoreError::Conflict { .. }) => {
@@ -332,7 +335,8 @@ impl Refine {
     /// # Errors
     ///
     /// Returns an error when no earlier activation exists, or when the store
-    /// fails.
+    /// fails before the swap. A failed read after the swap leaves the head
+    /// out, since the rollback stands.
     pub async fn rollback(&self, owner: &str) -> Result<RolledBack> {
         let before = self.pointer().await?;
         let Rollback { from, to } = self
@@ -351,7 +355,7 @@ impl Refine {
         Ok(RolledBack {
             from,
             to,
-            head: own_head(before, to, self.pointer().await?),
+            head: self.head_after(before, to).await,
         })
     }
 
@@ -414,6 +418,26 @@ impl Refine {
                 head: None,
             },
         })
+    }
+
+    /// The head of a move to `version` from `before`, from a read right
+    /// after the swap. `own_head` says when the head counts.
+    ///
+    /// The swap has committed by now. So a failed read never fails the
+    /// call: the answer leaves the head out, as when the daemon cannot
+    /// tell. An error would invite a retry, and a retry moves the pointer
+    /// again or reads the own move as someone else's.
+    async fn head_after(&self, before: ExpectedPointer, version: u64) -> Option<u64> {
+        match self.pointer().await {
+            Ok(now) => own_head(before, version, now),
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "the overlay moved, but reading its head failed"
+                );
+                None
+            }
+        }
     }
 
     /// The number of the active version, or `None`.
@@ -713,6 +737,59 @@ mod tests {
         assert!(refine.show(9).await.unwrap().is_none());
         assert!(refine.show(0).await.is_err());
         assert!(refine.activate(9, None, "mark").await.is_err());
+    }
+
+    /// Breaks each read of the last move after the next move. A trigger
+    /// logs a row behind each move, and the actor kind of that row does
+    /// not decode.
+    fn break_reads_after_a_move(path: &Path) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER break_reads AFTER INSERT ON harvest_agent_overlay_activations
+             WHEN NEW.actor_kind <> 'broken'
+             BEGIN
+                 INSERT INTO harvest_agent_overlay_activations
+                     (kind, seq, from_version, to_version, actor_kind, actor, activated_at_ms)
+                 VALUES (NEW.kind, NEW.seq + 1, NULL, NEW.to_version, 'broken', 'x', 0);
+             END;",
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_move_stands_when_the_read_after_it_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("overlays.db");
+        let model: Arc<dyn AgentModel> = Script::new(&[]);
+        let base = base(Arc::clone(&model));
+        let refine = Refine::open(&path, &RefineConfig::default(), &base, model).unwrap();
+        for _ in 0..3 {
+            refine.put(GUIDE, "mark").await.unwrap();
+        }
+        refine.activate(1, None, "mark").await.unwrap();
+        refine.activate(2, None, "mark").await.unwrap();
+        break_reads_after_a_move(&path);
+
+        // The rollback commits, so it answers with no head, not an error.
+        let back = refine.rollback("mark").await.unwrap();
+        assert_eq!((back.from, back.to, back.head), (2, 1, None));
+        assert!(refine.pointer().await.is_err());
+        // The guarded move commits too. The trigger row is the head now.
+        let expected = ExpectedPointer {
+            active: Some(1),
+            head: Some(4),
+        };
+        assert_eq!(
+            refine.activate(3, Some(expected), "mark").await.unwrap(),
+            Swap::Moved {
+                previous: Some(1),
+                head: None,
+            }
+        );
+        assert!(refine.show(3).await.unwrap().unwrap().0.active);
+        // A read that fails before the move is an error, and nothing moves.
+        assert!(refine.activate(2, None, "mark").await.is_err());
+        assert!(refine.show(3).await.unwrap().unwrap().0.active);
     }
 
     #[test]

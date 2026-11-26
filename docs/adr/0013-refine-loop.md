@@ -83,10 +83,14 @@ one by replay and picks a winner. littleguy cannot use it as it stands:
   the daemon answers the head only when the version is the one just made
   active and the head is one past the head before the swap, or the same
   head for no move. Otherwise the answer leaves `head` out, so it never
-  names the head of a later move. The field is optional: an older reader
-  ignores it, and an older daemon leaves it out. A caller with no `head`
-  reads `overlays` again and loses only the check of a move away and
-  back in between.
+  names the head of a later move. A read after the swap that fails also
+  leaves `head` out, with a warning in the log. The move has committed,
+  so the answer is still `overlay_active`. An error would invite a
+  retry: a retried rollback moves one version further, and a guarded
+  retry gets `overlay_moved` for its own move. The field is optional:
+  an older reader ignores it, and an older daemon leaves it out. A
+  caller with no `head` reads `overlays` again and loses only the check
+  of a move away and back in between.
 - **The owner can write a version too.** `lg refine put <file>` stores an
   overlay JSON file. `{}` is the config profile with no change, so an owner
   turns every overlay off by putting and activating it.

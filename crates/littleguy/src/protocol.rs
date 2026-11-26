@@ -749,7 +749,9 @@ pub enum Response {
         ///
         /// It is absent before the first move, from an older daemon, and
         /// when the daemon cannot tell that the head belongs to this move.
-        /// The daemon never names the head of a later move.
+        /// A failed read of the head after a move also leaves it out: the
+        /// move stands, so the answer is never an error. The daemon never
+        /// names the head of a later move.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head: Option<u64>,
     },

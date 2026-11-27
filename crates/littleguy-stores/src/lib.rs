@@ -37,6 +37,8 @@ use autumn_harvest_agent::model::BoxFuture;
 use autumn_harvest_agent::{AgentError, ErrorKind};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
+#[cfg(feature = "aletheia")]
+pub mod aletheia;
 pub mod approvals;
 #[cfg(feature = "history")]
 pub mod conversations;
@@ -399,6 +401,56 @@ impl SqliteStores {
             conn.execute("DETACH DATABASE old", [])?;
             copied?;
             Ok(true)
+        })
+    }
+
+    /// The memory rows of the file: the blocks, the edit keys, the episode
+    /// logs and the episode clears. The move to AletheiaDB copies them
+    /// (ADR 0047).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot read or a value does not
+    /// decode.
+    #[cfg(feature = "aletheia")]
+    pub fn memory_rows(&self) -> Result<aletheia::MemoryRows, AgentError> {
+        self.read(|conn| {
+            let pairs = |sql: &str| -> Result<Vec<(String, String)>, Failure> {
+                let mut statement = conn.prepare(sql)?;
+                let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<_>>()?)
+            };
+            let mut rows = aletheia::MemoryRows::default();
+            for (scope, blocks) in pairs("SELECT scope, blocks FROM memory_scopes ORDER BY scope")?
+            {
+                rows.scopes.push((scope, decode(&blocks)?));
+            }
+            for (scope, log) in pairs("SELECT scope, log FROM episode_logs ORDER BY scope")? {
+                rows.logs.push((scope, decode(&log)?));
+            }
+            {
+                let mut statement =
+                    conn.prepare("SELECT scope, key, error FROM memory_edits ORDER BY seq")?;
+                let edits =
+                    statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                rows.edits = edits.collect::<rusqlite::Result<_>>()?;
+            }
+            {
+                let mut statement =
+                    conn.prepare("SELECT scope, key, cleared FROM episode_clears ORDER BY scope")?;
+                let clears = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?;
+                for clear in clears {
+                    let (scope, key, cleared) = clear?;
+                    rows.clears.push((scope, key, decode(&cleared)?));
+                }
+            }
+            Ok(rows)
         })
     }
 

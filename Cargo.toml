@@ -25,6 +25,7 @@ littleguy-stores = { version = "0.1.0", path = "crates/littleguy-stores" }
 littleguy-tools = { version = "0.1.0", path = "crates/littleguy-tools", default-features = false }
 autumn-harvest-agent = { version = "0.11.0", features = ["sqlite"] }
 autumn-harvest-sqlite = "0.11.0"
+autumn-plugin-aletheiadb = { version = "0.1.1", default-features = false }
 anyhow = "1"
 clap = { version = "4.6", features = ["derive", "env"] }
 proptest = "1"

@@ -236,11 +236,47 @@ you should know something. [ADR 0022](docs/adr/0022-ideas-from-consolidation.md)
 explains the design. The reflection comes with the `reflection` feature,
 which is on by default and needs `plans`.
 
-The notes and the log live in `memory.db`, next to `lg.db`, or in the
-tenant database of a [fleet](#fleet). The pass runs
-only while `lg serve` runs. After a night off it runs once, at the next
-start. [ADR 0005](docs/adr/0005-memory-and-consolidation.md) explains the
-design.
+The notes and the log live in the AletheiaDB directory `memory.aletheia`,
+next to `lg.db`. With `backend = "sqlite"` they live in `memory.db`, and
+with a [fleet](#fleet) in its tenant database. The pass runs only while
+`lg serve` runs. After a night off it runs once, at the next start.
+[ADR 0005](docs/adr/0005-memory-and-consolidation.md) explains the design.
+
+### Recall
+
+The blocks have a size limit, so an entry that an edit replaced or removed
+leaves the prompt, and so does an episode that the log evicted. AletheiaDB
+keeps them all: each version of each entry is a fact, with the time it was
+added and the time it ended. The `recall` tool finds them by meaning, now
+or as of a past time, and says whether each hit is still current:
+
+```text
+recall {"query": "who is my dentist", "as_of": "2026-03-01"}
+```
+
+Each fact and episode gets an embedding when it lands. Name any server of
+the OpenAI embeddings API, or leave the section out for a local embedder
+that matches shared words, not meaning:
+
+```toml
+[memory]
+backend = "aletheia"            # the default; "sqlite" keeps memory.db
+
+[memory.embeddings]
+url = "https://api.openai.com/v1"   # or http://localhost:11434/v1 for Ollama
+model = "text-embedding-3-small"
+dimensions = 1536
+key_env = "OPENAI_API_KEY"          # a house key; leave out for a local server
+```
+
+An edit lands even when the endpoint is down. The next start embeds what
+waited. The first start moves the memory rows of `memory.db` into the
+directory once, and leaves `memory.db` as it was, so `backend = "sqlite"`
+goes back. A change of `dimensions` needs a new directory. A clear forgets
+for `recall` too. AletheiaDB on a `[fleet]` waits for F2, so `lg serve`
+refuses `backend = "aletheia"` there.
+[ADR 0047](docs/adr/0047-memory-on-aletheiadb.md) explains the design. The
+`aletheia` feature holds it, and `[memory.embeddings]` also needs `openai`.
 
 ## Morning brief
 
@@ -613,7 +649,7 @@ docker compose exec lg lg chat "hi"
   `LG_SAN_MATEO_KEY`, seal the others in the volume
   (`docker compose exec -T lg lg keys set ANTHROPIC_API_KEY < key.txt`,
   see [House keys](#house-keys)).
-- **Data.** The config, `lg.db`, `memory.db`, the skills and the workspace
+- **Data.** The config, `lg.db`, `memory.db`, `memory.aletheia`, the skills and the workspace
   live in the `lg-data` volume, under `/data`. SQLite does not lock well
   across the file sharing of Docker Desktop, so the data stays in the volume
   and not in a folder of the Mac. Only one daemon may run on one database.

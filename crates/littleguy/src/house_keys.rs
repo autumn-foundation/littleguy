@@ -243,6 +243,14 @@ pub fn config_names(config: &littleguy_core::Config) -> Vec<String> {
                 .filter_map(|i| i.client_secret_env.clone()),
         );
     }
+    if let Some(name) = config
+        .memory
+        .embeddings
+        .as_ref()
+        .and_then(|section| section.key_env.clone())
+    {
+        names.push(name);
+    }
     for server in &config.mcp {
         match &server.transport {
             littleguy_core::McpTransport::Stdio { env, .. } => names.extend(env.iter().cloned()),

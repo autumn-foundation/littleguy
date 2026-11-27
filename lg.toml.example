@@ -74,6 +74,24 @@ pass_episodes = 8
 ## the provider applies. A model that reasons spends part of the cap
 ## before the reply, so a pass with a small cap stops with invalid_reply.
 # pass_tokens = 32000
+## The store of the blocks and the episode log (ADR 0047). `aletheia`
+## keeps every version of each fact and every episode, so `recall` finds
+## them by meaning. `sqlite` keeps them in memory.db. The default is
+## aletheia, or sqlite with a [fleet].
+# backend = "aletheia"
+
+## The endpoint that embeds facts, episodes and recall queries: any server
+## of the OpenAI embeddings API. With no section, a local hashing embedder
+## runs. It matches shared words, not meaning.
+# [memory.embeddings]
+# url = "https://api.openai.com/v1"
+# model = "text-embedding-3-small"
+# dimensions = 1536
+# key_env = "OPENAI_API_KEY"
+## Ollama on this machine, with no key:
+# url = "http://localhost:11434/v1"
+# model = "nomic-embed-text"
+# dimensions = 768
 
 ## ----------------------------------------------------------------- tools
 

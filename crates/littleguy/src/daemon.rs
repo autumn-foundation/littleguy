@@ -186,7 +186,7 @@ const fn chat_config(config: &Config, service: Service) -> &littleguy_core::Chat
 pub fn harness(
     config: &Config,
     model: Arc<dyn AgentModel>,
-    memory: Option<(Arc<SqliteStores>, &Path)>,
+    memory: Option<(crate::memory::Stores, &Path)>,
     brief: Option<Arc<BriefDelivery>>,
     tools: crate::tools::Tools,
     guard: Option<crate::guard::Guard>,
@@ -563,6 +563,10 @@ pub struct Extras {
     /// The secrets by variable name: the sealed house keys, then the
     /// environment (ADR 0040).
     pub keys: Arc<crate::house_keys::HouseKeys>,
+    /// The AletheiaDB store of the memory, opened at start (ADR 0047).
+    /// `None` keeps the memory in the SQLite stores.
+    #[cfg(feature = "aletheia")]
+    pub aletheia: Option<Arc<littleguy_stores::aletheia::AletheiaStores>>,
 }
 
 /// The daemon state: the runtime, the routing table and the pairings.
@@ -718,6 +722,8 @@ impl Daemon {
             scripts_default: None,
             tenant: extras.tenant,
             keys: extras.keys,
+            #[cfg(feature = "aletheia")]
+            aletheia: extras.aletheia,
             services,
             stores: None,
             config: config.clone(),

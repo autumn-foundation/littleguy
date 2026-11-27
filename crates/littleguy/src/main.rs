@@ -54,6 +54,8 @@ mod patches;
 mod paths;
 mod plans;
 mod protocol;
+#[cfg(feature = "aletheia")]
+mod recall;
 #[cfg(feature = "refine")]
 mod refine;
 #[cfg(feature = "reflection")]
@@ -899,6 +901,16 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         None => None,
     };
     let mcp = tools::mcp_tools(&config.mcp, keys.lookup()).await;
+    // The memory directory opens before the daemon, so the first start
+    // moves `memory.db` into it before any op runs (ADR 0047).
+    #[cfg(feature = "aletheia")]
+    let aletheia = if config.memory.enabled
+        && memory::backend(&config) == littleguy_core::MemoryBackend::Aletheia
+    {
+        Some(memory::open_aletheia(&db, &config.memory, |name| keys.get(name)).await?)
+    } else {
+        None
+    };
     let extras = daemon::Extras {
         sandbox,
         #[cfg(feature = "scripts")]
@@ -925,6 +937,8 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         #[cfg(feature = "auto-approve")]
         reviewer: build_reviewer(&args, &db, secret)?,
         keys: Arc::clone(&keys),
+        #[cfg(feature = "aletheia")]
+        aletheia,
     };
     #[cfg(feature = "discord")]
     let discord = links.discord.is_some();

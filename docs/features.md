@@ -42,6 +42,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 
 | Feature | Default | What it builds | Crates it adds |
 |---|---|---|---|
+| `aletheia` | yes | The memory blocks and the episode log in AletheiaDB, and `recall`: the assistant finds an old fact or episode by meaning, now or as of a past time (ADR 0047). `[memory.embeddings]` also needs `openai`. | `autumn-plugin-aletheiadb`, `littleguy-core`, `rustix`, `tokio`, `tracing` |
 | `api` | no | `[api]`: `api_get` and `api_send` on any San Mateo integration (ADR 0031). Needs `oauth`. | `axum`, `san-mateo`, `san-mateo-sqlite`, `url` |
 | `auto-approve` | yes | `[sandbox] approve = "auto"`: a reviewer model decides each call that waits, and asks the owner only when it is unsure (ADR 0037). | `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities` |
 | `camel` | no | `[[camel.route]]`: Apache Camel routes that feed the assistant. | `autumn-harvest-plugin`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `harvest-camel` |
@@ -51,7 +52,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `discord` | yes | Discord direct messages over the gateway. | `autumn-plugin-discord`, `reqwest`, `rustls` |
 | `fleet` | no | `[fleet]`: the memory, the episodes and the approvals in a tenant database, replicated to a directory or an S3-compatible store by autumn-web. The replication of autumn-web needs a database backend, so it takes `postgres`. | `tokio-util`, `autumn-web/http-client`, `autumn-web/postgres` |
 | `followups` | yes | `wake_me` and `cancel_wake`: the assistant books a wake to look at something again later. | none |
-| `full` | no | Every integration. | `autumn-harvest-plugin`, `autumn-plugin-discord`, `autumn-plugin-slack`, `axum`, `base64`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `futures-util`, `harvest-camel`, `regex`, `reqwest`, `rmcp`, `rustls`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `similar`, `tokio-tungstenite`, `tokio-util`, `url`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities`, `autumn-web/http-client`, `autumn-web/postgres` |
+| `full` | no | Every integration. | `autumn-harvest-plugin`, `autumn-plugin-aletheiadb`, `autumn-plugin-discord`, `autumn-plugin-slack`, `axum`, `base64`, `camel-api`, `camel-builder`, `camel-component-api`, `camel-component-direct`, `camel-component-file`, `camel-component-timer`, `camel-core`, `futures-util`, `harvest-camel`, `littleguy-core`, `regex`, `reqwest`, `rmcp`, `rustix`, `rustls`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `similar`, `tokio`, `tokio-tungstenite`, `tokio-util`, `tracing`, `url`, `autumn-harvest-agent/sandbox`, `autumn-harvest/sandbox-activities`, `autumn-web/http-client`, `autumn-web/postgres` |
 | `google` | no | `[google]`: the Gmail and Google Calendar tools. Needs `oauth`. | `axum`, `base64`, `san-mateo`, `san-mateo-sqlite` |
 | `grep-files` | yes | `grep_files`: the assistant finds the lines of its workspace that match a pattern. | `regex` |
 | `heartbeat` | yes | `[heartbeat]`: the assistant wakes on its own every so often. Its precheck skips a tick with no model call when no goal is due and no idea waits. | none |
@@ -59,7 +60,7 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | `mcp` | yes | The tools of each `[[mcp.server]]`. | `rmcp`, `rustls` |
 | `notes` | yes | `write_note` and the other note tools: notes in memory.db that a tick can write too (ADR 0029). | none |
 | `oauth` | no | `[san_mateo]` and `lg connect`: OAuth connections kept by San Mateo. | `axum`, `san-mateo`, `san-mateo-sqlite` |
-| `openai` | yes | `--model openai` and `--model openrouter`. | `reqwest`, `rustls` |
+| `openai` | yes | `--model openai` and `--model openrouter`. | `littleguy-core`, `reqwest`, `rustls` |
 | `patches` | no | `[patches]`: `propose_patch` and the Patches tab. littleguy proposes a change to its repository, and the owner opens it as a draft PR (ADR 0042). Needs `api`. | `axum`, `san-mateo`, `san-mateo-sqlite`, `sha2`, `similar`, `url` |
 | `plans` | yes | Goals and ideas: the tools that file, research and propose them, the Goals and Ideas tabs, and the heartbeat precheck that looks at them. | none |
 | `refine` | yes | `[refine]` and `lg refine`: profile overlays that the model proposes and the owner activates. It adds no crate. | none |
@@ -87,12 +88,13 @@ manifests. `cargo xtask feature-docs --write` renders them again.
 | Feature | Default | What it builds | Crates it adds |
 |---|---|---|---|
 | `claude` | yes | Claude over the Messages API, with its turn store. | `reqwest`, `rustls`, `sha2` |
-| `openai` | yes | OpenAI, OpenRouter and any Chat Completions server. | `reqwest`, `rustls` |
+| `openai` | yes | OpenAI, OpenRouter and any Chat Completions server, and the embeddings API of the same servers. | `littleguy-core`, `reqwest`, `rustls` |
 
 ### `littleguy-stores`
 
 | Feature | Default | What it builds | Crates it adds |
 |---|---|---|---|
+| `aletheia` | no | The memory blocks and the episode log in AletheiaDB, with the facts and episodes that `recall` finds by meaning (`aletheia`, ADR 0047). | `autumn-plugin-aletheiadb`, `littleguy-core`, `rustix`, `tokio`, `tracing` |
 | `council` | no | What the council of the owner decided (`council`, ADR 0027). | none |
 | `followups` | no | The wakes that the assistant books (`wakes`). | none |
 | `history` | no | The past conversations of the assistant, read from the runtime database (`conversations`, ADR 0039). | none |

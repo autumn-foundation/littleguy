@@ -53,7 +53,7 @@ tokio-util = { version = "0.7", optional = true }
 autumn-plugin-markstream = "0.4"
 
 [features]
-default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "compaction", "research", "search-notes", "grep-files", "notes", "history", "sealed-keys", "scripts"]
+default = ["discord", "slack", "claude", "openai", "web", "mcp", "sandbox", "auto-approve", "refine", "plans", "heartbeat", "followups", "reflection", "skills", "self-debug", "council", "compaction", "research", "search-notes", "grep-files", "notes", "history", "sealed-keys", "scripts", "aletheia"]
 # Every integration.
 full = ["default", "camel", "google", "api", "patches", "fleet"]
 # Discord direct messages over the gateway.
@@ -104,6 +104,10 @@ self-debug = ["littleguy-stores/self-debug"]
 # `lg history` and the History page: the past conversations of the web
 # and the CLI, read from the runtime database (ADR 0039).
 history = ["littleguy-stores/history"]
+# The memory blocks and the episode log in AletheiaDB, and `recall`: the
+# assistant finds an old fact or episode by meaning, now or as of a past
+# time (ADR 0047). `[memory.embeddings]` also needs `openai`.
+aletheia = ["littleguy-stores/aletheia"]
 # `[council]`: model calls that decide clean proposals of goals and skills
 # for the owner (ADR 0027).
 council = ["plans", "skills", "littleguy-stores/council"]

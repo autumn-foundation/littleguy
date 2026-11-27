@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 autumn-harvest-agent = { version = "0.11.0", default-features = false }
+littleguy-core = { workspace = true, optional = true }
 reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { version = "0.23.46", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 serde_json = { workspace = true }
@@ -18,8 +19,9 @@ sha2 = { version = "0.11", optional = true }
 default = ["claude", "openai"]
 # Claude over the Messages API, with its turn store.
 claude = ["dep:reqwest", "dep:rustls", "dep:sha2"]
-# OpenAI, OpenRouter and any Chat Completions server.
-openai = ["dep:reqwest", "dep:rustls"]
+# OpenAI, OpenRouter and any Chat Completions server, and the embeddings
+# API of the same servers.
+openai = ["dep:littleguy-core", "dep:reqwest", "dep:rustls"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

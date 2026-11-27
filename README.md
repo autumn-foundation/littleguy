@@ -272,8 +272,9 @@ key_env = "OPENAI_API_KEY"          # a house key; leave out for a local server
 An edit lands even when the endpoint is down. The next start embeds what
 waited. The first start moves the memory rows of `memory.db` into the
 directory once, and leaves `memory.db` as it was, so `backend = "sqlite"`
-goes back. A change of `dimensions` needs a new directory. A clear forgets
-for `recall` too. AletheiaDB on a `[fleet]` waits for F2, so `lg serve`
+goes back. A change of `dimensions` needs a new directory. A clear tombstones
+what it removes, so `recall` no longer finds it. The history stays, as
+AletheiaDB keeps it immutable. AletheiaDB on a `[fleet]` waits for F2, so `lg serve`
 refuses `backend = "aletheia"` there.
 [ADR 0047](docs/adr/0047-memory-on-aletheiadb.md) explains the design. The
 `aletheia` feature holds it, and `[memory.embeddings]` also needs `openai`.

@@ -153,9 +153,9 @@ sequenceDiagram
 
 - A replaced or removed entry and an evicted episode stay in the file. The
   `recall` tool finds them by meaning.
-- A clear ends the facts, but their versions stay in the history of the
-  file. A delete that also forgets the history needs a crypto shred in the
-  engine. A later ADR can add it.
+- A clear tombstones the facts and the episodes: each one gets a
+  retraction, and the store and `recall` treat it as gone. Its versions stay
+  in the history, because AletheiaDB keeps history immutable by design.
 - Each memory edit and each episode costs one embedding call when an
   endpoint is set. A call that fails costs no edit.
 - The build gains AletheiaDB and its HNSW index. Without the `aletheia`

@@ -746,12 +746,14 @@ mod tests {
             version: 1,
             previous: Some(2),
             guarded: false,
+            head: Some(4),
         });
         assert!(text.contains("(was 2)"), "{text}");
         let (text, _) = render(&Response::OverlayActive {
             version: 1,
             previous: None,
             guarded: false,
+            head: None,
         });
         assert!(!text.contains("was"), "{text}");
         let (text, ok) = render(&Response::OverlayMoved {

@@ -112,6 +112,10 @@ async fn a_second_process_cannot_open_the_directory() {
     let first = AletheiaStores::open(&path, embedder()).await.unwrap();
     let second = AletheiaStores::open(&path, embedder()).await.unwrap_err();
     assert!(matches!(second, OpenError::Locked(_)), "{second}");
+    assert!(
+        second.to_string().contains("memory.aletheia.lock"),
+        "{second}"
+    );
     drop(first);
     AletheiaStores::open(&path, embedder()).await.unwrap();
 }

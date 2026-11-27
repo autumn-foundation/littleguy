@@ -176,7 +176,7 @@ mod tests {
     fn a_call_parses_with_its_defaults() {
         let recall = parse(&json!({"query": "tea"}), &scope()).unwrap();
         assert_eq!(recall.limit, DEFAULT_LIMIT);
-        assert!(recall.kinds.is_empty());
+        assert_eq!(recall.kinds, Vec::new());
         assert_eq!(recall.as_of_ms, None);
         assert_eq!(recall.episodes.as_str(), "agent:assistant/mark:episodes");
         let facts = parse(

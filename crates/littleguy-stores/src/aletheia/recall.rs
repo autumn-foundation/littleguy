@@ -153,11 +153,11 @@ const MAX_SEARCH: usize = 4_096;
 /// or its time does not fit.
 fn keep(node: &NodeView, score: f32, recall: &Recall, kinds: &[RecallKind]) -> Option<Recalled> {
     let kind = RecallKind::of(&node.label)?;
-    let scope = match kind {
+    let wanted = match kind {
         RecallKind::Fact => &recall.facts,
         RecallKind::Episode => &recall.episodes,
     };
-    if !kinds.contains(&kind) || text(node, "scope").as_deref() != Some(scope.as_str()) {
+    if !kinds.contains(&kind) || text(node, "scope").as_deref() != Some(wanted.as_str()) {
         return None;
     }
     let ended = node.properties.get("ended_ms").and_then(Value::as_i64);

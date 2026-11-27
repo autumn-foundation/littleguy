@@ -469,7 +469,7 @@ async fn the_embedder_sends_no_token_to_a_local_server() -> TestResult {
     embedder.embed(&["tea".to_owned()]).await?;
     assert_eq!(seen(&log)?[0].header("authorization"), None);
     // No text needs no request.
-    assert!(embedder.embed(&[]).await?.is_empty());
+    assert_eq!(embedder.embed(&[]).await?, Vec::<Vec<f32>>::new());
     Ok(())
 }
 

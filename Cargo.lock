@@ -581,6 +581,8 @@ dependencies = [
 [[package]]
 name = "autumn-plugin-aletheiadb"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bd497658ee73786bb458a2c15053fb54607775e7758d3cced9b1fbb1eae5140"
 dependencies = [
  "aletheiadb",
  "autumn-web 0.11.0",

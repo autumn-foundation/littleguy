@@ -876,6 +876,39 @@ fn slack_hook(
     }
 }
 
+/// The Google API of the owner, when San Mateo started and `[google]` names
+/// an integration.
+#[cfg(feature = "google")]
+fn google_api(
+    config: &littleguy_core::Config,
+    connections: Option<&oauth::Connections>,
+) -> Option<Arc<dyn littleguy_tools::google::GoogleApi>> {
+    connections
+        .zip(config.google.as_ref())
+        .map(|(started, google)| {
+            Arc::new(started.google(&google.integration))
+                as Arc<dyn littleguy_tools::google::GoogleApi>
+        })
+}
+
+/// The AletheiaDB store of the memory, when `config` keeps its memory
+/// there. It opens before the daemon, so the first start moves `memory.db`
+/// into it before any op runs (ADR 0047).
+#[cfg(feature = "aletheia")]
+async fn open_memory(
+    config: &littleguy_core::Config,
+    db: &Path,
+    keys: &house_keys::HouseKeys,
+) -> Result<Option<Arc<littleguy_stores::aletheia::AletheiaStores>>> {
+    if !config.memory.enabled || memory::backend(config) != littleguy_core::MemoryBackend::Aletheia
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        memory::open_aletheia(db, &config.memory, |name| keys.get(name)).await?,
+    ))
+}
+
 async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
     let config = load_config(args.config.as_deref(), env)?;
     features::check(&config)?;
@@ -901,29 +934,15 @@ async fn serve(socket: PathBuf, args: ServeArgs, env: &Env) -> Result<()> {
         None => None,
     };
     let mcp = tools::mcp_tools(&config.mcp, keys.lookup()).await;
-    // The memory directory opens before the daemon, so the first start
-    // moves `memory.db` into it before any op runs (ADR 0047).
     #[cfg(feature = "aletheia")]
-    let aletheia = if config.memory.enabled
-        && memory::backend(&config) == littleguy_core::MemoryBackend::Aletheia
-    {
-        Some(memory::open_aletheia(&db, &config.memory, |name| keys.get(name)).await?)
-    } else {
-        None
-    };
+    let aletheia = open_memory(&config, &db, &keys).await?;
     let extras = daemon::Extras {
         sandbox,
         #[cfg(feature = "scripts")]
         scripts: scripts::runtime(&config)?,
         mcp,
         #[cfg(feature = "google")]
-        google: connections
-            .as_ref()
-            .zip(config.google.as_ref())
-            .map(|(started, google)| {
-                Arc::new(started.google(&google.integration))
-                    as Arc<dyn littleguy_tools::google::GoogleApi>
-            }),
+        google: google_api(&config, connections.as_ref()),
         #[cfg(feature = "api")]
         api: api_link(&config, connections.as_ref()),
         #[cfg(feature = "slack")]

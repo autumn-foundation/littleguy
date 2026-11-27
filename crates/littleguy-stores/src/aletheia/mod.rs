@@ -58,8 +58,8 @@ const CALL_TIMEOUT_MS: u64 = 120_000;
 /// A failure to open the store.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    /// Another process holds the directory.
-    #[error("another process holds {0}: stop the other daemon first")]
+    /// Another process holds the lock file of the directory.
+    #[error("another process holds the lock {0}: stop the other daemon first")]
     Locked(PathBuf),
     /// The lock file does not open.
     #[error("the lock file of the memory directory does not open: {0}")]
@@ -174,14 +174,16 @@ impl AletheiaStores {
         {
             std::fs::create_dir_all(parent)?;
         }
-        let lock_path = dir.with_extension("lock");
+        let mut lock_name = dir.file_name().unwrap_or_default().to_os_string();
+        lock_name.push(".lock");
+        let lock_path = dir.with_file_name(lock_name);
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&lock_path)?;
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| OpenError::Locked(dir.to_path_buf()))?;
+            .map_err(|_| OpenError::Locked(lock_path.clone()))?;
         Self::start(dir.to_string_lossy().into_owned(), embedder, Some(lock)).await
     }
 

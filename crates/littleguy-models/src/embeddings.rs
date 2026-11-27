@@ -37,7 +37,7 @@ impl std::fmt::Debug for OpenAiEmbedder {
             .field("model", &self.model)
             .field("dimensions", &self.dimensions)
             .field("key", &self.key.as_ref().map(|_| "<set>"))
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

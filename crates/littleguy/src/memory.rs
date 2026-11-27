@@ -100,14 +100,13 @@ pub enum Stores {
 /// in its tenant database (ADR 0017). A build without it takes SQLite.
 #[must_use]
 pub fn backend(config: &Config) -> MemoryBackend {
-    config
-        .memory
-        .backend
-        .unwrap_or(if cfg!(feature = "aletheia") && config.fleet.is_none() {
+    config.memory.backend.unwrap_or_else(|| {
+        if cfg!(feature = "aletheia") && config.fleet.is_none() {
             MemoryBackend::Aletheia
         } else {
             MemoryBackend::Sqlite
-        })
+        }
+    })
 }
 
 /// Gives the harness the stores, and the agents of `db` a directory, so the
@@ -316,13 +315,15 @@ mod tests {
     fn the_embedder_follows_the_config() {
         let local = embedder(&MemoryConfig::default(), |_| None).unwrap();
         assert_eq!(local.name(), littleguy_core::embed::HASHING_NAME);
-        let mut config = MemoryConfig::default();
-        config.embeddings = Some(littleguy_core::EmbeddingsConfig {
-            url: "https://api.openai.com/v1".into(),
-            model: "text-embedding-3-small".into(),
-            dimensions: 1536,
-            key_env: Some("OPENAI_API_KEY".into()),
-        });
+        let config = MemoryConfig {
+            embeddings: Some(littleguy_core::EmbeddingsConfig {
+                url: "https://api.openai.com/v1".into(),
+                model: "text-embedding-3-small".into(),
+                dimensions: 1536,
+                key_env: Some("OPENAI_API_KEY".into()),
+            }),
+            ..MemoryConfig::default()
+        };
         let missing = embedder(&config, |_| None).unwrap_err().to_string();
         assert!(missing.contains("OPENAI_API_KEY"), "{missing}");
         let remote = embedder(&config, |_| Some("sk-test".into()));

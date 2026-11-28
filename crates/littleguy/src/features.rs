@@ -170,8 +170,9 @@ pub fn missing(what: &str, feature: &str) -> String {
 pub fn check(config: &Config) -> Result<()> {
     // `[fleet]` replicates one SQLite file. The AletheiaDB directory waits
     // for the database fleet of F2 (ADR 0047).
+    // With a fleet, the backend is AletheiaDB only when the config asks.
     if config.fleet.is_some()
-        && config.memory.backend == Some(littleguy_core::MemoryBackend::Aletheia)
+        && crate::memory::backend(config) == littleguy_core::MemoryBackend::Aletheia
     {
         bail!(
             "memory.backend = \"aletheia\" does not run with [fleet] yet: the fleet replicates \

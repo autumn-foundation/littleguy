@@ -180,16 +180,6 @@ impl Kit {
         Ok(tools)
     }
 
-    /// The store of the memory blocks and the episode log: AletheiaDB when
-    /// it opened at start, else `stores`.
-    fn memory_stores(&self, stores: Arc<SqliteStores>) -> crate::memory::Stores {
-        #[cfg(feature = "aletheia")]
-        if let Some(aletheia) = &self.aletheia {
-            return crate::memory::Stores::Aletheia(Arc::clone(aletheia));
-        }
-        crate::memory::Stores::Sqlite(stores)
-    }
-
     /// The patches of `config` on the San Mateo proxy, when it has a
     /// `[patches]` section.
     ///
@@ -378,9 +368,17 @@ impl Kit {
         refuse_left_out(config)?;
         #[cfg(any(feature = "heartbeat", feature = "reflection"))]
         let precheck = self.precheck(config, stores.as_ref());
-        let memory = stores
-            .filter(|_| config.memory.enabled)
-            .map(|stores| (self.memory_stores(stores), db.as_path()));
+        #[cfg(feature = "aletheia")]
+        let aletheia = self.aletheia.clone();
+        let memory = stores.filter(|_| config.memory.enabled).map(|stores| {
+            // AletheiaDB holds the blocks and the log when it opened at
+            // start (ADR 0047).
+            #[cfg(feature = "aletheia")]
+            if let Some(aletheia) = aletheia {
+                return (crate::memory::Stores::Aletheia(aletheia), db.as_path());
+            }
+            (crate::memory::Stores::Sqlite(stores), db.as_path())
+        });
         let model = Arc::clone(&self.model);
         // The assistant can read what this load of the config turned on.
         #[cfg(feature = "self-debug")]

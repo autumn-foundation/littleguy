@@ -12,7 +12,7 @@ use proptest::prelude::*;
 use super::{SCHEMA_VERSION, SqliteStores, StoreError};
 
 /// Runs a store future. Every store call is ready at once.
-fn now<T>(future: impl Future<Output = T>) -> T {
+pub fn now<T>(future: impl Future<Output = T>) -> T {
     let mut future = std::pin::pin!(future);
     match future
         .as_mut()

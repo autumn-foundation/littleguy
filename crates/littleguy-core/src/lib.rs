@@ -6,6 +6,7 @@
 pub mod addr;
 pub mod compaction;
 pub mod config;
+pub mod embed;
 pub mod house_keys;
 pub mod ids;
 pub mod pairing;
@@ -16,12 +17,12 @@ pub mod script_name;
 
 pub use config::{
     ApiConfig, ApprovalsConfig, BriefConfig, CamelRoute, ChatConfig, CompactionConfig, Config,
-    ConfigError, CouncilAccepts, CouncilConfig, DiscordConfig, FirecrackerConfig, FleetConfig,
-    FlowConfig, FlowRecheck, GoogleConfig, HeartbeatConfig, HeartbeatDelivery, HooksConfig,
-    Integration, McpServer, McpTransport, MemoryConfig, PatchesConfig, QuietHours, RefineConfig,
-    RefineDimension, Replica, ResearchConfig, RunsConfig, S3Replica, SanMateoConfig, SanMateoError,
-    SandboxApprove, SandboxBackend, SandboxConfig, ScriptsConfig, SkillsConfig, SlackConfig,
-    ToolsConfig, UiConfig, chat_user, discord_sender, slack_sender,
+    ConfigError, CouncilAccepts, CouncilConfig, DiscordConfig, EmbeddingsConfig, FirecrackerConfig,
+    FleetConfig, FlowConfig, FlowRecheck, GoogleConfig, HeartbeatConfig, HeartbeatDelivery,
+    HooksConfig, Integration, McpServer, McpTransport, MemoryBackend, MemoryConfig, PatchesConfig,
+    QuietHours, RefineConfig, RefineDimension, Replica, ResearchConfig, RunsConfig, S3Replica,
+    SanMateoConfig, SanMateoError, SandboxApprove, SandboxBackend, SandboxConfig, ScriptsConfig,
+    SkillsConfig, SlackConfig, ToolsConfig, UiConfig, chat_user, discord_sender, slack_sender,
 };
 pub use ids::{ChannelId, IdError, MessageId, OwnerName, SenderId};
 pub use pairing::{PairingCode, Pending, PendingPairings};

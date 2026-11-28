@@ -74,6 +74,10 @@ pub(super) struct Kit {
     pub(super) services: Vec<Service>,
     /// The memory store, once a part needs it. It opens once.
     pub(super) stores: Option<Arc<SqliteStores>>,
+    /// The AletheiaDB store of the memory blocks and the episode log,
+    /// opened at start (ADR 0047). It replaces `stores` for those two.
+    #[cfg(feature = "aletheia")]
+    pub(super) aletheia: Option<Arc<littleguy_stores::aletheia::AletheiaStores>>,
     /// The config that runs.
     pub(super) config: Config,
     /// The config file that a reload reads. `None` refuses a reload.
@@ -165,6 +169,13 @@ impl Kit {
         #[cfg(feature = "notes")]
         if config.tools.files && config.memory.enabled {
             tools = tools.with(crate::notes::tools(&self.stores()?));
+        }
+        // `recall` searches the AletheiaDB store, so it needs one (ADR 0047).
+        #[cfg(feature = "aletheia")]
+        if config.memory.enabled
+            && let Some(aletheia) = &self.aletheia
+        {
+            tools = tools.with(vec![crate::recall::tool(aletheia, config.owner.as_str())]);
         }
         Ok(tools)
     }
@@ -319,11 +330,16 @@ impl Kit {
                 None
             };
         // The configured block sizes, for new scopes and the stored ones.
+        let limits = [
+            ("memory", config.memory.memory_chars),
+            ("user", config.memory.user_chars),
+        ];
         if let Some(stores) = &stores {
-            stores.set_limits(&[
-                ("memory", config.memory.memory_chars),
-                ("user", config.memory.user_chars),
-            ])?;
+            stores.set_limits(&limits)?;
+        }
+        #[cfg(feature = "aletheia")]
+        if let Some(aletheia) = &self.aletheia {
+            aletheia.set_limits_soon(&limits);
         }
         let delivery = config
             .brief
@@ -352,9 +368,17 @@ impl Kit {
         refuse_left_out(config)?;
         #[cfg(any(feature = "heartbeat", feature = "reflection"))]
         let precheck = self.precheck(config, stores.as_ref());
-        let memory = stores
-            .filter(|_| config.memory.enabled)
-            .map(|stores| (stores, db.as_path()));
+        #[cfg(feature = "aletheia")]
+        let aletheia = self.aletheia.clone();
+        let memory = stores.filter(|_| config.memory.enabled).map(|stores| {
+            // AletheiaDB holds the blocks and the log when it opened at
+            // start (ADR 0047).
+            #[cfg(feature = "aletheia")]
+            if let Some(aletheia) = aletheia {
+                return (crate::memory::Stores::Aletheia(aletheia), db.as_path());
+            }
+            (crate::memory::Stores::Sqlite(stores), db.as_path())
+        });
         let model = Arc::clone(&self.model);
         // The assistant can read what this load of the config turned on.
         #[cfg(feature = "self-debug")]

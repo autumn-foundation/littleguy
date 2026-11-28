@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use autumn_harvest_agent::{
     AgentModel, ChatMessage, ChatRequest, ChatRole, ContentPart, ErrorKind, StopReason,
 };
-use littleguy_models::{ClaudeModel, OpenAiModel, Provider};
+use littleguy_core::embed::Embedder;
+use littleguy_models::{ClaudeModel, OpenAiEmbedder, OpenAiModel, Provider};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -424,5 +425,73 @@ async fn openrouter_streams_each_text_delta_and_returns_the_message() -> TestRes
         return Err("an error status gave a reply".into());
     };
     assert_eq!(failure.kind(), ErrorKind::Authentication);
+    Ok(())
+}
+
+/// The base URL of the test server, from its messages endpoint.
+fn base(endpoint: &str) -> String {
+    endpoint.trim_end_matches("/messages").to_owned()
+}
+
+#[tokio::test]
+async fn the_embedder_sends_the_texts_and_reads_a_vector_for_each() -> TestResult {
+    let answer = json!({ "data": [
+        { "index": 0, "embedding": [1.0, 0.0] },
+        { "index": 1, "embedding": [0.0, 1.0] },
+    ]});
+    let (endpoint, log) = serve(vec![Canned::json(200, &answer)]).await?;
+    let embedder = OpenAiEmbedder::new(
+        base(&endpoint),
+        "text-embedding-3-small",
+        2,
+        Some("sk-test".to_owned()),
+    );
+    let texts = vec!["tea".to_owned(), "coffee".to_owned()];
+    let vectors = embedder.embed(&texts).await?;
+    assert_eq!(vectors, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+    let seen = seen(&log)?;
+    assert!(seen[0].head.starts_with("POST /v1/embeddings "));
+    assert_eq!(
+        seen[0].header("authorization").as_deref(),
+        Some("Bearer sk-test")
+    );
+    assert_eq!(seen[0].body["model"], json!("text-embedding-3-small"));
+    assert_eq!(seen[0].body["input"], json!(["tea", "coffee"]));
+    assert!(seen[0].body.get("dimensions").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_embedder_sends_no_token_to_a_local_server() -> TestResult {
+    let answer = json!({ "data": [{ "index": 0, "embedding": [1.0] }] });
+    let (endpoint, log) = serve(vec![Canned::json(200, &answer)]).await?;
+    let embedder = OpenAiEmbedder::new(base(&endpoint), "nomic-embed-text", 1, None);
+    embedder.embed(&["tea".to_owned()]).await?;
+    assert_eq!(seen(&log)?[0].header("authorization"), None);
+    // No text needs no request.
+    assert_eq!(embedder.embed(&[]).await?, Vec::<Vec<f32>>::new());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_embeddings_error_maps_to_its_kind() -> TestResult {
+    let (endpoint, _log) = serve(vec![
+        Canned::json(401, &json!({ "error": "no" })),
+        Canned {
+            status: 200,
+            content_type: "text/plain",
+            body: "not json".to_owned(),
+        },
+    ])
+    .await?;
+    let embedder = OpenAiEmbedder::new(base(&endpoint), "m", 1, None);
+    let texts = vec!["tea".to_owned()];
+    let auth = embedder.embed(&texts).await.err().map(|e| e.kind());
+    assert_eq!(auth, Some(ErrorKind::Authentication));
+    let decode = embedder.embed(&texts).await.err().map(|e| e.kind());
+    assert_eq!(decode, Some(ErrorKind::Decode));
+    let gone = OpenAiEmbedder::new("http://127.0.0.1:9", "m", 1, None);
+    let transport = gone.embed(&texts).await.err().map(|e| e.kind());
+    assert_eq!(transport, Some(ErrorKind::Transport));
     Ok(())
 }

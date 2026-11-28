@@ -119,7 +119,9 @@
 //! The `[memory]` section is optional. The assistant keeps notes across
 //! runs by default. Each night a consolidation pass turns its recent answers
 //! into facts in those notes. `consolidate` is a cron expression in
-//! `timezone`. Set `enabled = false` to keep no notes.
+//! `timezone`. Set `enabled = false` to keep no notes. `backend` picks the
+//! store, `aletheia` or `sqlite` (ADR 0047). `[memory.embeddings]` names an
+//! endpoint of the OpenAI embeddings API for the `recall` tool.
 //!
 //! The `[brief]` section turns on a morning brief. At each `schedule` slot,
 //! in `timezone`, the assistant writes a short brief. It sends the brief as
@@ -324,6 +326,9 @@ pub enum ConfigError {
     /// A consolidation pass may write no token.
     #[error("memory.pass_tokens must be at least 1")]
     PassTokens,
+    /// The embeddings section does not work.
+    #[error("memory.embeddings.{0}")]
+    Embeddings(&'static str),
     /// The heartbeat interval is zero.
     #[error("heartbeat.every_minutes must be at least 1")]
     HeartbeatEvery,
@@ -815,7 +820,43 @@ pub struct MemoryConfig {
     /// fixed cap of the engine, which a model that reasons fills before it
     /// writes the reply (ADR 0034).
     pub pass_tokens: Option<u32>,
+    /// The store of the blocks and the episode log (ADR 0047). `None` takes
+    /// the default of the build: AletheiaDB with the `aletheia` feature,
+    /// SQLite without it.
+    pub backend: Option<MemoryBackend>,
+    /// The endpoint that embeds facts, episodes and queries. `None` runs
+    /// the local hashing embedder.
+    pub embeddings: Option<EmbeddingsConfig>,
 }
+
+/// The store of the memory blocks and the episode log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryBackend {
+    /// `memory.db`, as before ADR 0047.
+    Sqlite,
+    /// The AletheiaDB directory `memory.aletheia` (ADR 0047).
+    Aletheia,
+}
+
+/// An endpoint that speaks the OpenAI `/v1/embeddings` API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingsConfig {
+    /// The base URL, for example `https://api.openai.com/v1`. The client
+    /// posts to `<url>/embeddings`.
+    pub url: String,
+    /// The model name, for example `text-embedding-3-small`.
+    pub model: String,
+    /// The length of each vector that the model returns.
+    pub dimensions: u32,
+    /// The house key that holds the bearer token. `None` sends no token,
+    /// for a local server such as Ollama.
+    pub key_env: Option<String>,
+}
+
+/// The most dimensions that an embedding may have. The vector index of
+/// AletheiaDB takes no more.
+pub const MAX_EMBEDDING_DIMENSIONS: u32 = 65_536;
 
 /// The default size of the `memory` block. The engine default is 2 200,
 /// which fills in a day.
@@ -839,6 +880,8 @@ impl Default for MemoryConfig {
             user_chars: DEFAULT_USER_CHARS,
             pass_episodes: DEFAULT_PASS_EPISODES,
             pass_tokens: None,
+            backend: None,
+            embeddings: None,
         }
     }
 }
@@ -854,6 +897,52 @@ struct RawMemory {
     user_chars: Option<usize>,
     pass_episodes: Option<u32>,
     pass_tokens: Option<u32>,
+    backend: Option<MemoryBackend>,
+    embeddings: Option<RawEmbeddings>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEmbeddings {
+    url: String,
+    model: String,
+    dimensions: u32,
+    key_env: Option<String>,
+}
+
+/// Checks the embeddings section. A token goes only over https, or over
+/// http to this machine.
+fn embeddings(raw: RawEmbeddings) -> Result<EmbeddingsConfig, ConfigError> {
+    let url = raw.url.trim().trim_end_matches('/').to_owned();
+    if !safe_mcp_url(&url) {
+        return Err(ConfigError::Embeddings(
+            "url must be https, or http to localhost",
+        ));
+    }
+    let model = raw.model.trim().to_owned();
+    if model.is_empty() {
+        return Err(ConfigError::Embeddings("model must not be empty"));
+    }
+    if !(1..=MAX_EMBEDDING_DIMENSIONS).contains(&raw.dimensions) {
+        return Err(ConfigError::Embeddings(
+            "dimensions must be from 1 to 65536",
+        ));
+    }
+    let key_env = match raw.key_env {
+        None => None,
+        Some(name) if crate::house_keys::is_sealable(&name) => Some(name),
+        Some(_) => {
+            return Err(ConfigError::Embeddings(
+                "key_env must be a variable name such as OPENAI_API_KEY",
+            ));
+        }
+    };
+    Ok(EmbeddingsConfig {
+        url,
+        model,
+        dimensions: raw.dimensions,
+        key_env,
+    })
 }
 
 /// Checks the memory section. The engine checks each cron field and the
@@ -886,6 +975,8 @@ fn memory(raw: RawMemory) -> Result<MemoryConfig, ConfigError> {
             Some(0) => return Err(ConfigError::PassTokens),
             cap => cap,
         },
+        backend: raw.backend,
+        embeddings: raw.embeddings.map(embeddings).transpose()?,
     })
 }
 
@@ -2938,6 +3029,8 @@ mod tests {
                 user_chars: DEFAULT_USER_CHARS,
                 pass_episodes: DEFAULT_PASS_EPISODES,
                 pass_tokens: None,
+                backend: None,
+                embeddings: None,
             }
         );
         let batch = Config::parse("owner = \"mark\"\n[memory]\npass_episodes = 50").unwrap();
@@ -2966,6 +3059,56 @@ mod tests {
             .unwrap()
             .memory;
         assert_eq!(huge.memory_chars, 4_000_000);
+    }
+
+    #[test]
+    fn the_memory_backend_and_embeddings_parse() {
+        let plain = Config::parse("owner = \"mark\"").unwrap().memory;
+        assert_eq!(plain.backend, None);
+        assert_eq!(plain.embeddings, None);
+        let config = Config::parse(
+            "owner = \"mark\"\n[memory]\nbackend = \"sqlite\"\n[memory.embeddings]\n\
+             url = \"https://api.openai.com/v1/\"\nmodel = \" text-embedding-3-small \"\n\
+             dimensions = 1536\nkey_env = \"OPENAI_API_KEY\"",
+        )
+        .unwrap()
+        .memory;
+        assert_eq!(config.backend, Some(MemoryBackend::Sqlite));
+        let embeddings = config.embeddings.unwrap();
+        assert_eq!(embeddings.url, "https://api.openai.com/v1");
+        assert_eq!(embeddings.model, "text-embedding-3-small");
+        assert_eq!(embeddings.dimensions, 1536);
+        assert_eq!(embeddings.key_env.as_deref(), Some("OPENAI_API_KEY"));
+        let local = Config::parse(
+            "owner = \"mark\"\n[memory]\nbackend = \"aletheia\"\n[memory.embeddings]\n\
+             url = \"http://localhost:11434/v1\"\nmodel = \"nomic-embed-text\"\ndimensions = 768",
+        )
+        .unwrap()
+        .memory;
+        assert_eq!(local.backend, Some(MemoryBackend::Aletheia));
+        assert_eq!(local.embeddings.unwrap().key_env, None);
+    }
+
+    #[test]
+    fn a_bad_embeddings_section_is_refused() {
+        let parse = |section: &str| {
+            Config::parse(&format!("owner = \"mark\"\n[memory.embeddings]\n{section}"))
+        };
+        let good = "model = \"m\"\ndimensions = 8";
+        for bad in [
+            format!("url = \"http://example.com/v1\"\n{good}"),
+            format!("url = \"ftp://localhost\"\n{good}"),
+            "url = \"https://e.com\"\nmodel = \" \"\ndimensions = 8".to_owned(),
+            "url = \"https://e.com\"\nmodel = \"m\"\ndimensions = 0".to_owned(),
+            "url = \"https://e.com\"\nmodel = \"m\"\ndimensions = 70000".to_owned(),
+            format!("url = \"https://e.com\"\n{good}\nkey_env = \"lower\""),
+        ] {
+            assert!(
+                matches!(parse(&bad), Err(ConfigError::Embeddings(_))),
+                "{bad} must fail"
+            );
+        }
+        assert!(Config::parse("owner = \"mark\"\n[memory]\nbackend = \"redis\"").is_err());
     }
 
     #[test]

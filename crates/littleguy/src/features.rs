@@ -23,7 +23,7 @@ pub struct Feature {
 
 /// Every feature of `lg` that turns an integration on, in the order of
 /// `Cargo.toml`.
-pub const ALL: [Feature; 30] = [
+pub const ALL: [Feature; 31] = [
     Feature {
         name: "discord",
         on: cfg!(feature = "discord"),
@@ -63,6 +63,10 @@ pub const ALL: [Feature; 30] = [
     Feature {
         name: "history",
         on: cfg!(feature = "history"),
+    },
+    Feature {
+        name: "aletheia",
+        on: cfg!(feature = "aletheia"),
     },
     Feature {
         name: "refine",
@@ -164,6 +168,17 @@ pub fn missing(what: &str, feature: &str) -> String {
 ///
 /// Returns an error that names each section and its missing feature.
 pub fn check(config: &Config) -> Result<()> {
+    // `[fleet]` replicates one SQLite file. The AletheiaDB directory waits
+    // for the database fleet of F2 (ADR 0047).
+    // With a fleet, the backend is AletheiaDB only when the config asks.
+    if config.fleet.is_some()
+        && crate::memory::backend(config) == littleguy_core::MemoryBackend::Aletheia
+    {
+        bail!(
+            "memory.backend = \"aletheia\" does not run with [fleet] yet: the fleet replicates \
+             one SQLite file. Set memory.backend = \"sqlite\", or remove [fleet]"
+        );
+    }
     let needs = [
         (!config.camel.is_empty(), "[[camel.route]]", "camel"),
         (config.san_mateo.is_some(), "[san_mateo]", "oauth"),
@@ -188,6 +203,21 @@ pub fn check(config: &Config) -> Result<()> {
         (config.compaction.is_some(), "[compaction]", "compaction"),
         (config.research.is_some(), "[research]", "research"),
         (config.fleet.is_some(), "[fleet]", "fleet"),
+        (
+            config.memory.backend == Some(littleguy_core::MemoryBackend::Aletheia),
+            "memory.backend = \"aletheia\"",
+            "aletheia",
+        ),
+        (
+            config.memory.embeddings.is_some(),
+            "[memory.embeddings]",
+            "aletheia",
+        ),
+        (
+            config.memory.embeddings.is_some(),
+            "[memory.embeddings]",
+            "openai",
+        ),
     ];
     let problems: Vec<String> = needs
         .into_iter()
@@ -303,6 +333,11 @@ mod tests {
                 "[[camel.route]]",
                 "camel",
             ),
+            (
+                "owner = \"mark\"\n[memory]\nbackend = \"aletheia\"",
+                "memory.backend",
+                "aletheia",
+            ),
         ];
         for (text, section, feature) in cases {
             let result = check(&parse(text));
@@ -314,6 +349,46 @@ mod tests {
                 assert!(error.contains(&format!("`{feature}`")), "{error}");
             }
         }
+    }
+
+    #[test]
+    fn embeddings_need_aletheia_and_openai() {
+        let config = parse(
+            "owner = \"mark\"\n[memory.embeddings]\nurl = \"https://e.com/v1\"\nmodel = \"m\"\ndimensions = 8",
+        );
+        let result = check(&config);
+        if has("aletheia") && has("openai") {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("[memory.embeddings]"), "{error}");
+        }
+    }
+
+    #[test]
+    fn aletheia_memory_does_not_run_on_a_fleet_yet() {
+        let config = parse(
+            "owner = \"mark\"\n[memory]\nbackend = \"aletheia\"\n[fleet.replica]\npath = \"/tmp/replica\"",
+        );
+        let error = check(&config).unwrap_err().to_string();
+        assert!(error.contains("memory.backend"), "{error}");
+        // A fleet with no backend keeps the memory in its tenant database.
+        let plain = parse("owner = \"mark\"\n[fleet.replica]\npath = \"/tmp/replica\"");
+        assert_eq!(
+            crate::memory::backend(&plain),
+            littleguy_core::MemoryBackend::Sqlite
+        );
+    }
+
+    #[test]
+    fn the_default_backend_follows_the_build() {
+        let config = Config::for_owner(OwnerName::new("mark").unwrap());
+        let expected = if has("aletheia") {
+            littleguy_core::MemoryBackend::Aletheia
+        } else {
+            littleguy_core::MemoryBackend::Sqlite
+        };
+        assert_eq!(crate::memory::backend(&config), expected);
     }
 
     #[test]

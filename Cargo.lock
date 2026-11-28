@@ -135,6 +135,7 @@ dependencies = [
  "rand 0.8.8",
  "rayon",
  "redb",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "sha2 0.11.1",
@@ -580,9 +581,9 @@ dependencies = [
 
 [[package]]
 name = "autumn-plugin-aletheiadb"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bd497658ee73786bb458a2c15053fb54607775e7758d3cced9b1fbb1eae5140"
+checksum = "980f9945a69972d03457a5f073fc6edfafdc2e2b9e8ecab47d9a8a70ccb8b8c4"
 dependencies = [
  "aletheiadb",
  "autumn-web 0.11.0",
@@ -591,6 +592,7 @@ dependencies = [
  "http",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "toml 1.2.1+spec-1.1.0",

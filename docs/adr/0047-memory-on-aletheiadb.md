@@ -35,10 +35,19 @@ reopened directory also failed to build its vector index, so 0.1.1 adds
 
 AletheiaDB has three limits that shape the layout:
 
-- One node keeps at most 1 000 versions. An update in place adds one.
+- One node keeps at most 1 000 versions by default. An update in place
+  adds one.
 - One transaction holds at most 50 000 operations.
-- Its as-of vector search needs a temporal vector index. That index takes
-  snapshots, and a rebuild at a reopen skips it.
+- Its as-of vector search needs a temporal vector index. That index keeps
+  its snapshots in process memory, so a reopen starts it empty, and it does
+  not fill from the history (autumn-foundation/AletheiaDB#3888).
+
+The plugin 0.2.0 exposes every engine setting in `[aletheiadb.database]`,
+the version cap included, and the temporal vector index in
+`[aletheiadb.temporal_vector]`. The store keeps the engine defaults: a node
+per version bounds the history of each node whatever the cap, the way a
+durable workflow continues as new. The temporal vector index waits for
+#3888.
 
 ## Decision
 
